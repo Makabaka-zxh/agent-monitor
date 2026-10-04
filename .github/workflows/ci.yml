@@ -62,6 +62,10 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          # The retired "tools" package in the action default is no longer distributed.
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: false
       - name: Install the required SDK platform and build tools
         shell: pwsh
         run: |
