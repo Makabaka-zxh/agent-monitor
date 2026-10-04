@@ -1,0 +1,29 @@
+name: 问题反馈
+description: 报告可复现的问题，请勿包含个人数据或凭据。
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Monitor 版本
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 平台与系统版本
+      description: 例如 Android 16 / 小米；不要填写设备序列号。
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 脱敏截图或诊断
+      description: 删除账号、密钥、服务地址和任务内容；不要上传数据库或完整日志。

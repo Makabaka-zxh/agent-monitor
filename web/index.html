@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN" data-ui-version="19">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+  <meta name="theme-color" content="#eef2f3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151c22" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Monitor">
+  <meta name="description" content="查看多台电脑上的 Codex 与 Claude Code 工作状态。">
+  <title>Agent Monitor</title>
+  <link rel="icon" href="/assets/app-icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/assets/misans.css">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/features.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell" id="app">
+    <div id="connection" class="connection" role="status" aria-live="polite" hidden></div>
+    <div id="notice" class="notice" role="alert" hidden></div>
+    <header id="header" class="page-header"></header>
+    <main id="main" tabindex="-1"><div class="empty"><span class="spinner" aria-hidden="true"></span><h1>正在连接</h1></div></main>
+    <nav id="navigation" class="navigation glass" aria-label="主要导航" hidden></nav>
+  </div>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button value="cancel" class="button secondary">取消</button><button value="confirm" class="button danger" id="confirm-action">确认</button></div></form>
+  </dialog>
+  <dialog id="help-dialog" aria-labelledby="help-title" aria-describedby="help-content">
+    <h2 id="help-title"></h2>
+    <div id="help-content"></div>
+    <button type="button" class="button secondary full" data-action="close-help" autofocus>知道了</button>
+  </dialog>
+  <noscript><p class="noscript">请开启浏览器的 JavaScript，以连接并查看电脑状态。</p></noscript>
+</body>
+</html>

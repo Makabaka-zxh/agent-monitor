@@ -1,0 +1,7 @@
+-c requirements-tested.txt
+fastapi==0.141.1
+uvicorn==0.52.4
+pillow==12.3.0
+qrcode[pil]==8.2
+google-auth>=2.40,<3
+requests>=2.32.4,<3

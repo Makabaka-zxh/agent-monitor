@@ -1,0 +1,26 @@
+<resources>
+    <!-- Scoped to NumberPicker construction; the app theme remains unchanged. -->
+    <style name="TrackingWheelLight" parent="android:style/Theme.Material.Light">
+        <item name="android:fontFamily">@font/misans_regular</item>
+        <item name="android:editTextStyle">@style/TrackingWheelInputLight</item>
+        <item name="android:colorAccent">#355F58</item>
+        <item name="android:textColorPrimary">#25343B</item>
+        <item name="android:colorControlNormal">#DFE7E8</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+    <style name="TrackingWheelDark" parent="android:style/Theme.Material">
+        <item name="android:fontFamily">@font/misans_regular</item>
+        <item name="android:editTextStyle">@style/TrackingWheelInputDark</item>
+        <item name="android:colorAccent">#A5D2C7</item>
+        <item name="android:textColorPrimary">#F0F4F3</item>
+        <item name="android:colorControlNormal">#374348</item>
+    </style>
+    <style name="TrackingWheelInputLight" parent="android:style/Widget.Material.Light.EditText">
+        <item name="android:fontFamily">@font/misans_regular</item>
+        <item name="android:textStyle">normal</item>
+    </style>
+    <style name="TrackingWheelInputDark" parent="android:style/Widget.Material.EditText">
+        <item name="android:fontFamily">@font/misans_regular</item>
+        <item name="android:textStyle">normal</item>
+    </style>
+</resources>

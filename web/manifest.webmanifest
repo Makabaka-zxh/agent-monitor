@@ -1,0 +1,18 @@
+{
+  "id": "/",
+  "name": "Agent Monitor",
+  "short_name": "Monitor",
+  "description": "多台电脑的 Codex 与 Claude Code 工作状态",
+  "start_url": "/#/tasks",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "lang": "zh-CN",
+  "theme_color": "#eef2f3",
+  "background_color": "#eef2f3",
+  "icons": [
+    {"src": "/assets/app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/assets/app-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/assets/app-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}

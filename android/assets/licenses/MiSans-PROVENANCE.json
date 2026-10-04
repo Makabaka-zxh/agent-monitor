@@ -1,0 +1,25 @@
+{
+  "official_page": "https://hyperos.mi.com/font/zh/download/",
+  "archive_url": "https://hyperos.mi.com/font-download/MiSans.zip",
+  "archive_bytes": 227880072,
+  "license_url": "https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf",
+  "license_file": "MiSans-License.pdf",
+  "license_bytes": 79535,
+  "fonts": [
+    {
+      "file": "MiSans-Regular.ttf",
+      "bytes": 8122324,
+      "sha256": "9c120f0a849bc0aa5048daae2a3c0f6eecd828b5b33fce682a9622833f5feea6",
+      "sfnt": "00010000",
+      "variable": false
+    },
+    {
+      "file": "MiSansVF.ttf",
+      "bytes": 20093424,
+      "sha256": "0ddef90648998900175cfdca9a6f087a2544c182f130b0ad4f7e94a03a115e79",
+      "sfnt": "00010000",
+      "variable": true
+    }
+  ],
+  "extraction": "Byte-for-byte ZIP member extraction; no conversion, subsetting or font edits."
+}

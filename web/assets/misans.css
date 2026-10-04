@@ -1,0 +1,10 @@
+/* MiSans by Xiaomi. Original font, unmodified.
+   Source: https://hyperos.mi.com/font/zh/download/
+   License: /assets/fonts/MiSans-License.pdf */
+@font-face {
+  font-family: MiSans;
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/assets/fonts/MiSans-Regular.ttf') format('truetype');
+}

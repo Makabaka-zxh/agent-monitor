@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+  <!-- SPDX-License-Identifier: MIT. Monitor original generic identifier; not an official Codex logo. -->
+  <rect x="5" y="5" width="86" height="86" rx="24" fill="#E3EEE7"/>
+  <polygon points="27,28 46,47 27,66 20,59 32,47 20,35" fill="#3F6555"/>
+  <rect x="48" y="59" width="25" height="9" rx="0" fill="#3F6555"/>
+</svg>
