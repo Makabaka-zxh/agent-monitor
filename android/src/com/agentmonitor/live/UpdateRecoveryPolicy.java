@@ -2,6 +2,7 @@ package com.agentmonitor.live;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 
 /** Saved-instance hints only. A restored candidate is never a verified package. */
 final class UpdateRecoveryPolicy {
@@ -24,7 +25,11 @@ final class UpdateRecoveryPolicy {
             throw new IOException("安装包大小或位置无效");
         File directory = new File(cacheDir.getCanonicalFile(), "updates");
         File expected = new File(directory, candidate.getName());
-        if (!directory.equals(directory.getCanonicalFile()) || !expected.equals(expected.getCanonicalFile())
+        // Windows canonical paths may retain symlink spelling. Check the child
+        // entries explicitly; the system-provided cache root may itself be an alias.
+        if (Files.isSymbolicLink(directory.toPath()) || Files.isSymbolicLink(expected.toPath())
+                || Files.isSymbolicLink(candidate.toPath())
+                || !directory.equals(directory.getCanonicalFile()) || !expected.equals(expected.getCanonicalFile())
                 || !expected.equals(candidate.getCanonicalFile())) throw new IOException("安装包大小或位置无效");
         return expected;
     }
@@ -51,12 +56,7 @@ final class UpdateRecoveryPolicy {
                     manifest.sha256, Long.toString(manifest.size)};
         }
         File file(File cacheDir) throws IOException {
-            File directory = new File(cacheDir.getCanonicalFile(), "updates");
-            File file = new File(directory, basename);
-            // Neither a saved path nor a symlink may redirect restore/cleanup outside our fixed cache location.
-            if (!directory.equals(directory.getCanonicalFile()) || !file.equals(file.getCanonicalFile()))
-                throw new IOException("安装包大小或位置无效");
-            return file;
+            return scopedFile(cacheDir, new File(new File(cacheDir, "updates"), basename));
         }
         void discard(File cacheDir) { try { File file = file(cacheDir); if (file.isFile()) file.delete(); } catch (IOException | RuntimeException ignored) { } }
     }

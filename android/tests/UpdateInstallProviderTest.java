@@ -84,15 +84,36 @@ public final class UpdateInstallProviderTest {
         File target = file(root, "update-target.apk");
         Path link = new File(updates, "update-link.apk").toPath();
         if (link(link, target.toPath())) {
-            try { check(!UpdateInstallProvider.discardUnshared(context, link.toFile()) && target.isFile() && Files.isSymbolicLink(link), "file symlink redirect is not followed or deleted"); }
-            finally { Files.delete(link); }
+            try {
+                check(!UpdateInstallProvider.discardUnshared(context, link.toFile()) && target.isFile() && Files.isSymbolicLink(link), "file symlink redirect is not followed or deleted");
+                rejectedCandidate(cache, link.getFileName().toString());
+            } finally { Files.deleteIfExists(link); }
         }
         File linkedCache = new File(root, "linked-cache"); check(linkedCache.mkdir(), "owned redirected-cache fixture created");
         Path linkedUpdates = new File(linkedCache, "updates").toPath();
         if (link(linkedUpdates, root.toPath())) {
-            try { check(!UpdateInstallProvider.discardUnshared(new Context(linkedCache), new File(linkedUpdates.toFile(), target.getName())) && target.isFile(), "updates directory symlink cannot redirect cleanup outside fixed cache"); }
-            finally { Files.delete(linkedUpdates); }
+            try {
+                check(!UpdateInstallProvider.discardUnshared(new Context(linkedCache), new File(linkedUpdates.toFile(), target.getName())) && target.isFile() && Files.isSymbolicLink(linkedUpdates), "updates directory symlink cannot redirect cleanup outside fixed cache");
+                rejectedCandidate(linkedCache, target.getName());
+            } finally { Files.deleteIfExists(linkedUpdates); }
         }
+        Path cacheAlias = new File(root, "cache-alias").toPath();
+        if (link(cacheAlias, cache.toPath())) {
+            File regular = candidate();
+            try {
+                check(UpdateInstallProvider.discardUnshared(new Context(cacheAlias.toFile()),
+                        new File(new File(cacheAlias.toFile(), "updates"), regular.getName()))
+                        && !regular.exists() && Files.isSymbolicLink(cacheAlias), "system cache-root alias remains usable without deleting the alias");
+            } finally { Files.deleteIfExists(cacheAlias); }
+        }
+    }
+    private static void rejectedCandidate(File cache, String basename) throws Exception {
+        UpdatePolicy.Manifest manifest = new UpdatePolicy.Manifest(1, UpdatePolicy.PACKAGE_NAME, "1.0.2", 31, 26,
+                "monitor-1.0.2.apk", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 3);
+        UpdateRecoveryPolicy.Candidate candidate = UpdateRecoveryPolicy.capture(basename, manifest, 1);
+        boolean rejected = false;
+        try { candidate.file(cache); } catch (IOException expected) { rejected = true; }
+        check(rejected, "saved candidate restore shares the same symlink rejection as provider cleanup");
     }
     private static boolean link(Path link, Path target) throws Exception {
         try { Files.createSymbolicLink(link, target); return true; }
