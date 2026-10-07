@@ -5,6 +5,7 @@ import re
 
 from fastapi import HTTPException, Request
 from pydantic import Field
+from .request_diagnostics import mark_request_phase
 
 # Share the browser API's validated inputs and Store operations. Imported only
 # once create_app has finished defining these models, avoiding a second policy.
@@ -21,11 +22,15 @@ class NativePreferences(Preferences):
 
 def install_workspace_routes(app, access, store, bearer, reader_gate, same_origin, google_enabled):
     def perform(request, operation, *, write=False):
-        reader_gate(request)
-        # A bearer is never inferred from browser cookies. Cross-origin browser
-        # submissions also fail, even if their caller knows a native credential.
-        same_origin(request)
-        return access.workspace(bearer(request), operation, write=write)
+        mark_request_phase("handler_start")
+        try:
+            reader_gate(request)
+            # A bearer is never inferred from browser cookies. Cross-origin browser
+            # submissions also fail, even if their caller knows a native credential.
+            same_origin(request)
+            return access.workspace(bearer(request), operation, write=write)
+        finally:
+            mark_request_phase("handler_end")
 
     from .task_results import install_result_routes
     from .task_replies import install_reply_routes
@@ -39,7 +44,12 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
         return value
 
     def workbench(reader):
-        snapshot = app.state.usage.enrich(store.snapshot())
+        mark_request_phase("snapshot_start")
+        snapshot = store.snapshot()
+        mark_request_phase("snapshot_end")
+        mark_request_phase("usage_start")
+        snapshot = app.state.usage.enrich(snapshot)
+        mark_request_phase("usage_end")
         names = {device["id"]: device["name"] for device in snapshot["devices"]}
         for task in snapshot["tasks"]:
             task["device_name"] = names.get(task["device_id"], "电脑")
@@ -74,7 +84,12 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
 
     @app.get("/api/native/usage")
     def read_usage(request: Request):
-        return perform(request, lambda reader: app.state.usage.detail_summary())
+        def summary(reader):
+            mark_request_phase("usage_start")
+            result = app.state.usage.detail_summary()
+            mark_request_phase("usage_end")
+            return result
+        return perform(request, summary)
 
     @app.get("/api/native/profile")
     def read_profile(request: Request):

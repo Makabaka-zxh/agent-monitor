@@ -262,6 +262,8 @@ $updateTestsDirectory = Join-Path $buildDirectory 'update-policy-tests'
 New-Item -ItemType Directory -Force -Path $updateTestsDirectory | Out-Null
 Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', $updateTestsDirectory, (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdatePolicy.java'), (Join-Path $projectDirectory 'tests/UpdatePolicyTest.java'))
 Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $updateTestsDirectory, 'com.agentmonitor.live.UpdatePolicyTest')
+Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', $updateTestsDirectory, (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdatePolicy.java'), (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdateRecoveryPolicy.java'), (Join-Path $projectDirectory 'tests/UpdateRecoveryPolicyTest.java'))
+Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $updateTestsDirectory, 'com.agentmonitor.live.UpdateRecoveryPolicyTest', $updateTestsDirectory)
 
 # Origin configuration uses the same pure policy as native navigation.
 $originTestsDirectory = Join-Path $buildDirectory 'server-origin-tests'

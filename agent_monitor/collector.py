@@ -11,6 +11,7 @@ import heapq
 import json
 import os
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -115,35 +116,54 @@ def _recent_files(base: Path, limit: int, *, claude: bool = False) -> tuple[list
     candidates: list[tuple[float, str, Path]] = []
     discovered = 0
     capped = False
-    if not base.is_dir():
-        return [], 0, False
-    # No symlink traversal; do not wander into linked projects or auth stores.
-    for directory, dirs, names in os.walk(base, followlinks=False):
-        dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
-        if claude:
-            # Only projects/<project>/<session>.jsonl, excluding subagents.
-            if Path(directory) != base:
-                dirs[:] = []
-        for name in names:
-            if not name.endswith(".jsonl"):
+    directories = [base]
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    # Keep DirEntry metadata for this traversal only. Recreating Paths and
+    # asking is_symlink/is_file/stat per file discards scandir's cached Windows
+    # metadata. No cross-poll cache: appends, removals and lifecycle expiry must
+    # still be observed on every collection.
+    while directories and not capped:
+        directory = directories.pop()
+        children = []
+        try:
+            # A directory may have become a link since it was queued. Never
+            # enter symlinks or Windows junctions/other reparse points.
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse:
                 continue
-            path = Path(directory) / name
-            try:
-                if path.is_symlink() or not path.is_file():
-                    continue
-                item = (path.stat().st_mtime, str(path), path)
-            except OSError:
-                continue
-            discovered += 1
-            if limit and len(candidates) < limit:
-                heapq.heappush(candidates, item)
-            elif limit and item > candidates[0]:
-                heapq.heapreplace(candidates, item)
-            if discovered >= MAX_DISCOVERED_FILES:
-                capped = True
-                break
-        if capped:
-            break
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            # Only projects/<project>/<session>.jsonl for Claude.
+                            if not claude or directory == base:
+                                info = entry.stat(follow_symlinks=False)
+                                if not getattr(info, "st_file_attributes", 0) & reparse:
+                                    children.append(Path(entry.path))
+                            continue
+                        if not entry.name.endswith(".jsonl"):
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                        if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse:
+                            continue
+                        path = Path(entry.path)
+                        item = (info.st_mtime, str(path), path)
+                    except OSError:
+                        continue
+                    discovered += 1
+                    if limit and len(candidates) < limit:
+                        heapq.heappush(candidates, item)
+                    elif limit and item > candidates[0]:
+                        heapq.heapreplace(candidates, item)
+                    if discovered >= MAX_DISCOVERED_FILES:
+                        capped = True
+                        break
+        except OSError:
+            # One inaccessible/removed directory must not hide its siblings.
+            pass
+        directories.extend(reversed(children))
     return [item[2] for item in sorted(candidates, reverse=True)], discovered, capped
 
 

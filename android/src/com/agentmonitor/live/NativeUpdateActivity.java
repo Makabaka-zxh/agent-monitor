@@ -35,6 +35,7 @@ public final class NativeUpdateActivity extends Activity {
     private UpdatePackage.Installed installed;
     private UpdateClient.Release release;
     private UpdatePackage.Verified ready;
+    private UpdateRecoveryPolicy.Candidate candidate;
     private UpdateClient.Operation operation;
     private State state = State.IDLE;
     private String message = "检查 GitHub 上的最新正式版本。";
@@ -61,6 +62,11 @@ public final class NativeUpdateActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1)); setContentView(root); root.requestApplyInsets();
         try { installed = UpdatePackage.installed(this); }
         catch (Exception unavailable) { state = State.ERROR; message = "无法读取当前版本，请重新打开页面。"; }
+        if (saved != null) {
+            try { candidate = UpdateRecoveryPolicy.decode(saved.getStringArray("update_candidate")); }
+            catch (RuntimeException invalid) { candidate = null; }
+            if (candidate != null) awaitingPermission = candidate.awaitingPermission;
+        }
         Context app = getApplicationContext(); worker.execute(() -> UpdateInstallProvider.prune(app));
         render();
     }
@@ -152,13 +158,47 @@ public final class NativeUpdateActivity extends Activity {
                 NativeUpdateActivity page = current(target, id);
                 if (page == null) { if (result != null) result.file.delete(); return; }
                 page.operation = null; page.ready = result; page.state = result == null ? State.ERROR : State.READY;
+                if (result != null) page.candidate = UpdateRecoveryPolicy.capture(result.file.getName(), result.manifest, System.currentTimeMillis());
                 page.message = result == null ? problem : "下载完成，文件和应用签名已校验。"; page.render();
             });
         });
     }
     private boolean canInstall() { return Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls(); }
+    private void restoreCandidate() {
+        if (!resumed || installed == null || candidate == null || ready != null || busy()) return;
+        if (!candidate.fresh(System.currentTimeMillis())) {
+            discardReady(); state = State.ERROR; message = "下载的更新已过期，请重新检查。"; render(); return;
+        }
+        state = State.VERIFYING; message = "正在恢复并重新校验已下载的更新…";
+        UpdateClient.Operation task = start(45000); long id = generation;
+        Context app = getApplicationContext(); UpdateRecoveryPolicy.Candidate selected = candidate;
+        WeakReference<NativeUpdateActivity> target = new WeakReference<>(this); Handler delivery = main;
+        worker.execute(() -> {
+            UpdatePackage.Verified result = null; String error = null;
+            try { result = UpdatePackage.verify(app, selected.file(app.getCacheDir()), selected.manifest, task); }
+            catch (Exception failed) { error = failure(failed); } finally { task.close(); }
+            final UpdatePackage.Verified verified = result; final String problem = error;
+            delivery.post(() -> {
+                NativeUpdateActivity page = current(target, id); if (page == null) return;
+                page.operation = null;
+                if (verified == null) { page.discardReady(); page.state = State.ERROR; page.message = problem; }
+                else {
+                    page.ready = verified; page.state = State.READY;
+                    page.message = "版本 " + verified.manifest.versionName + " 已恢复并重新校验。"
+                            + (page.awaitingPermission ? page.canInstall() ? "已允许安装，请点安装更新继续。" : "安装权限尚未开启，可以稍后再试。"
+                            : "请点安装更新继续。");
+                    page.awaitingPermission = false;
+                }
+                // Restoring an Activity never launches the installer or the permission page.
+                page.render();
+            });
+        });
+    }
     private void install() {
         if (!resumed || ready == null || busy()) return;
+        if (candidate == null || !candidate.fresh(System.currentTimeMillis())) {
+            discardReady(); state = State.ERROR; message = "下载的更新已过期，请重新检查。"; render(); return;
+        }
         if (!canInstall()) {
             awaitingPermission = true;
             try { startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()))); }
@@ -204,11 +244,17 @@ public final class NativeUpdateActivity extends Activity {
         generation++; if (operation != null) { operation.close(); operation = null; }
     }
     private void cancelByUser() {
-        if (!busy()) return; cancelOperation(); state = ready != null ? State.READY : release != null ? State.AVAILABLE : State.IDLE;
+        if (!busy()) return; cancelOperation();
+        if (ready == null && candidate != null) discardReady();
+        state = ready != null ? State.READY : release != null ? State.AVAILABLE : State.IDLE;
         message = "操作已取消，可以随时重试。"; render();
     }
     private void discardReady() {
-        if (ready != null && !handedToInstaller) ready.file.delete(); ready = null; handedToInstaller = false;
+        if (!handedToInstaller) {
+            if (candidate != null) candidate.discard(getCacheDir());
+            else if (ready != null) ready.file.delete();
+        }
+        ready = null; candidate = null; handedToInstaller = false; awaitingPermission = false;
     }
     private static NativeUpdateActivity current(WeakReference<NativeUpdateActivity> reference, long id) {
         NativeUpdateActivity page = reference.get();
@@ -234,8 +280,15 @@ public final class NativeUpdateActivity extends Activity {
     private static String size(long bytes) { return String.format(java.util.Locale.ROOT, "%.1f MB", bytes / 1048576.0); }
     @Override protected void onResume() {
         super.onResume(); resumed = true;
+        if (candidate != null && ready == null && installed != null) { restoreCandidate(); return; }
         if (awaitingPermission) { awaitingPermission = false; message = canInstall() ? "已允许安装。请点安装更新继续。" : "安装权限尚未开启，可以稍后再试。"; }
         render();
+    }
+    @Override protected void onSaveInstanceState(Bundle saved) {
+        // Save completed candidate metadata even while a later verification is in flight.
+        // Do not save Verified objects, partial downloads, account state or installer grants.
+        if (candidate != null && !handedToInstaller && !isFinishing()) saved.putStringArray("update_candidate", candidate.encode(awaitingPermission));
+        super.onSaveInstanceState(saved);
     }
     @Override protected void onPause() {
         resumed = false;
@@ -243,7 +296,8 @@ public final class NativeUpdateActivity extends Activity {
         super.onPause();
     }
     @Override protected void onDestroy() {
-        resumed = false; cancelOperation(); worker.shutdownNow(); discardReady();
+        resumed = false; cancelOperation(); worker.shutdownNow();
+        if (isFinishing()) discardReady();
         // Worker callbacks hold only a WeakReference and dispose any late download themselves.
         content = null; progressView = null; ui = null; super.onDestroy();
     }

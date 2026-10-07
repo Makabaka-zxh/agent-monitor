@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import hashlib
 import subprocess
 import sys
@@ -9,9 +10,129 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_monitor import collector, claude_hook, install_claude_hooks
+
+
+class RecentFilesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+
+    def file(self, relative, modified):
+        path = self.base / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (modified, modified))
+        return path
+
+    def test_recent_fifty_sorted_by_mtime_and_path_and_zero_limit(self):
+        paths = [self.file(f"day/session-{index:03}.jsonl", 1000 + index // 2) for index in range(62)]
+        self.file("day/ignored.txt", 2000)
+        (self.base / "empty.jsonl").mkdir()
+        expected = sorted(paths, key=lambda path: (path.stat().st_mtime, str(path)), reverse=True)[:50]
+        self.assertEqual(collector._recent_files(self.base, 50), (expected, 62, False))
+        self.assertEqual(collector._recent_files(self.base, 0), ([], 62, False))
+
+    def test_claude_stops_at_project_level_but_codex_remains_recursive(self):
+        root = self.file("root.jsonl", 1000)
+        project = self.file("project/session.jsonl", 1001)
+        child = self.file("project/session/subagents/child.jsonl", 1002)
+        self.assertEqual(collector._recent_files(self.base, 50, claude=True), ([project, root], 2, False))
+        self.assertEqual(collector._recent_files(self.base, 50), ([child, project, root], 3, False))
+
+    def test_unchanged_discovery_never_caches_append_replace_truncate_or_delete(self):
+        first = self.file("first.jsonl", 1000)
+        second = self.file("second.jsonl", 1001)
+        self.assertEqual(collector._recent_files(self.base, 1)[0], [second])
+        with first.open("ab") as handle:
+            handle.write(b"{}\n")
+        os.utime(first, (1002, 1002))
+        self.assertEqual(collector._recent_files(self.base, 1)[0], [first])
+        first.write_bytes(b"")
+        os.utime(first, (1003, 1003))
+        self.assertEqual(collector._recent_files(self.base, 50), ([first, second], 2, False))
+        replacement = self.file("replacement.tmp", 1004)
+        replacement.replace(second)
+        self.assertEqual(collector._recent_files(self.base, 1)[0], [second])
+        second.unlink()
+        self.assertEqual(collector._recent_files(self.base, 50), ([first], 1, False))
+        first.unlink()
+        self.assertEqual(collector._recent_files(self.base, 50), ([], 0, False))
+
+    def entry(self, name, *, directory=False, link=False, reparse=False, broken=False, modified=1000):
+        result = SimpleNamespace(name=name, path=str(self.base / name), stat_calls=0)
+        result.is_symlink = lambda: link
+        result.is_dir = lambda *, follow_symlinks: directory
+        def metadata(*, follow_symlinks):
+            self.assertFalse(follow_symlinks)
+            result.stat_calls += 1
+            if link:
+                raise AssertionError("A symlink must be discarded before querying its target")
+            if broken:
+                raise FileNotFoundError("Synthetic file disappeared")
+            return SimpleNamespace(st_mode=stat.S_IFDIR if directory else stat.S_IFREG,
+                                   st_file_attributes=0x400 if reparse else 0, st_mtime=modified)
+        result.stat = metadata
+        return result
+
+    def test_entries_reuse_metadata_and_isolate_links_reparse_and_disappearing_files(self):
+        entries = [self.entry("ordinary.jsonl"), self.entry("gone.jsonl", broken=True),
+                   self.entry("file-link.jsonl", link=True), self.entry("dir-link", directory=True, link=True),
+                   self.entry("file-reparse.jsonl", reparse=True), self.entry("junction", directory=True, reparse=True),
+                   self.entry("ignored.txt")]
+        with patch.object(collector.os, "scandir", return_value=contextlib.nullcontext(iter(entries))) as scan:
+            with patch.object(Path, "is_file", side_effect=AssertionError("Must use DirEntry metadata")):
+                self.assertEqual(collector._recent_files(self.base, 50), ([self.base / "ordinary.jsonl"], 1, False))
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual([entry.stat_calls for entry in entries], [1, 1, 0, 0, 1, 1, 0])
+
+    def test_twenty_thousand_cap_closes_enumerator_without_reading_more_entries(self):
+        consumed, closed = [], []
+        def entries():
+            for index in range(collector.MAX_DISCOVERED_FILES + 1):
+                consumed.append(index)
+                yield self.entry(f"session-{index:05}.jsonl", modified=index)
+        @contextlib.contextmanager
+        def scan(directory):
+            try:
+                yield entries()
+            finally:
+                closed.append(directory)
+        with patch.object(collector.os, "scandir", scan):
+            files, count, capped = collector._recent_files(self.base, 50)
+        self.assertEqual(count, 20_000)
+        self.assertTrue(capped)
+        self.assertEqual(len(consumed), 20_000)
+        self.assertEqual(closed, [self.base])
+        self.assertEqual([path.name for path in files], [f"session-{index:05}.jsonl" for index in range(19999, 19949, -1)])
+
+    def test_inaccessible_directory_does_not_hide_its_siblings(self):
+        (self.base / "blocked").mkdir()
+        expected = self.file("readable/session.jsonl", 1000)
+        real_scan = os.scandir
+        def scan(directory):
+            if Path(directory).name == "blocked":
+                raise PermissionError("Synthetic denied directory")
+            return real_scan(directory)
+        with patch.object(collector.os, "scandir", scan):
+            self.assertEqual(collector._recent_files(self.base, 50), ([expected], 1, False))
+
+    def test_root_and_queued_directory_reparse_points_are_not_entered(self):
+        reparse = SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+        with patch.object(Path, "lstat", return_value=reparse), patch.object(collector.os, "scandir") as scan:
+            self.assertEqual(collector._recent_files(self.base, 50), ([], 0, False))
+            scan.assert_not_called()
+        real_lstat = Path.lstat
+        def lstat(path):
+            return reparse if path.name == "changed-to-link" else real_lstat(path)
+        with patch.object(Path, "lstat", lstat), patch.object(collector.os, "scandir",
+                return_value=contextlib.nullcontext(iter([self.entry("changed-to-link", directory=True)]))) as scan:
+            self.assertEqual(collector._recent_files(self.base, 50), ([], 0, False))
+            self.assertEqual(scan.call_count, 1)
 
 
 class CollectorTests(unittest.TestCase):
@@ -98,6 +219,23 @@ class CollectorTests(unittest.TestCase):
                 # A freshly modified file is not evidence of a live worker.
                 os.utime(path, None)
                 self.assertEqual(collector.parse_codex_session(path, now=self.now)["status"], "unknown")
+
+    def test_repeated_snapshot_recomputes_expiry_and_observes_new_final_and_replacement(self):
+        path = self.write([self.meta(), self.line("event_msg", {"type": "task_started"})])
+        for elapsed, expected in ((0, "running"), (301, "unknown")):
+            with patch.object(collector, "utc_now", return_value=self.now + timedelta(seconds=elapsed)):
+                self.assertEqual(collector.collect_snapshot(self.codex, self.claude)["tasks"][0]["status"], expected)
+        with path.open("ab") as handle:
+            handle.write(json.dumps(self.line("event_msg", {"type": "task_complete", "last_agent_message": "Synthetic final"})).encode() + b"\n")
+        task = collector.collect_snapshot(self.codex, self.claude, include_output=True)["tasks"][0]
+        self.assertEqual((task["status"], task["output"]), ("completed", "Synthetic final"))
+        self.assertEqual(collector.collect_snapshot(self.codex, self.claude, include_output=False)["tasks"][0]["output"], "")
+        self.write([self.meta(), self.line("event_msg", {"type": "exec_approval_request"})])
+        for elapsed, expected in ((0, "waiting"), (301, "unknown")):
+            with patch.object(collector, "utc_now", return_value=self.now + timedelta(seconds=elapsed)):
+                self.assertEqual(collector.collect_snapshot(self.codex, self.claude)["tasks"][0]["status"], expected)
+        path.unlink()
+        self.assertEqual(collector.collect_snapshot(self.codex, self.claude)["tasks"], [])
 
     def test_truncated_tail_does_not_change_state(self):
         path = self.write([self.meta(), self.line("event_msg", {"type": "task_started"})],

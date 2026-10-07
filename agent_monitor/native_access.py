@@ -312,14 +312,24 @@ class NativeAccess:
         Revalidation after acquiring SQLite's write lock serializes operations
         against revocation from a different Store/connection as well.
         """
-        with self.store.lock, self.store.db:
-            self._begin_reader(token)
-            reader = self._reader(token)
-            if reader["mode"] != "full_app":
-                raise HTTPException(403, "此连接仅获准读取状态，请重新申请完整工作台权限")
-            self.limits.check(("workspace-write" if write else "snapshot", reader["id"]), 60 if write else 120)
-            self.store.db.execute("UPDATE native_readers SET last_seen=? WHERE id=?", (time.time(), reader["id"]))
-            return operation(dict(reader))
+        from .request_diagnostics import mark_request_phase
+        mark_request_phase("store_lock_wait")
+        with self.store.lock:
+            mark_request_phase("store_lock_acquired")
+            try:
+                with self.store.db:
+                    mark_request_phase("transaction_start")
+                    self._begin_reader(token)
+                    mark_request_phase("transaction_acquired")
+                    reader = self._reader(token)
+                    if reader["mode"] != "full_app":
+                        raise HTTPException(403, "此连接仅获准读取状态，请重新申请完整工作台权限")
+                    self.limits.check(("workspace-write" if write else "snapshot", reader["id"]), 60 if write else 120)
+                    self.store.db.execute("UPDATE native_readers SET last_seen=? WHERE id=?", (time.time(), reader["id"]))
+                    result = operation(dict(reader))
+            finally:
+                mark_request_phase("transaction_end")
+        return result
 
     def _begin_reader(self, token):
         if not TOKEN_PATTERN.fullmatch(token):

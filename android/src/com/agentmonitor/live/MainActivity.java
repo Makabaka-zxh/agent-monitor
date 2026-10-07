@@ -57,6 +57,11 @@ public final class MainActivity extends Activity {
     private FrameLayout body;
     private TextView title, connection, trackingButton, trackingNote, archiveButton, emptyLabel, deviceStatus, profileSaveButton, avatarPickButton;
     private TextView loginStatus, loginNote, loginButton, loginCheckButton;
+    private LinearLayout accountCard;
+    private TextView accountName, accountRetry;
+    private ImageView accountAvatar;
+    private View accountChevron;
+    private boolean accountFailed;
     private ListView list;
     private ScrollView scroll;
     private NativePages.TaskAdapter taskAdapter;
@@ -251,13 +256,14 @@ public final class MainActivity extends Activity {
     }
     private void fetchAccount() {
         if (!visible || !accountPage() || loadedToken.isEmpty() || accountBusy) return;
-        accountBusy = true; final long requestedData = dataRevision.capture();
+        accountBusy = true; accountFailed = false; updateAccountHeader(); final long requestedData = dataRevision.capture();
         request("GET", "/api/native/account", null, (value, revision) -> {
             accountBusy = false;
             if (!dataRevision.accepts(requestedData)) { if (visible && accountPage()) handler.postDelayed(this::fetchAccount, 300); return; }
             if (value != null) {
                 account = value; JSONObject preferences = value.optJSONObject("preferences"); if (preferences != null) applyOutputPreference(preferences.optBoolean("sync_output"));
-                if (page.equals("account") || page.equals("sessions") || page.equals("sync") || (page.equals("profile") && !profileDraft)) { savePosition(); showPage(false); }
+                if (page.equals("account")) updateAccountHeader();
+                else if (page.equals("sessions") || page.equals("sync") || (page.equals("profile") && !profileDraft)) { savePosition(); showPage(false); }
             }
             else if (account == null && (page.equals("account") || page.equals("profile") || page.equals("sync") || page.equals("sessions"))) showAccountFailure();
         });
@@ -303,6 +309,7 @@ public final class MainActivity extends Activity {
         nativeUsage = null; taskUsage = null;
         list = null; scroll = null; taskAdapter = null; deviceAdapter = null; toolSegments = null; scopeSegments = null; taskDetail = null; trackingButton = null; trackingNote = null; archiveButton = null; emptyLabel = null; deviceStatus = null; nameInput = null; avatarView = null; outputSwitch = null; profileSaveButton = null; avatarPickButton = null;
         loginStatus = null; loginNote = null; loginButton = null; loginCheckButton = null;
+        accountCard = null; accountName = null; accountRetry = null; accountAvatar = null; accountChevron = null;
         body.animate().cancel(); body.setAlpha(1); body.setTranslationY(0); body.removeAllViews(); titleBar.removeAllViews(); bottomBar.removeAllViews();
         titleHeading = null; connection = null;
         // A 24 dp icon is centered in its 48 dp touch target: 6 + 12 = 18 dp visual inset.
@@ -524,11 +531,23 @@ public final class MainActivity extends Activity {
 
     private JSONObject user() { JSONObject value = account == null ? null : account.optJSONObject("user"); return value == null ? new JSONObject() : value; }
     private void buildAccount() {
-        LinearLayout column = content(); if (account == null) { placeholder(column, "正在读取账号"); column.addView(ui.space(16)); column.addView(menu("refresh", "应用更新", () -> startActivity(new Intent(this, NativeUpdateActivity.class))), wrap()); return; }
-        LinearLayout profile = ui.card(); profile.setOrientation(LinearLayout.HORIZONTAL); profile.setGravity(Gravity.CENTER_VERTICAL);
-        profile.addView(avatar(user().optString("avatar"), 52)); TextView name = ui.text(user().optString("display_name", user().optString("username", "我的账号")), 20, true);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1); params.setMargins(ui.dp(16), 0, ui.dp(6), 0); profile.addView(name, params); profile.addView(ui.icon("chevron", 24));
-        profile.setBackground(ui.ripple(ui.surface, 20)); profile.setOnClickListener(v -> navigate("profile", "")); profile.setContentDescription("个人资料，" + name.getText()); profile.setFocusable(true); column.addView(profile, wrap()); column.addView(ui.space(20));
+        LinearLayout column = content();
+        // Keep the header and every menu mounted while account data arrives.
+        accountCard = ui.card(); accountCard.setOrientation(LinearLayout.HORIZONTAL); accountCard.setGravity(Gravity.CENTER_VERTICAL);
+        accountAvatar = avatar("", 52); accountCard.addView(accountAvatar);
+        accountName = ui.text("", 20, true); accountName.setMinLines(2); accountName.setMaxLines(2);
+        accountName.setGravity(Gravity.CENTER_VERTICAL); accountName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1); params.setMargins(ui.dp(16), 0, ui.dp(6), 0); accountCard.addView(accountName, params);
+        FrameLayout action = new FrameLayout(this); action.setMinimumWidth(ui.dp(48)); action.setMinimumHeight(ui.dp(48));
+        accountChevron = ui.icon("chevron", 24); action.addView(accountChevron, new FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER));
+        accountRetry = ui.text("重试", 15, true); accountRetry.setGravity(Gravity.CENTER); accountRetry.setMinWidth(ui.dp(48)); accountRetry.setMinHeight(ui.dp(48));
+        accountRetry.setPadding(ui.dp(4), 0, ui.dp(4), 0); accountRetry.setBackground(ui.ripple(Color.TRANSPARENT, 12)); accountRetry.setTextColor(ui.accent);
+        accountRetry.setContentDescription("重试读取账号"); accountRetry.setAccessibilityDelegate(NativeUi.buttonAccessibility()); accountRetry.setOnClickListener(v -> fetchAccount());
+        // INVISIBLE reserves the same measured retry target at every font scale.
+        action.addView(accountRetry, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER)); accountCard.addView(action, new LinearLayout.LayoutParams(-2, -2));
+        accountCard.setBackground(ui.ripple(ui.surface, 20)); accountCard.setOnClickListener(v -> navigate("profile", "")); accountCard.setFocusable(true);
+        accountCard.setAccessibilityDelegate(NativeUi.buttonAccessibility()); column.addView(accountCard, wrap()); column.addView(ui.space(20));
+        updateAccountHeader();
         column.addView(menu("tasks", "用量", () -> navigate("usage", "")), wrap()); column.addView(ui.space(10));
         column.addView(menu("cloud", "个人同步", () -> navigate("sync", "")), wrap()); column.addView(ui.space(10));
         column.addView(menu("shield", "登录设备", () -> navigate("sessions", "")), wrap()); column.addView(ui.space(10));
@@ -537,6 +556,17 @@ public final class MainActivity extends Activity {
         column.addView(ui.space(10)); column.addView(menu("refresh", "应用更新", () -> startActivity(new Intent(this, NativeUpdateActivity.class))), wrap());
         if (!TrackingService.trackedId.isEmpty()) { column.addView(ui.space(10)); column.addView(menu("close", "停止跟踪", () -> { TrackingService.requestStop(this, TrackingService.generation); showPage(false); }), wrap()); }
         column.addView(ui.space(24)); column.addView(ui.button("退出登录", false, () -> confirm("退出 Monitor？", "这台手机会断开账号连接，并结束当前实况。电脑上的任务不受影响。", "退出", this::logout)), wrap());
+    }
+    private void updateAccountHeader() {
+        if (!page.equals("account") || accountCard == null) return;
+        boolean unavailable = account == null, retry = unavailable && accountFailed && !accountBusy;
+        String name = unavailable ? (retry ? "暂时无法读取账号" : "正在读取账号") : user().optString("display_name", user().optString("username", "我的账号"));
+        accountName.setText(name); accountName.setTextColor(unavailable ? ui.muted : ui.text);
+        accountCard.setContentDescription("个人资料，" + name);
+        String picture = unavailable ? "" : user().optString("avatar");
+        if (!picture.equals(accountAvatar.getTag())) bindAvatar(accountAvatar, picture);
+        accountRetry.setEnabled(retry); accountRetry.setFocusable(retry); accountRetry.setVisibility(retry ? View.VISIBLE : View.INVISIBLE);
+        accountChevron.setVisibility(retry ? View.INVISIBLE : View.VISIBLE);
     }
     private View menu(String icon, String label, Runnable action) {
         LinearLayout row = ui.row(); row.setPadding(ui.dp(16), ui.dp(12), ui.dp(12), ui.dp(12)); row.setMinimumHeight(ui.dp(56)); row.setBackground(ui.ripple(ui.surface, 20)); row.addView(ui.icon(icon, 22));
@@ -629,7 +659,10 @@ public final class MainActivity extends Activity {
             });
         }), wrap()); column.addView(card, wrap()); column.addView(ui.space(12));
     }
-    private void showAccountFailure() { body.removeAllViews(); LinearLayout column = content(); placeholder(column, "暂时无法读取账号"); column.addView(ui.button("重试", false, this::fetchAccount), wrap()); }
+    private void showAccountFailure() {
+        if (page.equals("account")) { accountFailed = true; updateAccountHeader(); return; }
+        body.removeAllViews(); LinearLayout column = content(); placeholder(column, "暂时无法读取账号"); column.addView(ui.button("重试", false, this::fetchAccount), wrap());
+    }
 
     private void buildPairing() {
         LinearLayout column = content(); column.addView(menu("scan", "扫码配对", () -> {
