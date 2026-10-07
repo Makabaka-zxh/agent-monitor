@@ -14,7 +14,7 @@ public final class UpdateRecoveryPolicyTest {
     private static String[] saved() { return UpdateRecoveryPolicy.capture(NAME, manifest(), COMPLETED).encode(true); }
     public static void main(String[] args) throws Exception {
         if (args.length != 1) throw new AssertionError("Supply an isolated generated test directory");
-        roundTrip(); invalidHints(); expiry(); fixedFiles(new File(args[0], "recovery-cache"));
+        roundTrip(); invalidHints(); expiry(); resume(); grants(); fixedFiles(new File(args[0], "recovery-cache"));
         System.out.println("UpdateRecoveryPolicyTest: " + checks + " checks passed");
     }
     private static void roundTrip() {
@@ -50,6 +50,31 @@ public final class UpdateRecoveryPolicyTest {
         check(!candidate.fresh(COMPLETED + 3600000) && !candidate.fresh(COMPLETED + 86400000), "expiry is inclusive");
         check(!candidate.fresh(COMPLETED - 1) && !candidate.fresh(0), "future completion or clock regression fails closed");
         check(UpdateRecoveryPolicy.decode(candidate.encode(false)).completedAt == COMPLETED, "repeated rotations never renew the lifetime");
+    }
+    private static void resume() {
+        UpdateRecoveryPolicy.Candidate candidate = UpdateRecoveryPolicy.decode(saved());
+        check(UpdateRecoveryPolicy.resumeAction(null, 30, 36, COMPLETED) == UpdateRecoveryPolicy.ResumeAction.NONE, "no candidate does not claim an installed update");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 29, 36, COMPLETED) == UpdateRecoveryPolicy.ResumeAction.VERIFY, "return with older installed version requires revalidation");
+        check(UpdateRecoveryPolicy.resumeAction(UpdateRecoveryPolicy.decode(candidate.encode(false)), 29, 36, COMPLETED + 1) == UpdateRecoveryPolicy.ResumeAction.VERIFY, "saved candidate without permission or handoff flags still requires revalidation");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 30, 36, COMPLETED) == UpdateRecoveryPolicy.ResumeAction.ALREADY_INSTALLED, "successful install cannot return READY for the same version");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 31, 36, COMPLETED) == UpdateRecoveryPolicy.ResumeAction.ALREADY_INSTALLED, "a newer installed version also contains the candidate update");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 30, 36, COMPLETED + 3600000) == UpdateRecoveryPolicy.ResumeAction.ALREADY_INSTALLED, "an installed update is recognized even when its old download has expired");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 29, 36, COMPLETED + 3600000) == UpdateRecoveryPolicy.ResumeAction.EXPIRED, "uninstalled expired candidate cannot be reused");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 29, 36, COMPLETED - 1) == UpdateRecoveryPolicy.ResumeAction.EXPIRED, "clock rollback cannot revive a saved candidate");
+        check(UpdateRecoveryPolicy.resumeAction(candidate, 29, 25, COMPLETED) == UpdateRecoveryPolicy.ResumeAction.UNSUPPORTED, "unsupported device never offers restored installation");
+        boolean rejected = false;
+        try { UpdateRecoveryPolicy.resumeAction(candidate, 0, 36, COMPLETED); } catch (IllegalArgumentException expected) { rejected = true; }
+        check(rejected, "missing installed identity cannot imply a completed update");
+    }
+    private static void grants() {
+        check(UpdateRecoveryPolicy.liveGrant(NAME, NAME, COMPLETED + 3600000, COMPLETED), "new installer grant has its own one-hour lifetime");
+        check(UpdateRecoveryPolicy.liveGrant(NAME, NAME, COMPLETED + 1, COMPLETED), "grant remains protected until exact expiry");
+        check(!UpdateRecoveryPolicy.liveGrant(NAME, NAME, COMPLETED, COMPLETED), "exact grant expiry releases protection");
+        check(!UpdateRecoveryPolicy.liveGrant(NAME, NAME, COMPLETED - 1, COMPLETED), "expired grant cannot retain candidate forever");
+        check(!UpdateRecoveryPolicy.liveGrant(NAME, NAME, COMPLETED + 3600001, COMPLETED), "clock rollback or invalid future grant fails closed");
+        check(!UpdateRecoveryPolicy.liveGrant(NAME, "update-other.apk", COMPLETED + 1, COMPLETED), "another file's grant never protects the candidate");
+        check(!UpdateRecoveryPolicy.liveGrant(null, NAME, COMPLETED + 1, COMPLETED), "absent candidate is never considered shared");
+        check(!UpdateRecoveryPolicy.liveGrant(NAME, NAME, Long.MAX_VALUE, COMPLETED), "extreme expiry cannot overflow into a valid grant");
     }
     private static void fixedFiles(File cache) throws Exception {
         File updates = new File(cache, "updates"); check(updates.mkdirs() || updates.isDirectory(), "isolated updates directory created");

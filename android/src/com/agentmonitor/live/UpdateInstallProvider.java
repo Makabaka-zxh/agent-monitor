@@ -22,6 +22,16 @@ public final class UpdateInstallProvider extends ContentProvider {
     private static final String AUTHORITY = "com.agentmonitor.live.updates", PREFS = "update_install_grant";
     private static final String MIME = "application/vnd.android.package-archive";
     private static final long GRANT_MS = 60 * 60 * 1000L;
+    /** Activity lifetime is separate from an installer's grant; only discard an unshared APK. */
+    static synchronized boolean discardUnshared(Context context, File candidate) {
+        try {
+            File file = UpdateRecoveryPolicy.scopedFile(context.getCacheDir(), candidate);
+            SharedPreferences preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            if (UpdateRecoveryPolicy.liveGrant(file.getName(), preferences.getString("file", ""),
+                    preferences.getLong("expires", 0), System.currentTimeMillis())) return false;
+            return file.isFile() && file.delete();
+        } catch (IOException | RuntimeException ignored) { return false; }
+    }
     static synchronized Uri grant(Context context, UpdatePackage.Verified verified) throws IOException {
         File directory = new File(context.getCacheDir(), "updates").getCanonicalFile();
         File file = verified.file.getCanonicalFile();

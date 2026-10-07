@@ -7,6 +7,32 @@ import java.io.IOException;
 final class UpdateRecoveryPolicy {
     // Match private-download pruning; installer grants keep their existing separate policy.
     static final long MAX_AGE_MS = 60 * 60 * 1000L;
+    enum ResumeAction { NONE, VERIFY, ALREADY_INSTALLED, EXPIRED, UNSUPPORTED }
+
+    static ResumeAction resumeAction(Candidate candidate, int installedCode, int deviceSdk, long now) {
+        if (candidate == null) return ResumeAction.NONE;
+        if (installedCode <= 0 || deviceSdk <= 0) throw new IllegalArgumentException("Invalid installed update state");
+        if (!candidate.manifest.newerThan(installedCode)) return ResumeAction.ALREADY_INSTALLED;
+        if (!candidate.fresh(now)) return ResumeAction.EXPIRED;
+        if (!candidate.manifest.supportsSdk(deviceSdk)) return ResumeAction.UNSUPPORTED;
+        return ResumeAction.VERIFY;
+    }
+
+    /** Resolve one APK beneath the system cache root; never follow an updates/file redirect. */
+    static File scopedFile(File cacheDir, File candidate) throws IOException {
+        if (candidate == null || !candidate.getName().matches("update-[A-Za-z0-9_-]{1,100}\\.apk"))
+            throw new IOException("安装包大小或位置无效");
+        File directory = new File(cacheDir.getCanonicalFile(), "updates");
+        File expected = new File(directory, candidate.getName());
+        if (!directory.equals(directory.getCanonicalFile()) || !expected.equals(expected.getCanonicalFile())
+                || !expected.equals(candidate.getCanonicalFile())) throw new IOException("安装包大小或位置无效");
+        return expected;
+    }
+
+    static boolean liveGrant(String basename, String grantedBasename, long expires, long now) {
+        return basename != null && basename.equals(grantedBasename) && now > 0 && expires > now
+                && expires - now <= MAX_AGE_MS;
+    }
     static final class Candidate {
         final String basename;
         final UpdatePolicy.Manifest manifest;

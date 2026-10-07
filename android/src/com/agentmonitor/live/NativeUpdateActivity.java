@@ -26,7 +26,7 @@ import java.util.concurrent.Executors;
 
 /** Account-independent native update page. Installation always requires a foreground user action. */
 public final class NativeUpdateActivity extends Activity {
-    private enum State { IDLE, CHECKING, AVAILABLE, DOWNLOADING, VERIFYING, READY, CURRENT, UNSUPPORTED, ERROR }
+    private enum State { IDLE, CHECKING, AVAILABLE, DOWNLOADING, VERIFYING, READY, CURRENT, INSTALLED, UNSUPPORTED, ERROR }
     private final ExecutorService worker = Executors.newSingleThreadExecutor(action -> new Thread(action, "MonitorUpdate"));
     private final Handler main = new Handler(Looper.getMainLooper());
     private NativeUi ui;
@@ -40,7 +40,7 @@ public final class NativeUpdateActivity extends Activity {
     private State state = State.IDLE;
     private String message = "检查 GitHub 上的最新正式版本。";
     private long generation;
-    private boolean resumed, handedToInstaller, awaitingPermission;
+    private boolean resumed, awaitingPermission;
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved); ui = new NativeUi(this);
@@ -78,7 +78,7 @@ public final class NativeUpdateActivity extends Activity {
         content.addView(ui.space(20));
         String heading = state == State.CHECKING ? "正在检查更新" : state == State.DOWNLOADING ? "正在下载更新"
                 : state == State.VERIFYING ? "正在校验安装包" : state == State.READY ? "可以安装了"
-                : state == State.CURRENT ? "已是最新版本" : state == State.AVAILABLE ? "发现新版本"
+                : state == State.CURRENT ? "已是最新版本" : state == State.INSTALLED ? "已包含这次更新" : state == State.AVAILABLE ? "发现新版本"
                 : state == State.UNSUPPORTED ? "此版本需要更新的 Android" : state == State.ERROR ? "暂时无法完成" : "让 Monitor 保持更新";
         content.addView(ui.text(heading, 22, true), wrap()); content.addView(ui.space(12));
         progressView = ui.text(message, 16); progressView.setTextColor(ui.muted); progressView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
@@ -166,8 +166,16 @@ public final class NativeUpdateActivity extends Activity {
     private boolean canInstall() { return Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls(); }
     private void restoreCandidate() {
         if (!resumed || installed == null || candidate == null || ready != null || busy()) return;
-        if (!candidate.fresh(System.currentTimeMillis())) {
-            discardReady(); state = State.ERROR; message = "下载的更新已过期，请重新检查。"; render(); return;
+        UpdateRecoveryPolicy.ResumeAction action = UpdateRecoveryPolicy.resumeAction(candidate, installed.code,
+                Build.VERSION.SDK_INT, System.currentTimeMillis());
+        if (action != UpdateRecoveryPolicy.ResumeAction.VERIFY) {
+            discardReady();
+            if (action == UpdateRecoveryPolicy.ResumeAction.ALREADY_INSTALLED) {
+                release = null; state = State.INSTALLED; message = "当前安装版本已包含这次更新。";
+            } else if (action == UpdateRecoveryPolicy.ResumeAction.UNSUPPORTED) {
+                state = State.UNSUPPORTED; message = "此更新暂不支持当前手机系统。";
+            } else { state = State.ERROR; message = "下载的更新已过期，请重新检查。"; }
+            render(); return;
         }
         state = State.VERIFYING; message = "正在恢复并重新校验已下载的更新…";
         UpdateClient.Operation task = start(45000); long id = generation;
@@ -232,7 +240,7 @@ public final class NativeUpdateActivity extends Activity {
             ResolveInfo system = installers.isEmpty() ? null : installers.get(0);
             if (system == null || system.activityInfo == null) throw new IllegalStateException();
             install.setClassName(system.activityInfo.packageName, system.activityInfo.name);
-            startActivity(install); handedToInstaller = true;
+            startActivity(install);
             message = "请在系统界面确认安装。若取消，可返回后再试。";
         } catch (Exception unavailable) { message = "暂时无法打开系统安装界面，请稍后重试。"; }
         render();
@@ -250,11 +258,13 @@ public final class NativeUpdateActivity extends Activity {
         message = "操作已取消，可以随时重试。"; render();
     }
     private void discardReady() {
-        if (!handedToInstaller) {
-            if (candidate != null) candidate.discard(getCacheDir());
-            else if (ready != null) ready.file.delete();
-        }
-        ready = null; candidate = null; handedToInstaller = false; awaitingPermission = false;
+        // A recreated Activity has no trustworthy handoff flag. The provider owns
+        // the persisted, expiring grant and decides whether this file can be removed.
+        try {
+            File file = candidate != null ? candidate.file(getCacheDir()) : ready != null ? ready.file : null;
+            if (file != null) UpdateInstallProvider.discardUnshared(this, file);
+        } catch (java.io.IOException | RuntimeException ignored) { }
+        ready = null; candidate = null; awaitingPermission = false;
     }
     private static NativeUpdateActivity current(WeakReference<NativeUpdateActivity> reference, long id) {
         NativeUpdateActivity page = reference.get();
@@ -280,14 +290,23 @@ public final class NativeUpdateActivity extends Activity {
     private static String size(long bytes) { return String.format(java.util.Locale.ROOT, "%.1f MB", bytes / 1048576.0); }
     @Override protected void onResume() {
         super.onResume(); resumed = true;
-        if (candidate != null && ready == null && installed != null) { restoreCandidate(); return; }
+        if (candidate != null) {
+            // Returning from the installer never trusts the previous Verified object
+            // or cached installed version, and never opens another system page.
+            ready = null; state = State.IDLE;
+            try { installed = UpdatePackage.installed(this); }
+            catch (Exception unavailable) {
+                installed = null; state = State.ERROR; message = "无法读取当前版本，请重新打开页面。"; render(); return;
+            }
+            restoreCandidate(); return;
+        }
         if (awaitingPermission) { awaitingPermission = false; message = canInstall() ? "已允许安装。请点安装更新继续。" : "安装权限尚未开启，可以稍后再试。"; }
         render();
     }
     @Override protected void onSaveInstanceState(Bundle saved) {
         // Save completed candidate metadata even while a later verification is in flight.
         // Do not save Verified objects, partial downloads, account state or installer grants.
-        if (candidate != null && !handedToInstaller && !isFinishing()) saved.putStringArray("update_candidate", candidate.encode(awaitingPermission));
+        if (candidate != null && !isFinishing()) saved.putStringArray("update_candidate", candidate.encode(awaitingPermission));
         super.onSaveInstanceState(saved);
     }
     @Override protected void onPause() {

@@ -284,6 +284,18 @@ $updateClientTestSources = @(
 Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release', '8', '-classpath', $platformJar, '-d', $updateClientTestsDirectory) + $updateClientTestSources)
 Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', "$updateClientTestsDirectory;$platformJar", 'com.agentmonitor.live.UpdateClientTest', $updateClientTestsDirectory)
 
+# Exercise the real installer-file cleanup against isolated files and read-only grant doubles.
+# Test platform classes remain outside build/classes and never enter the application APK.
+$updateProviderTestsDirectory = Join-Path $buildDirectory 'update-provider-tests'
+New-Item -ItemType Directory -Force -Path $updateProviderTestsDirectory | Out-Null
+$updateProviderTestSources = @((Join-Path $projectDirectory 'tests/update-provider-stubs/android/content/Context.java'))
+foreach ($source in @('UpdatePolicy', 'UpdateRecoveryPolicy', 'UpdatePackage', 'UpdateClient', 'UpdateInstallProvider')) {
+    $updateProviderTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java"
+}
+$updateProviderTestSources += Join-Path $projectDirectory 'tests/UpdateInstallProviderTest.java'
+Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release', '8', '-classpath', $platformJar, '-d', $updateProviderTestsDirectory) + $updateProviderTestSources)
+Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', "$updateProviderTestsDirectory;$platformJar", 'com.agentmonitor.live.UpdateInstallProviderTest', $updateProviderTestsDirectory)
+
 # Startup origin migration cannot reuse unbound credentials on a new server.
 $settingsTestsDirectory = Join-Path $buildDirectory 'server-settings-tests'
 New-Item -ItemType Directory -Force -Path $settingsTestsDirectory | Out-Null
