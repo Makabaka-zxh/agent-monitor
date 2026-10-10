@@ -67,6 +67,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File android/build.ps1 `
 
 构建产物为 `android/build/monitor-live-test.apk`。脚本检查 APK 签名及字体资源，并运行 Android 的纯 Java 和隔离平台测试，包括更新策略测试；它不安装到手机。这个历史文件名同样用于外部签名构建，发布前可复制为带版本号的文件名。
 
+### 更新流程主机集成测试
+
+两组集成测试只需要 Python 3.12+ 和 JDK 17，可在 Windows / Linux 单独运行，无需 Android SDK、签名或手机：
+
+```sh
+python android/test-update-integration.py
+```
+
+JDK 按 `--java-home`、`JAVA_HOME`、`PATH` 的顺序选择。可用 `--suite lifecycle` 或 `--suite package-provider` 只运行一组。每次编译当前 checkout 的生产源码，使用独立临时目录和 JVM；没有固定旧发布提交，也不创建安装包。这个入口独立于 `android/build.ps1`，CI 会分别执行两者。
+
+- 生命周期组覆盖安装返回后的版本读取和重新校验、权限往返、候选保存与重建、取消和过期回调。
+- 安装包与文件交接组覆盖真实合成文件的大小和哈希校验、包身份和签名集合比较、取消边界、只读文件交接及授权失效清理。
+
+Android 生命周期、PackageManager、权限和文件描述符边界由测试替身模拟；安装包解析、系统安装器和真实页面重建仍需设备验收。替身类分别编译到隔离目录，不参与 APK 构建。
+
 ### 使用既有签名发布
 
 `-Release` 要求提供已有 keystore；缺少配置时直接失败，不会生成开发密钥作为替代。发布后必须持续使用同一个签名证书，才能通过应用内更新和 Android 的覆盖安装检查。
@@ -117,4 +132,4 @@ python3 macos/scripts/collector_service.py pair --server https://monitor.example
 
 ## CI 范围
 
-`.github/workflows/ci.yml` 包含 Ubuntu / Windows Python 与 Web 测试、Windows Android 开发构建，以及 macOS 原生 Swift 测试。它只需要仓库读取权限，不使用发行 Secrets、不上传安装包、不创建 Release。CI 通过不能代替手机安装、厂商权限、macOS 原生界面或真实更新流程的验收。
+`.github/workflows/ci.yml` 包含 Ubuntu / Windows Python 与 Web 测试、Ubuntu / Windows 更新流程主机集成测试、Windows Android 开发构建，以及 macOS 原生 Swift 测试。它只需要仓库读取权限，不使用发行 Secrets、不上传安装包、不创建 Release。CI 通过不能代替手机安装、厂商权限、macOS 原生界面或真实更新流程的验收。

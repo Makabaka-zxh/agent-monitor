@@ -49,6 +49,28 @@ jobs:
       - name: Test Web interactions
         run: node tests/test_ui_async.cjs
 
+  updater-host:
+    name: Updater host integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Test updater lifecycle and package handoff with synthetic Android boundaries
+        run: python android/test-update-integration.py
+
   android:
     name: Android development build and offline checks
     runs-on: windows-latest
