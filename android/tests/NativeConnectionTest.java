@@ -127,7 +127,111 @@ public final class NativeConnectionTest {
         tick(); check(SessionStore.read(CONTEXT).optJSONObject("pairing") == null && CURRENT.equals(SessionStore.read(CONTEXT).optString("reader_token")), "already-consumed unknown response requires reauthorization without losing old connection");
     }
     private static int polls() { int count = 0; for (String call : NativeApi.calls) if (call.contains("/poll ")) count++; return count; }
+    private static int starts() { int count = 0; for (String call : NativeApi.calls) if (call.startsWith("POST /api/native/pairing/start ")) count++; return count; }
     private static NativeConnection.LoginState state() { return NativeConnection.loginState(CONTEXT); }
+    private static void startLimited(long retryAfter) throws Exception {
+        NativeApi.transport = (method, path, body, token) -> { if (path.endsWith("/start")) throw new NativeApi.Failure(429, retryAfter); return new JSONObject(); };
+        NativeConnection.start(CONTEXT, url -> { throw new AssertionError("Limited start must not open a browser"); }); settle(); Handler.runPosted();
+    }
+    private static void startSucceeds(AtomicInteger opened) throws Exception {
+        NativeApi.transport = (method, path, body, token) -> {
+            if (path.endsWith("/poll")) return new JSONObject().put("status", "pending");
+            if (path.endsWith("/start")) return new JSONObject().put("request_id", ID).put("verification_url", NativeApi.ORIGIN + "/#/native-connect/" + ID).put("expires_at", future());
+            return new JSONObject();
+        };
+        NativeConnection.start(CONTEXT, url -> opened.incrementAndGet()); settle(); Handler.runPosted();
+    }
+    private static void startRateLimit() throws Exception {
+        reset(); long now = SystemClock.now; startLimited(7000);
+        check(starts() == 1 && !state().primaryEnabled, "start 429 disables immediate retry");
+        check("limited".equals(state().stage) && state().heading.contains("请求较多") && state().note.contains("7 秒"), "start 429 presents the actual server wait");
+        check(!state().note.contains("网络") && NativeConnection.consumeError().contains("请求较多"), "rate limiting is not reported as a network failure");
+        check("limited".equals(state().stage), "consuming notification retains the wait presentation");
+        for (int i=0; i<3; i++) NativeConnection.start(CONTEXT, url -> { throw new AssertionError("Cooldown cannot open browser"); });
+        NativeConnection.check(CONTEXT); settle();
+        check(starts() == 1 && polls() == 0, "repeated start and heartbeat cannot create or poll another request during cooldown");
+        SystemClock.now = now + 6000;
+        check(!state().primaryEnabled && state().note.contains("1 秒"), "remaining wait updates without recreating the page");
+        SystemClock.now = now + 6999; NativeConnection.start(CONTEXT, url -> {}); settle();
+        check(starts() == 1 && !state().primaryEnabled, "last millisecond of Retry-After still blocks start");
+        SystemClock.now = now + 7000;
+        check(state().primaryEnabled && "retry".equals(state().stage) && !state().note.contains("网络"), "retry becomes available at the server deadline");
+        AtomicInteger opened = new AtomicInteger(); startSucceeds(opened);
+        check(starts() == 2 && opened.get() == 1 && "waiting".equals(state().stage), "one explicit retry creates one request and opens its confirmation after cooldown");
+
+        reset(); NativeApi.transport = (method, path, body, token) -> { throw new NativeApi.Failure(0); };
+        NativeConnection.start(CONTEXT, url -> {}); settle();
+        check(state().primaryEnabled && state().note.contains("网络"), "ordinary network failure keeps immediate manual retry");
+        opened.set(0); startSucceeds(opened);
+        check(starts() == 2 && opened.get() == 1, "ordinary retry does not inherit a rate-limit delay");
+
+        reset(); SessionStore.disk = new JSONObject().put("pairing", pairing().put("expires_at", "2000-01-01T00:00:00Z"));
+        startLimited(2000);
+        check("limited".equals(state().stage) && !state().primaryEnabled, "rate-limit wait takes precedence over an expired old request");
+        SystemClock.now += 2000; opened.set(0); startSucceeds(opened);
+        check(starts() == 2 && opened.get() == 1, "expired request can be replaced when the start cooldown ends");
+    }
+    private static void startRateLimitKeepsExistingFlows() throws Exception {
+        reset(); startLimited(7000); AtomicInteger opened = new AtomicInteger();
+        SessionStore.disk = new JSONObject().put("pairing", pairing());
+        NativeConnection.start(CONTEXT, url -> opened.incrementAndGet());
+        check(starts() == 1 && opened.get() == 1 && "waiting".equals(state().stage), "start cooldown does not hide or recreate an existing confirmation link");
+        NativeApi.transport = (method, path, body, token) -> new JSONObject().put("status", "pending");
+        NativeConnection.check(CONTEXT); settle();
+        check(polls() == 1 && starts() == 1, "existing request checks use their own poll cooldown");
+
+        reset(); startLimited(7000);
+        SessionStore.disk = new JSONObject().put("pairing", pairing().put("phase", "native_claimed").put("reader_token", NEXT).put("reader_expires_at", future()));
+        NativeApi.transport = (method, path, body, token) -> new JSONObject();
+        NativeConnection.start(CONTEXT, url -> { throw new AssertionError("Claim completion cannot reopen browser"); }); settle();
+        check(called("GET", "/api/native/account", NEXT) && starts() == 1 && polls() == 0, "saved claim completes despite a separate start cooldown");
+        check(SessionStore.read(CONTEXT).optBoolean("native_ready"), "saved claim retains its normal durable completion");
+    }
+    private static void startRateLimitCancellationAndLogout() throws Exception {
+        reset(); startLimited(7000);
+        check(NativeConnection.cancel(CONTEXT), "cancel after rate limiting succeeds");
+        NativeConnection.start(CONTEXT, url -> {}); settle();
+        check(starts() == 1 && "limited".equals(state().stage) && !state().primaryEnabled, "cancel does not bypass an accepted server cooldown");
+        SystemClock.now += 7000;
+        check("idle".equals(state().stage) && state().primaryEnabled, "cancelled attempt leaves no stale failure after cooldown");
+        AtomicInteger opened = new AtomicInteger(); startSucceeds(opened);
+        check(starts() == 2 && opened.get() == 1, "cancelled attempt can start again at expiry");
+
+        reset(); SessionStore.disk = connected(); startLimited(7000);
+        SessionStore.disk.put("logout_pending", true); NativeConnection.cancel(CONTEXT);
+        NativeConnection.start(CONTEXT, url -> {}); settle();
+        check(starts() == 1, "pending logout still blocks new login attempts");
+        NativeConnection.finishLogout(CONTEXT, CURRENT); settle();
+        NativeConnection.start(CONTEXT, url -> {}); settle();
+        check(starts() == 1 && !state().primaryEnabled && SessionStore.read(CONTEXT).optString("reader_token").isEmpty(), "completed logout preserves an accepted server wait without restoring account state");
+        SystemClock.now += 7000; opened.set(0); startSucceeds(opened);
+        check(starts() == 2 && opened.get() == 1, "login after logout resumes only at cooldown expiry");
+    }
+    private static void lateStartRateLimit() throws Exception {
+        for (int changed = 0; changed < 4; changed++) {
+            reset(); SessionStore.disk = connected();
+            CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+            NativeApi.transport = (method, path, body, token) -> {
+                if (path.endsWith("/start")) { entered.countDown(); release.await(5, TimeUnit.SECONDS); throw new NativeApi.Failure(429, 7000); }
+                return new JSONObject();
+            };
+            NativeConnection.start(CONTEXT, url -> { throw new AssertionError("Late 429 cannot open browser"); });
+            check(entered.await(5, TimeUnit.SECONDS), "start held before a late 429");
+            if (changed == 0) NativeConnection.cancel(CONTEXT);
+            else if (changed == 1) SessionStore.disk.put("logout_pending", true);
+            else if (changed == 2) SessionStore.disk = connected().put("reader_token", NEXT);
+            else SessionStore.disk.put("pairing", pairing());
+            release.countDown(); settle(); Handler.runPosted();
+            check(!"limited".equals(state().stage) && NativeConnection.consumeError().isEmpty(), "obsolete 429 cannot replace a newer connection presentation " + changed);
+            if (changed == 1) { NativeConnection.finishLogout(CONTEXT, CURRENT); settle(); }
+            if (changed == 3) {
+                check(SessionStore.read(CONTEXT).optJSONObject("pairing") != null, "late 429 preserves the newer approval request");
+                NativeConnection.cancel(CONTEXT);
+            }
+            AtomicInteger opened = new AtomicInteger(); startSucceeds(opened);
+            check(starts() == 2 && opened.get() == 1, "obsolete 429 cannot install a cooldown on the next valid attempt " + changed);
+        }
+    }
     private static void loginPresentation() throws Exception {
         reset(); check("idle".equals(state().stage) && state().primaryEnabled, "fresh login is actionable");
         AtomicInteger starts = new AtomicInteger(), opened = new AtomicInteger();
@@ -204,7 +308,7 @@ public final class NativeConnectionTest {
     }
     public static void main(String[] args) throws Exception {
         java.security.Security.insertProviderAt(new java.security.Provider("Fixture", 1.0, "Synthetic test entropy") {{ put("SecureRandom.Fixture", FixtureRandom.class.getName()); }}, 1);
-        try { happy(); cancellation(); retiredRetryAndLogout(); legacyClaims(); diskFailures(); latePollAndUnknownOutcome(); loginPresentation(); claimedPresentation(); System.out.println("NativeConnectionTest: " + checks + " checks passed"); }
+        try { happy(); cancellation(); retiredRetryAndLogout(); legacyClaims(); diskFailures(); latePollAndUnknownOutcome(); loginPresentation(); claimedPresentation(); startRateLimit(); startRateLimitKeepsExistingFlows(); startRateLimitCancellationAndLogout(); lateStartRateLimit(); System.out.println("NativeConnectionTest: " + checks + " checks passed"); }
         finally { executor("WORK").shutdownNow(); executor("REAPER").shutdownNow(); }
     }
 }

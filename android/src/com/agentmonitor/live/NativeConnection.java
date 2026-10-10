@@ -27,7 +27,7 @@ public final class NativeConnection {
     private static final AtomicBoolean REAPING = new AtomicBoolean();
     private static final LinkedHashSet<String> MEMORY_RETIRED = new LinkedHashSet<>();
     private static volatile boolean busy;
-    private static volatile long nextPoll, nextRetire;
+    private static volatile long nextPoll, nextRetire, nextStart;
     private static volatile String error = "";
     private static volatile String operation = "", issue = "", issueRequest = "";
     private static volatile long operationRevision;
@@ -57,6 +57,13 @@ public final class NativeConnection {
         String problem = id.equals(issueRequest) ? issue : "";
         if (pairing == null && problem.isEmpty()) problem = store.optString("pairing_notice");
         boolean canCheck = !busy && SystemClock.elapsedRealtime() >= nextPoll;
+        // Creating another request is throttled independently of checking or reopening
+        // an existing approval. Cancellation must not bypass an accepted server delay.
+        long startWait = nextStart - SystemClock.elapsedRealtime();
+        boolean needsStart = expired || !pending && !claimed;
+        if (needsStart && startWait > 0)
+            return new LoginState("limited", "登录请求较多", "请等待 " + ((startWait + 999) / 1000) + " 秒后重试。", "稍后重试登录", false, "", false);
+        if (needsStart && "start_limited".equals(problem)) return new LoginState("retry", "可以重新发起登录", "等待已结束，请重新发起登录。", "重试登录", !busy, "", false);
         if ("start_failed".equals(problem)) return new LoginState("retry", "暂时无法打开登录", "请检查网络后重试。", "重试登录", !busy, "", false);
         if (expired || "expired".equals(problem)) return new LoginState("expired", "确认链接已过期", "重新发起后，请在浏览器确认连接这台设备。", "重新发起登录", !busy, "", false);
         if (pairing == null || !pending && !claimed) {
@@ -80,6 +87,9 @@ public final class NativeConnection {
     private static String request(JSONObject value) { return value == null ? "" : value.optString("request_id"); }
     private static boolean own(JSONObject store, String id, long revision) {
         return REVISION.get() == revision && !store.optBoolean("logout_pending") && id.equals(request(store.optJSONObject("pairing")));
+    }
+    private static boolean ownStart(JSONObject store, String id, String token, long revision) {
+        return own(store, id, revision) && token.equals(store.optString("reader_token"));
     }
     private static LinkedHashSet<String> retired(JSONObject store) {
         LinkedHashSet<String> result = new LinkedHashSet<>();
@@ -106,9 +116,9 @@ public final class NativeConnection {
     }
     /** Cancel invalidates in-flight calls and delayed browser callbacks. */
     public static boolean cancel(Context supplied) {
-        Context context = supplied.getApplicationContext(); REVISION.incrementAndGet();
-        issue = ""; issueRequest = "";
+        Context context = supplied.getApplicationContext();
         synchronized (SessionStore.class) {
+            REVISION.incrementAndGet(); issue = ""; issueRequest = "";
             JSONObject store = SessionStore.read(context), pairing = store.optJSONObject("pairing");
             LinkedHashSet<String> queue = retired(store);
             if (pairing != null) {
@@ -157,6 +167,7 @@ public final class NativeConnection {
         if (existing != null && ("native_claimed".equals(existing.optString("phase")) || "claimed".equals(existing.optString("phase")) || "exchanging".equals(existing.optString("phase")))
                 && NativeApi.time(existing.optString("reader_expires_at")) > System.currentTimeMillis()) { check(context); return; }
         if (!GATE.acquire()) return;
+        if (SystemClock.elapsedRealtime() < nextStart) { GATE.release(); return; }
         final long revision = REVISION.incrementAndGet();
         final String previousId = request(existing), previousToken = before.optString("reader_token");
         issue = ""; issueRequest = ""; error = ""; operation = "start"; operationRevision = revision; busy = true;
@@ -172,8 +183,7 @@ public final class NativeConnection {
                 if (!NativeApi.validId(id) || !url.equals(NativeApi.ORIGIN + "/#/native-connect/" + id) || NativeApi.time(result.optString("expires_at")) <= System.currentTimeMillis()) throw new Exception();
                 synchronized (SessionStore.class) {
                     JSONObject store = SessionStore.read(context);
-                    if (REVISION.get() != revision || store.optBoolean("logout_pending") || !previousToken.equals(store.optString("reader_token"))
-                            || !previousId.equals(request(store.optJSONObject("pairing")))) return;
+                    if (!ownStart(store, previousId, previousToken, revision)) return;
                     JSONObject old = store.optJSONObject("pairing");
                     if (old != null && !old.optString("reader_token").isEmpty() && !old.optString("reader_token").equals(previousToken)) {
                         LinkedHashSet<String> queue = retired(store); queue.add(old.optString("reader_token")); putRetired(store, queue);
@@ -184,7 +194,17 @@ public final class NativeConnection {
                     SessionStore.write(context, store); createdId = id;
                 }
                 nextPoll = 0;
-            } catch (Exception ignored) { url = ""; setIssue(previousId, revision, "start_failed"); if (REVISION.get() == revision) error = "无法打开登录，请检查连接后重试"; }
+            } catch (Exception failure) {
+                url = "";
+                synchronized (SessionStore.class) {
+                    if (ownStart(SessionStore.read(context), previousId, previousToken, revision)) {
+                        boolean limited = failure instanceof NativeApi.Failure && ((NativeApi.Failure) failure).status == 429;
+                        if (limited) nextStart = Math.max(nextStart, SystemClock.elapsedRealtime() + ((NativeApi.Failure) failure).retryAfterMs);
+                        setIssue(previousId, revision, limited ? "start_limited" : "start_failed");
+                        error = limited ? "登录请求较多，请稍后重试" : "无法打开登录，请检查连接后重试";
+                    }
+                }
+            }
             finally { busy = false; GATE.release(); scheduleRetirement(context); }
             String target = url, id = createdId;
             if (!id.isEmpty()) UI.post(() -> { if (own(SessionStore.read(context), id, revision)) listener.ready(target); });

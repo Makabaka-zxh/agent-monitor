@@ -19,7 +19,11 @@ final class TrackingService {
 }
 final class NativeApi {
     static final String ORIGIN = "https://monitor.example.com";
-    static final class Failure extends Exception { final int status; final long retryAfterMs; Failure(int value) { status=value; retryAfterMs=30000; } }
+    static final class Failure extends Exception {
+        final int status; final long retryAfterMs;
+        Failure(int value) { this(value, 30000); }
+        Failure(int value, long retryAfter) { status=value; retryAfterMs=retryAfter; }
+    }
     interface Transport { JSONObject call(String method, String path, JSONObject body, String token) throws Exception; }
     static volatile Transport transport;
     static final List<String> calls = new CopyOnWriteArrayList<>();
