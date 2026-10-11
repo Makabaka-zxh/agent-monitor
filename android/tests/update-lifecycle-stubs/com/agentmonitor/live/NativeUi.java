@@ -35,7 +35,7 @@ class NativeUi {
     View iconButton(String a,String s,Runnable r) {
         return button(s,false,r);
     }
-    View button(String s,boolean b,Runnable r) {
+    TextView button(String s,boolean b,Runnable r) {
         TextView t=new TextView(s);
         t.click=r;
         return t;

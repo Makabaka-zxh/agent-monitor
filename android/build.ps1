@@ -262,6 +262,8 @@ $updateTestsDirectory = Join-Path $buildDirectory 'update-policy-tests'
 New-Item -ItemType Directory -Force -Path $updateTestsDirectory | Out-Null
 Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', $updateTestsDirectory, (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdatePolicy.java'), (Join-Path $projectDirectory 'tests/UpdatePolicyTest.java'))
 Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $updateTestsDirectory, 'com.agentmonitor.live.UpdatePolicyTest')
+Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', $updateTestsDirectory, (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdateRetryPolicy.java'), (Join-Path $projectDirectory 'tests/UpdateRetryPolicyTest.java'))
+Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $updateTestsDirectory, 'com.agentmonitor.live.UpdateRetryPolicyTest')
 Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', $updateTestsDirectory, (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdatePolicy.java'), (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdateRecoveryPolicy.java'), (Join-Path $projectDirectory 'tests/UpdateRecoveryPolicyTest.java'))
 Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $updateTestsDirectory, 'com.agentmonitor.live.UpdateRecoveryPolicyTest', $updateTestsDirectory)
 
@@ -277,7 +279,9 @@ $updateClientTestsDirectory = Join-Path $buildDirectory 'update-client-tests'
 New-Item -ItemType Directory -Force -Path $updateClientTestsDirectory | Out-Null
 $updateClientTestSources = @(
     (Join-Path $projectDirectory 'tests/update-stubs/android/content/Context.java'),
+    (Join-Path $projectDirectory 'tests/update-client-stubs/android/os/SystemClock.java'),
     (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdatePolicy.java'),
+    (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdateRetryPolicy.java'),
     (Join-Path $projectDirectory 'src/com/agentmonitor/live/UpdateClient.java'),
     (Join-Path $projectDirectory 'tests/UpdateClientTest.java')
 )
@@ -289,7 +293,7 @@ Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', "$updateClientTestsDirector
 $updateProviderTestsDirectory = Join-Path $buildDirectory 'update-provider-tests'
 New-Item -ItemType Directory -Force -Path $updateProviderTestsDirectory | Out-Null
 $updateProviderTestSources = @((Join-Path $projectDirectory 'tests/update-provider-stubs/android/content/Context.java'))
-foreach ($source in @('UpdatePolicy', 'UpdateRecoveryPolicy', 'UpdatePackage', 'UpdateClient', 'UpdateInstallProvider')) {
+foreach ($source in @('UpdatePolicy', 'UpdateRecoveryPolicy', 'UpdatePackage', 'UpdateRetryPolicy', 'UpdateClient', 'UpdateInstallProvider')) {
     $updateProviderTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java"
 }
 $updateProviderTestSources += Join-Path $projectDirectory 'tests/UpdateInstallProviderTest.java'

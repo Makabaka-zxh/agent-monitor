@@ -24,7 +24,7 @@ SUITES = {
     "package-provider": (
         "update-package-stubs",
         "UpdatePackageProviderIntegrationTest",
-        ("UpdatePolicy", "UpdateRecoveryPolicy", "UpdatePackage", "UpdateInstallProvider", "UpdateClient"),
+        ("UpdatePolicy", "UpdateRecoveryPolicy", "UpdatePackage", "UpdateInstallProvider", "UpdateRetryPolicy", "UpdateClient"),
     ),
 }
 

@@ -1,6 +1,7 @@
 package com.agentmonitor.live;
 
 import android.content.Context;
+import android.os.SystemClock;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
@@ -20,6 +21,26 @@ import javax.net.ssl.HttpsURLConnection;
 /** Anonymous, bounded GitHub release reads. Never uses the account transport or its credentials. */
 final class UpdateClient {
     interface Progress { void downloaded(long bytes, long total); }
+    static final class RateLimitedException extends IOException {
+        RateLimitedException() { super("GitHub 请求较多，请等待后重试"); }
+    }
+    // Process-only monotonic deadline, including deep sleep. Closing/recreating the
+    // page cannot clear a server wait; sleeping must not prolong it either.
+    private static long retryUntilNanos;
+    static synchronized long retryRemainingMillis() {
+        long remaining = retryUntilNanos == 0 ? 0 : retryUntilNanos - SystemClock.elapsedRealtimeNanos();
+        return remaining <= 0 ? 0 : Math.min(UpdateRetryPolicy.MAX_WAIT_MS, (remaining - 1) / 1000000 + 1);
+    }
+    private static synchronized void rememberWait(long millis) {
+        long now = SystemClock.elapsedRealtimeNanos();
+        long current = retryUntilNanos == 0 ? 0 : retryUntilNanos - now;
+        long requested = TimeUnit.MILLISECONDS.toNanos(millis);
+        if (requested > current) retryUntilNanos = now + requested;
+    }
+    private static void guard(Operation operation) throws IOException {
+        operation.check();
+        if (retryRemainingMillis() > 0) throw new RateLimitedException();
+    }
     static final class Release {
         final UpdatePolicy.Manifest manifest;
         final String tag, apkUrl, notes;
@@ -59,6 +80,7 @@ final class UpdateClient {
         public void close() { alarm.cancel(false); cancel(); }
     }
     static Release check(Operation operation) throws Exception {
+        guard(operation);
         JSONObject release = new JSONObject(new String(read(UpdatePolicy.LATEST_RELEASE_API, null, null,
                 UpdatePolicy.MAX_METADATA_BYTES, operation), StandardCharsets.UTF_8));
         if (!Boolean.FALSE.equals(release.opt("draft")) || !Boolean.FALSE.equals(release.opt("prerelease")))
@@ -84,6 +106,7 @@ final class UpdateClient {
         return new Release(manifest, tag, apkUrl, notes(release.opt("body")));
     }
     static File download(Context context, Release release, Operation operation, Progress progress) throws Exception {
+        guard(operation);
         File directory = new File(context.getCacheDir(), "updates");
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("无法保存安装包");
         File part = File.createTempFile("update-", ".part", directory);
@@ -133,7 +156,7 @@ final class UpdateClient {
     private static HttpsURLConnection open(String initial, String tag, String assetName, Operation operation) throws Exception {
         String target = initial;
         for (int redirects = 0; redirects <= 5; redirects++) {
-            operation.check();
+            guard(operation);
             if (tag == null ? !UpdatePolicy.LATEST_RELEASE_API.equals(target) : !UpdatePolicy.allowedRedirect(target, tag, assetName))
                 throw new IOException("更新地址不受信任");
             HttpsURLConnection connection = (HttpsURLConnection) new URL(target).openConnection();
@@ -154,7 +177,18 @@ final class UpdateClient {
                     target = new URL(new URL(target), location).toString(); continue;
                 }
                 if (status == 404) throw new IOException("还没有可用的正式版本，请稍后再试");
-                if (status == 403 || status == 429) throw new IOException("GitHub 暂时限制检查，请稍后重试");
+                if (status == 403 || status == 429) {
+                    long wait = UpdateRetryPolicy.waitMillis(status, connection.getHeaderField("Retry-After"),
+                            connection.getHeaderField("x-ratelimit-remaining"), connection.getHeaderField("x-ratelimit-reset"),
+                            System.currentTimeMillis());
+                    // Cancellation and accepting a retry hint share one lock. A cancelled
+                    // response cannot install a process-wide wait after its page is gone.
+                    synchronized (operation) {
+                        operation.check();
+                        if (wait > 0) { rememberWait(wait); throw new RateLimitedException(); }
+                    }
+                    throw new IOException("GitHub 暂时拒绝访问更新，请稍后重试");
+                }
                 if (status != 200) throw new IOException("暂时无法读取更新，请重试");
                 String encoding = connection.getContentEncoding();
                 if (encoding != null && !encoding.equalsIgnoreCase("identity")) throw new IOException("更新文件编码不受支持");

@@ -21,6 +21,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.File;
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -32,6 +33,9 @@ public final class NativeUpdateActivity extends Activity {
     private NativeUi ui;
     private LinearLayout content;
     private TextView progressView;
+    private TextView retryView;
+    private final ArrayList<TextView> networkButtons = new ArrayList<>();
+    private final Runnable retryTick = () -> refreshRetryControls();
     private UpdatePackage.Installed installed;
     private UpdateClient.Release release;
     private UpdatePackage.Verified ready;
@@ -72,7 +76,8 @@ public final class NativeUpdateActivity extends Activity {
     }
     private void render() {
         if (content == null || ui == null) return;
-        content.removeAllViews(); progressView = null;
+        main.removeCallbacks(retryTick);
+        content.removeAllViews(); progressView = null; retryView = null; networkButtons.clear();
         LinearLayout current = ui.card(); current.addView(ui.text("Monitor", 26, true)); current.addView(ui.space(10));
         current.addView(ui.text(installed == null ? "当前版本未知" : "当前版本 " + installed.name, 17)); content.addView(current, wrap());
         content.addView(ui.space(20));
@@ -83,14 +88,16 @@ public final class NativeUpdateActivity extends Activity {
         content.addView(ui.text(heading, 22, true), wrap()); content.addView(ui.space(12));
         progressView = ui.text(message, 16); progressView.setTextColor(ui.muted); progressView.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         content.addView(progressView, wrap()); content.addView(ui.space(20));
+        retryView = ui.text("", 15); retryView.setTextColor(ui.muted);
+        content.addView(retryView, wrap());
         if (busy()) addButton("取消", false, this::cancelByUser);
         else if (state == State.READY && ready != null) {
             addButton(canInstall() ? "安装更新" : "允许安装此应用的更新", true, this::install);
-            addButton("重新检查", false, this::check);
+            addNetworkButton("重新检查", false, this::check);
         } else if (release != null && installed != null && release.manifest.eligible(installed.code, Build.VERSION.SDK_INT)) {
-            addButton(state == State.ERROR ? "重试下载" : "下载更新 · " + size(release.manifest.size), true, this::download);
-            addButton("重新检查", false, this::check);
-        } else if (installed != null) addButton(state == State.ERROR ? "重试检查" : "检查更新", true, this::check);
+            addNetworkButton(state == State.ERROR ? "重试下载" : "下载更新 · " + size(release.manifest.size), true, this::download);
+            addNetworkButton("重新检查", false, this::check);
+        } else if (installed != null) addNetworkButton(state == State.ERROR ? "重试检查" : "检查更新", true, this::check);
         if (release != null) {
             content.addView(ui.space(16)); LinearLayout notes = ui.card();
             notes.addView(ui.text("版本 " + release.manifest.versionName, 19, true)); notes.addView(ui.space(12));
@@ -106,14 +113,35 @@ public final class NativeUpdateActivity extends Activity {
                     .addCategory(Intent.CATEGORY_BROWSABLE)); }
             catch (RuntimeException unavailable) { message = "暂时无法打开浏览器。"; render(); }
         });
+        refreshRetryControls();
     }
-    private void addButton(String label, boolean primary, Runnable action) {
-        content.addView(ui.button(label, primary, action), wrap()); content.addView(ui.space(10));
+    private TextView addButton(String label, boolean primary, Runnable action) {
+        TextView button = ui.button(label, primary, action);
+        content.addView(button, wrap()); content.addView(ui.space(10)); return button;
+    }
+    private void addNetworkButton(String label, boolean primary, Runnable action) {
+        networkButtons.add(addButton(label, primary, action));
+    }
+    private void refreshRetryControls() {
+        main.removeCallbacks(retryTick);
+        if (content == null || retryView == null) return;
+        long remaining = UpdateClient.retryRemainingMillis();
+        boolean waiting = remaining > 0;
+        for (TextView button : networkButtons) {
+            button.setEnabled(!waiting); button.setAlpha(waiting ? 0.45f : 1f);
+        }
+        boolean show = waiting && !networkButtons.isEmpty();
+        retryView.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (show) retryView.setText("更新服务暂时限制请求，请等待 " + ((remaining + 999) / 1000) + " 秒后重试。");
+        // Update only the countdown and controls: keep focus, selection and scroll stable.
+        // Reaching zero enables an explicit retry; it never sends a request itself.
+        if (resumed && show) main.postDelayed(retryTick, Math.min(1000L, remaining));
     }
     private static LinearLayout.LayoutParams wrap() { return new LinearLayout.LayoutParams(-1, -2); }
     private boolean busy() { return state == State.CHECKING || state == State.DOWNLOADING || state == State.VERIFYING; }
     private void check() {
         if (!resumed || installed == null || busy()) return;
+        if (UpdateClient.retryRemainingMillis() > 0) { render(); return; }
         discardReady(); release = null; state = State.CHECKING; message = "正在读取最新正式版本…";
         UpdateClient.Operation task = start(45000); long id = generation;
         WeakReference<NativeUpdateActivity> target = new WeakReference<>(this); Handler delivery = main;
@@ -138,6 +166,7 @@ public final class NativeUpdateActivity extends Activity {
     }
     private void download() {
         if (!resumed || release == null || installed == null || busy() || !release.manifest.eligible(installed.code, Build.VERSION.SDK_INT)) return;
+        if (UpdateClient.retryRemainingMillis() > 0) { render(); return; }
         discardReady(); state = State.DOWNLOADING; message = "正在下载，离开此页面会取消。";
         UpdateClient.Operation task = start(5 * 60 * 1000L); long id = generation;
         Context app = getApplicationContext(); UpdateClient.Release selected = release;
@@ -272,6 +301,7 @@ public final class NativeUpdateActivity extends Activity {
     }
     private static String failure(Exception error) {
         // Transport exception text can include remote URLs. Only our own fixed messages are shown.
+        if (error instanceof UpdateClient.RateLimitedException) return "更新请求较多，请等待后重试。";
         String message = error.getMessage();
         if (error.getClass() == java.io.IOException.class && message != null) switch (message) {
             case "请求超时，请重试": case "操作已取消": case "当前没有可用的正式版本":
@@ -279,7 +309,8 @@ public final class NativeUpdateActivity extends Activity {
             case "无法保存安装包": case "安装包大小不一致": case "安装包超出预期大小":
             case "安装包校验失败，请重新下载": case "无法保存已校验的安装包": case "更新信息过大":
             case "更新地址不受信任": case "更新地址跳转异常": case "还没有可用的正式版本，请稍后再试":
-            case "GitHub 暂时限制检查，请稍后重试": case "暂时无法读取更新，请重试": case "更新文件编码不受支持":
+            case "GitHub 暂时限制检查，请稍后重试": case "GitHub 暂时拒绝访问更新，请稍后重试":
+            case "暂时无法读取更新，请重试": case "更新文件编码不受支持":
             case "发布文件列表不符合要求": case "发布文件重复或尚未就绪": case "该版本尚未提供应用内更新文件":
             case "更新信息字段无效": case "更新信息数字无效": case "安装包大小或位置无效":
             case "安装包版本或应用身份不一致": case "安装包签名与当前应用不一致": case "应用版本无效": return message;
@@ -310,14 +341,14 @@ public final class NativeUpdateActivity extends Activity {
         super.onSaveInstanceState(saved);
     }
     @Override protected void onPause() {
-        resumed = false;
+        resumed = false; main.removeCallbacks(retryTick);
         if (busy()) { cancelOperation(); state = ready != null ? State.READY : release != null ? State.AVAILABLE : State.IDLE; message = "操作已暂停，返回后可重试。"; }
         super.onPause();
     }
     @Override protected void onDestroy() {
-        resumed = false; cancelOperation(); worker.shutdownNow();
+        resumed = false; main.removeCallbacks(retryTick); cancelOperation(); worker.shutdownNow();
         if (isFinishing()) discardReady();
         // Worker callbacks hold only a WeakReference and dispose any late download themselves.
-        content = null; progressView = null; ui = null; super.onDestroy();
+        content = null; progressView = null; retryView = null; networkButtons.clear(); ui = null; super.onDestroy();
     }
 }
