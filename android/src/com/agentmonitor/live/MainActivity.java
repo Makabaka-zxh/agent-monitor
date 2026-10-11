@@ -20,10 +20,14 @@ import android.os.Looper;
 import android.os.Parcelable;
 import android.os.SystemClock;
 import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -57,6 +61,9 @@ public final class MainActivity extends Activity {
     private FrameLayout body;
     private TextView title, connection, trackingButton, trackingNote, archiveButton, emptyLabel, deviceStatus, profileSaveButton, avatarPickButton;
     private TextView loginStatus, loginNote, loginButton, loginCheckButton;
+    private TextView taskSearchSummary;
+    private EditText taskSearchInput;
+    private View taskSearchClear;
     private LinearLayout accountCard;
     private TextView accountName, accountRetry;
     private ImageView accountAvatar;
@@ -83,6 +90,7 @@ public final class MainActivity extends Activity {
     private boolean visible, snapshotBusy, accountBusy, failed, logoutBusy, filterInitialized, profileDraft, lastStale = true, filterBusy, filterDirty, avatarBusy;
     private long sessionEpoch, pageEpoch, lastSuccess, nextSnapshot, actionRevision, apiCooldownUntil, filterRetryAt, avatarGeneration;
     private String loadedToken = "", invalidToken = "", page = "tasks", selectedId = "", tool = "all", scope = "active";
+    private String taskQuery = "";
     private String draftName = "", draftAvatar = "", pickerToken = "", pickerPage = "", pairingCode = "", pairingExpires = "", taskReturnDevice = "", pendingAvatarUri = "";
     private long pickerEpoch;
     private EditText nameInput;
@@ -142,6 +150,8 @@ public final class MainActivity extends Activity {
         bottomBar = ui.row(); bottomBar.setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(6)); root.addView(bottomBar, wrap()); setContentView(root); root.requestApplyInsets();
         if (Build.VERSION.SDK_INT >= 33) { backCallback = this::back; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback); }
         JSONObject store = SessionStore.read(this); if (fullConnection(store)) loadedToken = store.optString("reader_token");
+        if (saved != null) taskQuery = NativeTaskSearchPolicy.restoreQuery(saved.getString("task_query", ""),
+                saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken));
         UsageAlerts.sync(this);
         if (saved != null && !tokenFingerprint(loadedToken).equals(saved.getString("state_fingerprint", ""))) { profileDraft = false; draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = ""; listPositions.clear(); scrollPositions.clear(); }
         if (saved != null && !loadedToken.isEmpty() && tokenFingerprint(loadedToken).equals(saved.getString("picker_fingerprint", ""))) { pickerToken = loadedToken; pickerPage = saved.getString("picker_page", ""); pickerEpoch = saved.getLong("picker_epoch", -1); }
@@ -166,7 +176,7 @@ public final class MainActivity extends Activity {
     private void reconcileConnection() {
         JSONObject store = SessionStore.read(this); String token = fullConnection(store) ? store.optString("reader_token") : "";
         if (token.equals(loadedToken)) return;
-        sessionEpoch++; actionRevision++; pageEpoch++; loadedToken = token; snapshot = null; account = null; lastSuccess = 0; nextSnapshot = 0; failed = false;
+        sessionEpoch++; actionRevision++; pageEpoch++; loadedToken = token; taskQuery = ""; snapshot = null; account = null; lastSuccess = 0; nextSnapshot = 0; failed = false;
         usageSummary = null; usageBusy = false; usageFailed = false; nextUsage = 0;
         usageRequestRevision = 0; usageAcceptedRevision = 0; usageAlertRevision = 0;
         UsageAlerts.sync(this);
@@ -303,6 +313,8 @@ public final class MainActivity extends Activity {
 
     private void showPage(boolean animate) {
         if (body == null) return;
+        if (taskSearchInput != null && taskSearchInput.hasFocus()) hideTaskSearchKeyboard();
+        taskSearchInput = null; taskSearchClear = null; taskSearchSummary = null;
         UsageAlerts.dismissSettings(this);
         if (helpDialog != null && (loadedToken.isEmpty() || !pageKey().equals(helpPage))) dismissHelp();
         if (taskResults != null) { taskResults.dispose(); taskResults = null; }
@@ -412,16 +424,60 @@ public final class MainActivity extends Activity {
     }
     private void buildTasks() {
         LinearLayout column = ui.column(); body.addView(column, new FrameLayout.LayoutParams(-1, -1));
+        column.setFocusableInTouchMode(true);
         LinearLayout filters = ui.column(); filters.setPadding(ui.dp(18), ui.dp(4), ui.dp(18), ui.dp(6));
         toolSegments = new NativePages.Segments(ui, new String[]{"all", "claude", "codex"}, new String[]{"全部", "Claude Code", "Codex"}, key -> { tool = key; filterInitialized = true; saveFilters(); updateWorkspace(); if (list != null) list.setSelection(0); persistFilter(); }); toolSegments.select(tool); filters.addView(toolSegments.view(), wrap()); filters.addView(ui.space(8));
-        scopeSegments = new NativePages.Segments(ui, new String[]{"active", "all", "archived"}, new String[]{"进行中", "全部任务", "已归档"}, key -> { scope = key; saveFilters(); updateWorkspace(); if (list != null) list.setSelection(0); }); scopeSegments.select(scope); filters.addView(scopeSegments.view(), wrap()); column.addView(filters, wrap());
+        scopeSegments = new NativePages.Segments(ui, new String[]{"active", "all", "archived"}, new String[]{"进行中", "全部任务", "已归档"}, key -> { scope = key; saveFilters(); updateWorkspace(); if (list != null) list.setSelection(0); }); scopeSegments.select(scope); filters.addView(scopeSegments.view(), wrap());
+        filters.addView(ui.space(10)); buildTaskSearch(filters); column.addView(filters, wrap());
         taskAdapter = new NativePages.TaskAdapter(ui, taskCallbacks()); list = NativePages.list(ui, taskAdapter); attachList(column);
+        column.requestFocus();
+    }
+    private void buildTaskSearch(LinearLayout filters) {
+        LinearLayout row = ui.row();
+        final EditText field = input("搜索任务、项目或电脑", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        taskSearchInput = field; field.setSingleLine(true); field.setSaveEnabled(false);
+        field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
+        field.setImeOptions(EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        field.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(NativeTaskSearchPolicy.MAX_QUERY_LENGTH)});
+        field.setContentDescription("搜索任务、项目或电脑"); field.setText(taskQuery);
+        row.addView(field, new LinearLayout.LayoutParams(0, -2, 1));
+        taskSearchClear = ui.iconButton("close", "清空搜索", () -> { if (taskSearchInput == field) field.setText(""); });
+        taskSearchClear.setVisibility(taskQuery.isEmpty() ? View.INVISIBLE : View.VISIBLE); row.addView(taskSearchClear);
+        filters.addView(row, wrap());
+        taskSearchSummary = ui.text("", 12); taskSearchSummary.setTextColor(ui.muted);
+        taskSearchSummary.setPadding(ui.dp(2), ui.dp(6), 0, 0); taskSearchSummary.setVisibility(View.GONE); filters.addView(taskSearchSummary, wrap());
+        final long searchSession = sessionEpoch, searchPage = pageEpoch;
+        field.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            public void afterTextChanged(Editable text) {
+                if (taskSearchInput != field || !page.equals("tasks") || loadedToken.isEmpty()
+                        || sessionEpoch != searchSession || pageEpoch != searchPage) return;
+                taskQuery = NativeTaskSearchPolicy.boundedQuery(text.toString());
+                taskSearchClear.setVisibility(taskQuery.isEmpty() ? View.INVISIBLE : View.VISIBLE);
+                // Search owns only the displayed rows, never a network read or saved server preference.
+                listPositions.remove(pageKey()); updateWorkspace(); if (list != null) list.setSelection(0);
+            }
+        });
+        field.setOnEditorActionListener((view, action, event) -> {
+            if (action != EditorInfo.IME_ACTION_SEARCH || taskSearchInput != field) return false;
+            hideTaskSearchKeyboard(); return true;
+        });
+    }
+    private void hideTaskSearchKeyboard() {
+        if (taskSearchInput == null) return;
+        InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(taskSearchInput.getWindowToken(), 0);
+        taskSearchInput.clearFocus();
     }
     private NativePages.TaskCallbacks taskCallbacks() { return new NativePages.TaskCallbacks() { public void open(JSONObject task) { navigate("task", task.optString("id")); } public void archive(JSONObject task) { MainActivity.this.archive(task); } }; }
     private void attachList(LinearLayout column) {
         FrameLayout area = new FrameLayout(this); column.addView(area, new LinearLayout.LayoutParams(-1, 0, 1)); area.addView(list, new FrameLayout.LayoutParams(-1, -1));
         emptyLabel = ui.text("正在读取", 17, false); emptyLabel.setTextColor(ui.muted); emptyLabel.setGravity(Gravity.CENTER); emptyLabel.setPadding(ui.dp(26), ui.dp(30), ui.dp(26), ui.dp(30)); area.addView(emptyLabel, new FrameLayout.LayoutParams(-1, -1)); list.setEmptyView(emptyLabel);
-        emptyLabel.setOnClickListener(v -> { nextSnapshot = 0; fetchSnapshot(); });
+        emptyLabel.setOnClickListener(v -> {
+            if (page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null) return;
+            nextSnapshot = 0; fetchSnapshot();
+        });
     }
     private void buildDevices() {
         LinearLayout column = ui.column(); body.addView(column, new FrameLayout.LayoutParams(-1, -1)); deviceAdapter = new NativePages.DeviceAdapter(ui, device -> navigate("device", device.optString("id"))); list = NativePages.list(ui, deviceAdapter); attachList(column);
@@ -479,24 +535,25 @@ public final class MainActivity extends Activity {
         if (page.equals("device")) { JSONObject device = findDevice(selectedId); if (deviceStatus == null && device != null) { showPage(false); return; } if (deviceStatus != null && device != null) deviceStatus.setText(device.optString("platform", "电脑") + " · " + (stale() ? "状态未知" : device.optBoolean("online") ? "在线" : "离线")); }
         int uncertainSelectedTasks = 0;
         if (taskAdapter != null) {
-            JSONArray shown = new JSONArray(); int[] counts = {0, 0, 0}; JSONArray all = tasks();
-            for (int i = 0; i < all.length(); i++) {
-                JSONObject task = all.optJSONObject(i); if (task == null) continue; JSONObject device = findDevice(task.optString("device_id")); boolean unknown = stale() || device == null || !device.optBoolean("online");
-                if (NativeWorkbenchPolicy.uncertainTask(tool, task.optString("tool"), task.optString("status"), task.optBoolean("archived"), unknown)) uncertainSelectedTasks++;
-                if (page.equals("device")) { if (selectedId.equals(task.optString("device_id")) && !task.optBoolean("archived")) shown.put(task); }
-                else {
-                    boolean inScope = NativeScreenPolicy.includes("all", scope, task.optString("tool"), task.optString("status"), task.optBoolean("archived"), unknown);
-                    if (inScope) { counts[0]++; if (task.optString("tool").equals("claude")) counts[1]++; if (task.optString("tool").equals("codex")) counts[2]++; }
-                    if (NativeScreenPolicy.includes(tool, scope, task.optString("tool"), task.optString("status"), task.optBoolean("archived"), unknown)) shown.put(task);
-                }
+            NativeTaskListModel.Result selected = NativeTaskListModel.select(tasks(), devices(), tool, scope,
+                    page.equals("device") ? selectedId : null, taskQuery, stale());
+            uncertainSelectedTasks = selected.uncertainSelectedTasks;
+            taskAdapter.update(selected.tasks, devices(), stale()); if (toolSegments != null) toolSegments.counts(selected.toolCounts);
+            if (taskSearchSummary != null) {
+                boolean searching = NativeTaskSearchPolicy.isSearching(taskQuery);
+                taskSearchSummary.setVisibility(searching && snapshot != null ? View.VISIBLE : View.GONE);
+                if (searching) taskSearchSummary.setText("当前列表匹配 " + selected.tasks.length() + " 项");
             }
-            taskAdapter.update(shown, devices(), stale()); if (toolSegments != null) toolSegments.counts(counts);
         }
         if (deviceAdapter != null) deviceAdapter.update(devices(), stale());
         if (emptyLabel != null) {
             JSONArray computers = devices(); int online = 0;
             for (int i = 0; i < computers.length(); i++) { JSONObject computer = computers.optJSONObject(i); if (computer != null && computer.optBoolean("online")) online++; }
             emptyLabel.setText(snapshot == null ? failed ? "暂时无法读取，点此重试" : "正在读取" : page.equals("devices") ? "还没有连接电脑" : page.equals("tasks") && scope.equals("active") ? NativeWorkbenchPolicy.emptyActive(stale(), computers.length(), online, uncertainSelectedTasks) : page.equals("tasks") && scope.equals("archived") ? "暂无归档任务" : "暂无任务");
+            boolean searching = page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null;
+            if (searching && !(scope.equals("active") && (stale() || uncertainSelectedTasks > 0)))
+                emptyLabel.setText("没有匹配的任务\n试试其他关键词，或调整来源和状态筛选");
+            emptyLabel.setClickable(!searching);
         }
     }
     private void updateConnection() {
@@ -725,7 +782,7 @@ public final class MainActivity extends Activity {
         if (!visible || isFinishing() || isDestroyed() || helpDialog != null) return;
         String message;
         switch (page) {
-            case "tasks": message = "按工具和状态筛选任务。\n\n“进行中”包括执行、等待批准和出错的任务，离线记录不会显示为正在执行。"; break;
+            case "tasks": message = "按工具和状态筛选任务，也可搜索任务名称、项目或电脑名称。搜索只在已加载的列表中进行，多个关键词用空格分开；清空后恢复当前筛选。\n\n“进行中”包括执行、等待批准和出错的任务，离线记录不会显示为正在执行。"; break;
             case "task": message = "查看任务状态和最终结果，也可下载文件或继续回复。\n\n开始跟踪后，进度会显示在系统实况中。展示方式由系统通知设置决定。"; break;
             case "devices": case "device": message = "已连接的电脑随账号同步。\n\n电脑保持开机、采集端运行时，任务状态会自动更新。"; break;
             case "pairing": message = "扫描电脑采集端的二维码，或生成配对码后在电脑端输入。\n\n配对码 10 分钟内有效，只能使用一次。"; break;
@@ -842,7 +899,7 @@ public final class MainActivity extends Activity {
         visible = false; handler.removeCallbacks(heartbeat);
         TrackingService.requestStop(this, TrackingService.generation); UsageAlerts.sync(this);
         sessionEpoch++; pageEpoch++; actionRevision++; loadedToken = ""; invalidToken = "";
-        snapshot = null; account = null; usageSummary = null; profileDraft = false;
+        snapshot = null; account = null; usageSummary = null; profileDraft = false; taskQuery = "";
         draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = "";
         mutations.clear(); listPositions.clear(); scrollPositions.clear(); clearNotificationRequest();
         if (taskResults != null) { taskResults.dispose(); taskResults = null; }
@@ -931,6 +988,7 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle saved) {
         if (taskResults != null) saved.putBundle("task_results", taskResults.saveState());
         captureDraft(); saved.putString("page", page); saved.putString("id", selectedId); saved.putString("tool", tool); saved.putString("scope", scope);
+        saved.putString("task_query", loadedToken.isEmpty() ? "" : NativeTaskSearchPolicy.boundedQuery(taskQuery));
         if (profileDraft) { saved.putBoolean("profile_draft", true); saved.putString("draft_name", draftName); saved.putString("draft_avatar", draftAvatar); }
         if (list != null) saved.putParcelable("list_position", list.onSaveInstanceState()); if (scroll != null) saved.putInt("scroll_y", scroll.getScrollY());
         saved.putString("pairing_code", pairingCode); saved.putString("pairing_expires", pairingExpires);

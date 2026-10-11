@@ -67,6 +67,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File android/build.ps1 `
 
 构建产物为 `android/build/monitor-live-test.apk`。脚本检查 APK 签名及字体资源，并运行 Android 的纯 Java 和隔离平台测试，包括更新策略测试；它不安装到手机。这个历史文件名同样用于外部签名构建，发布前可复制为带版本号的文件名。
 
+任务搜索检查执行实际的查询匹配与列表选择代码，覆盖多语言关键词、来源和状态组合、计数、离线记录以及同连接的查询恢复边界。输入框、键盘、焦点及系统页面重建的真实交互仍需设备验收。
+
 ### 更新流程主机集成测试
 
 两组集成测试只需要 Python 3.12+ 和 JDK 17，可在 Windows / Linux 单独运行，无需 Android SDK、签名或手机：
