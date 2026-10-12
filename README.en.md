@@ -7,7 +7,7 @@ A self-hosted companion for Codex and Claude Code across multiple computers. Vie
 ## Highlights
 
 - Multiple Windows / Mac collectors, task filtering, active and archived views.
-- Unreleased Android task search: match loaded task titles, projects and computer names, combine space-separated terms with existing filters, and clear the query in one tap. Queries stay local; task bodies are not searched.
+- Android task search from 1.0.4: match loaded task titles, projects and computer names, combine space-separated terms with existing filters, and clear the query in one tap. Queries stay local; task bodies are not searched.
 - Explicit pairing and per-device result/file/reply permissions.
 - Native Android UI, profile settings, usage charts and live-notification content previews.
 - In-app GitHub release checks, bounded APK downloads, SHA-256 and signer validation, followed by the Android package installer.
