@@ -45,6 +45,7 @@ final class MonitorApplicationDelegate: NSObject, NSApplicationDelegate {
     let store = MonitorStore()
     private var polling: Task<Void, Never>?
     func applicationWillFinishLaunching(_ notification: Notification) {
+        if let image = MonitorResources.image("AppIcon") { NSApplication.shared.applicationIconImage = image }
         store.usageAlerts.start()
     }
     func applicationDidFinishLaunching(_ notification: Notification) {

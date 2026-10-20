@@ -698,8 +698,8 @@ public final class TrackingNotificationTest {
         check(value.actions == null || value.actions.length == 0, label + ": no extra action text");
         check(value.shortCriticalText == null || ("Claude Code".equals(brand) ? "Claude" : "Codex").contentEquals(value.shortCriticalText),
                 label + ": compact live text contains only the tool name");
-        check(value.smallIcon == ("Claude Code".equals(brand) ? R.drawable.ic_claude : R.drawable.ic_codex),
-                label + ": matching tool icon");
+        check(value.smallIcon == R.drawable.ic_monitor,
+                label + ": Monitor status-bar identity accompanies the explicit tool name");
         contentBrandIcon(value, brand, label);
     }
     private static void contentBrandIcon(Notification value, String brand, String label) {
@@ -1027,6 +1027,7 @@ public final class TrackingNotificationTest {
             selectedDurationIntegration();
             untilTaskEndIntegration();
             lockscreenContent();
+            unknownToolKeepsAppIdentity();
             lockscreenFailureDefaults();
             deferredPrivacyAndClearAll();
             richPresentationChanges();
@@ -1035,6 +1036,22 @@ public final class TrackingNotificationTest {
             System.out.println("TrackingNotificationTest: " + checks + " checks passed");
         } finally {
             for (TrackingService service : services) service.onDestroy();
+        }
+    }
+    private static void unknownToolKeepsAppIdentity() throws Exception {
+        for (String source : new String[]{null, "", "future-tool", "Codex", "claude "}) {
+            TrackingService service = start("synthetic-unknown-tool");
+            service.onStartCommand(new Intent(service, TrackingService.class).setAction("track")
+                    .putExtra("task_id", "synthetic-unknown-tool").putExtra("title", "Synthetic task")
+                    .putExtra("tool", source).putExtra("duration_minutes", 30), 0, 1);
+            handler(service).queued.clear();
+            Notification notice = notification(service, "执行中", true, true);
+            check("任务".contentEquals(notice.publicVersion.contentTitle), "unknown source is not labelled Codex or Claude");
+            check(notice.smallIcon == R.drawable.ic_monitor, "unknown source keeps Monitor status icon");
+            check(notice.largeIcon.getResId() == R.drawable.monitor_brand, "unknown source uses the Monitor application artwork");
+            check(notice.publicVersion.largeIcon.getResId() == R.drawable.monitor_brand, "unknown public fallback cannot borrow a provider logo");
+            check(notice.extras.getString(XiaomiLiveNotification.PARAM) == null, "unknown source remains outside unverified OEM templates");
+            service.onDestroy();
         }
     }
 }

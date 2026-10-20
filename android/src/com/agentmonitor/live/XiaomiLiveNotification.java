@@ -34,7 +34,7 @@ final class XiaomiLiveNotification {
         try {
             // Only bundled provider artwork is accepted; caller-supplied bitmaps could contain data.
             Icon icon = Icon.createWithResource(context,
-                    "claude".equals(tool) ? R.drawable.claude : R.drawable.codex);
+                    "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : R.drawable.monitor_brand);
             Bundle pictures = new Bundle();
             pictures.putParcelable(TOOL_ICON, icon);
             attach(notification, payload, pictures);

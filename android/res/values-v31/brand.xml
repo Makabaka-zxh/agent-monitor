@@ -1,0 +1,8 @@
+<resources>
+  <style name="MonitorLaunchTheme" parent="AppTheme">
+    <item name="android:windowSplashScreenBackground">#FFFFFF</item>
+    <item name="android:windowSplashScreenAnimatedIcon">@drawable/monitor_brand</item>
+    <item name="android:windowSplashScreenIconBackgroundColor">#FFFFFF</item>
+    <item name="android:windowSplashScreenAnimationDuration">0</item>
+  </style>
+</resources>

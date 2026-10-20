@@ -340,7 +340,7 @@ def install(home: Path, project: Path) -> None:
     subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "--only-binary=:all:",
                     "-r", str(runtime / "requirements-connector.txt")], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run([str(python), "-I", "-c", "import fastapi, qrcode, PIL"], check=True)
+    subprocess.run([str(python), "-I", "-c", "import fastapi, qrcode, PIL, zstandard"], check=True)
     stop(locations)
     write_private(locations["environment"], json_bytes(environment))
     write_private(locations["current"], json_bytes({"release": release}))

@@ -123,7 +123,7 @@
   };
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const icon = (name, extra = "") => `<svg class="icon ${extra}" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.monitor}</svg>`;
-  const brand = (tool) => `<span class="brand" aria-hidden="true"><img src="/assets/${tool === "claude" ? "claude" : "codex"}-official.png" width="34" height="34" alt=""></span>`;
+  const brand = (tool) => `<span class="brand" aria-hidden="true"><img src="/assets/${tool === "claude" ? "claude-official.png" : tool === "codex" ? "codex-official.png" : "app-icon-192.png"}" width="34" height="34" alt=""></span>`;
   const encoded = (value) => esc(encodeURIComponent(String(value)));
   const device = (id) => state.snapshot?.devices?.find((d) => String(d.id) === String(id));
   const tasks = () => Array.isArray(state.snapshot?.tasks) ? state.snapshot.tasks : [];
@@ -464,7 +464,8 @@
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeHelp();
   });
   function heading(title, subtitle = "", backHtml = "") {
-    setHeader(`${backHtml}${titleRow(title, state.route.page)}${subtitle ? `<p class="subtitle">${esc(subtitle)}</p>` : ""}`);
+    const appBrand = backHtml ? "" : '<div class="monitor-wordmark"><img src="/assets/app-icon-192.png" width="42" height="42" alt=""><span>Monitor</span></div>';
+    setHeader(`${appBrand}${backHtml}${titleRow(title, state.route.page)}${subtitle ? `<p class="subtitle">${esc(subtitle)}</p>` : ""}`);
   }
   const empty = (title, description = "", glyph = "tasks", action = "") => `<div class="empty">${icon(glyph)}<h2>${esc(title)}</h2>${description ? `<p>${esc(description)}</p>` : ""}${action}</div>`;
   function snapshotPlaceholder(label = "任务") {

@@ -26,6 +26,7 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from .store import SESSION_SECONDS, PairingRequestError, Store, iso
 from .profile import AVATAR_DATA_URL_LENGTH, normalize_avatar
+from .error_analysis import ErrorAnalysis
 
 COOKIE = "agent_monitor_session"
 logger = logging.getLogger("agent_monitor")
@@ -111,6 +112,7 @@ class Task(BaseModel):
     final_result_at: str = Field(default="", max_length=80)
     project: str = Field(default="", max_length=120)
     status_source: Literal["local_log", "hook"] = "local_log"
+    error_analysis: ErrorAnalysis | None = None
 
     @field_validator("updated_at")
     @classmethod

@@ -157,8 +157,7 @@ def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *, 
             continue
         try:
             # Metadata must be in the complete head, never inferred from name.
-            with path.open("rb") as handle:
-                head = collector._json_lines(handle.read(collector.HEAD_BYTES))
+            head = collector._read_head(path)
             if tool == "codex":
                 metadata = next((row.get("payload") for row in head if row.get("type") == "session_meta"
                                  and isinstance(row.get("payload"), dict)), None)
@@ -300,7 +299,10 @@ class LocalResults:
                 # beyond the bounded tail. Keep the already verified answer
                 # only for the same, growing transcript (never replacement or
                 # truncation), which is still the most recent completed result.
-                if (cached and fingerprint[:2] == cached[0][:2] and fingerprint[2] > cached[0][2]
+                # Recompression can grow the same file without appending any
+                # transcript. Only plain append-only logs can use this rule.
+                if (not session.path.name.endswith(".jsonl.zst") and cached
+                        and fingerprint[:2] == cached[0][:2] and fingerprint[2] > cached[0][2]
                         and cached[1]["_session"] == session):
                     with self.lock:
                         self.cache[source_id] = (fingerprint, cached[1])

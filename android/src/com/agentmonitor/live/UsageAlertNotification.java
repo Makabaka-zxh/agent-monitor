@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.drawable.Icon;
 
 /** Shared rendering only: no requests, usage data writes or reminder scheduling. */
 final class UsageAlertNotification {
@@ -20,18 +21,19 @@ final class UsageAlertNotification {
     }
     private static Notification.Builder builder(Context context, String channel, String tool,
                                                  String text, String detail, boolean locked) {
-        String brand = "claude".equals(tool) ? "Claude Code" : "Codex";
-        int icon = "claude".equals(tool) ? R.drawable.ic_claude : R.drawable.ic_codex;
+        String brand = "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "任务";
+        int icon = R.drawable.ic_monitor;
+        Icon providerIcon = Icon.createWithResource(context, "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : R.drawable.monitor_brand);
         Intent open = new Intent(context, MainActivity.class).setAction("com.agentmonitor.live.OPEN_USAGE");
         PendingIntent content = PendingIntent.getActivity(context, ID, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification publicView = new Notification.Builder(context, channel).setSmallIcon(icon).setContentTitle(brand)
+        Notification publicView = new Notification.Builder(context, channel).setSmallIcon(icon).setLargeIcon(providerIcon).setContentTitle(brand)
                 .setVisibility(Notification.VISIBILITY_PUBLIC).build();
         // SECRET lets System UI hide details on the lockscreen while preserving them
         // for unlock. Clearing the body here would permanently empty this delivered notice.
         // Real notices are already deduplicated by reason in UsageAlerts: a later reset
         // reminder must alert even when its earlier low-balance notice remains in the tray.
-        Notification.Builder result = new Notification.Builder(context, channel).setSmallIcon(icon).setContentTitle(brand)
+        Notification.Builder result = new Notification.Builder(context, channel).setSmallIcon(icon).setLargeIcon(providerIcon).setContentTitle(brand)
                 .setContentText(text).setVisibility(Notification.VISIBILITY_SECRET).setPublicVersion(publicView)
                 .setContentIntent(content).setAutoCancel(true).setOnlyAlertOnce(false);
         result.setStyle(new Notification.BigTextStyle().bigText(text + (detail.isEmpty() ? "" : "\n" + detail)));

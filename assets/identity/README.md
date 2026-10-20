@@ -1,4 +1,6 @@
-# Monitor 原创工具识别符
+# Monitor 应用标志与工具识别符
+
+`monitor-brand.png` 是维护者提供的新应用标志的像素主源，保留白色画布、蓝绿图形、连接带和两个浅色圆心。应用标志使用标准缩放及平台安全区适配，不以工具来源图标替代应用身份。Android 状态栏使用简化的单色双块连接图形；通知内容仍使用下列独立的来源图形和来源名称。该应用标志没有新增许可证声明，详见 [第三方与图形说明](../../THIRD_PARTY_NOTICES.md)。
 
 `monitor-claude.svg` 的橙色 C 与 `monitor-codex.svg` 的绿色终端图形是 Monitor 原创的中性识别符，用于配合工具名称区分任务。它们不描摹官方品牌图标，不是 Anthropic、Claude、OpenAI 或 Codex 的官方标志，也不表示厂商认可。源文件与其派生图像按仓库根 MIT 许可证提供。
 

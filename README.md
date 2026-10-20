@@ -1,5 +1,7 @@
 # Monitor
 
+<img src="assets/identity/monitor-brand.png" width="128" height="128" alt="Monitor 应用标志">
+
 **在手机上，看到每台电脑的 AI 编程任务。**
 
 Monitor 是面向个人部署的开源工作台，将多台 Windows / Mac 上的 Codex 与 Claude Code 任务汇总到原生 Android App、原生 macOS 客户端和浏览器。离开电脑后，可以查看进行中的任务、最终结果、附件和用量，并在已授权的会话中继续回复。

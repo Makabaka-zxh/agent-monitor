@@ -8,7 +8,6 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -35,13 +34,17 @@ public final class NativePages {
         private final LinearLayout root;
         private final String[] keys, labels;
         private final TextView[] buttons;
+        private final boolean primary;
         private String selected = "";
         private int[] counts;
         public Segments(NativeUi ui, String[] keys, String[] labels, OnChoice onChoice) {
+            this(ui, keys, labels, true, onChoice);
+        }
+        public Segments(NativeUi ui, String[] keys, String[] labels, boolean primary, OnChoice onChoice) {
             if (keys.length == 0 || keys.length != labels.length) throw new IllegalArgumentException("Segment keys and labels must match");
-            this.ui = ui; this.keys = keys.clone(); this.labels = labels.clone();
-            root = new SegmentRow(); root.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
-            root.setBackground(ui.bordered(ui.dark ? 0xB0252E33 : 0xB8FFFFFF, 20));
+            this.ui = ui; this.keys = keys.clone(); this.labels = labels.clone(); this.primary = primary;
+            root = new SegmentRow(); root.setPadding(ui.dp(primary ? 4 : 0), ui.dp(primary ? 4 : 0), ui.dp(primary ? 4 : 0), ui.dp(primary ? 4 : 0));
+            root.setBackground(primary ? ui.bordered(ui.dark ? 0xFF1B201F : 0xFFEAEEEB, 17) : null);
             buttons = new TextView[keys.length];
             for (int i = 0; i < keys.length; i++) {
                 final String key = keys[i];
@@ -50,6 +53,7 @@ public final class NativePages {
                 button.setMaxLines(1); button.setHorizontallyScrolling(false); button.setEllipsize(TextUtils.TruncateAt.END);
                 button.setAutoSizeTextTypeUniformWithConfiguration(12, 14, 1, TypedValue.COMPLEX_UNIT_SP);
                 button.setContentDescription(labels[i]); button.setFocusable(true); button.setClickable(true);
+                ui.pressFeedback(button, .985f);
                 button.setOnClickListener(v -> { if (!key.equals(selected)) { select(key); if (onChoice != null) onChoice.choose(key); } });
                 button.setAccessibilityDelegate(new View.AccessibilityDelegate() {
                     @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
@@ -71,10 +75,12 @@ public final class NativePages {
                 boolean active = keys[i].equals(key); TextView button = buttons[i];
                 button.setSelected(active); button.setTextColor(active ? ui.text : ui.muted);
                 button.setTypeface(active ? ui.medium : ui.regular);
-                button.setBackground(ui.ripple(active ? ui.surface : Color.TRANSPARENT, 16));
+                button.setBackground(active && primary ? ui.borderedRipple(ui.surface, 13)
+                        : ui.ripple(active ? ui.soft : Color.TRANSPARENT, 12));
             }
         }
         public void counts(int[] values) {
+            if (java.util.Arrays.equals(counts, values)) return;
             counts = values == null ? null : values.clone();
             for (int i = 0; i < buttons.length; i++) {
                 String label = labels[i] + (counts != null && counts.length > i ? " " + counts[i] : "");
@@ -123,16 +129,17 @@ public final class NativePages {
         private final TaskCallbacks callbacks;
         private final List<JSONObject> rows = new ArrayList<>();
         private final Map<String, JSONObject> devices = new HashMap<>();
+        private final Map<String, JSONObject> latestTasks = new HashMap<>();
         private boolean stale;
         private String signature = "";
         public TaskAdapter(NativeUi ui, TaskCallbacks callbacks) { this.ui = ui; this.callbacks = callbacks; }
         public void update(JSONArray tasks, JSONArray computers, boolean stale) {
-            String next = String.valueOf(tasks) + "|" + String.valueOf(computers) + "|" + stale + "|" + System.currentTimeMillis() / 60000;
-            if (next.equals(signature)) return; signature = next; this.stale = stale;
-            rows.clear(); devices.clear();
-            if (tasks != null) for (int i = 0; i < tasks.length(); i++) { JSONObject item = tasks.optJSONObject(i); if (item != null) rows.add(item); }
-            if (computers != null) for (int i = 0; i < computers.length(); i++) { JSONObject item = computers.optJSONObject(i); if (item != null) devices.put(item.optString("id"), item); }
-            notifyDataSetChanged();
+            String next = NativeListPresentation.tasksKey(tasks, computers, stale, System.currentTimeMillis() / 60000);
+            boolean changed = !next.equals(signature); signature = next; this.stale = stale;
+            rows.clear(); devices.clear(); latestTasks.clear();
+            if (tasks != null) for (int i = 0; i < tasks.length(); i++) { JSONObject item = tasks.optJSONObject(i); if (item != null) { rows.add(item); latestTasks.put(item.optString("id"), item); } }
+            if (computers != null) for (int i = 0; i < computers.length(); i++) { JSONObject item = computers.optJSONObject(i); if (item != null && !devices.containsKey(item.optString("id"))) devices.put(item.optString("id"), item); }
+            if (changed) notifyDataSetChanged();
         }
         @Override public int getCount() { return rows.size(); }
         @Override public JSONObject getItem(int position) { return rows.get(position); }
@@ -146,37 +153,42 @@ public final class NativePages {
         }
         private final class TaskHolder {
             final LinearLayout outer = ui.column(), card = ui.card();
-            final ImageView brand = ui.brand("", 32);
+            final LinearLayout toolBadge = ui.toolBadge("");
             final TextView title = ui.text("", 16, true), source = ui.text("", 13, false), status = ui.text("", 12, false), updated = ui.text("", 12, false);
             final NativeUi.Icon archive;
             JSONObject current;
             TaskHolder() {
                 outer.setPadding(0, 0, 0, ui.dp(10)); outer.addView(card, matchWrap());
-                card.setPadding(ui.dp(16), ui.dp(16), ui.dp(8), ui.dp(8));
-                card.setBackground(ui.ripple(ui.surface, 20)); card.setFocusable(true); card.setClickable(true);
-                card.setOnClickListener(v -> { if (current != null && callbacks != null) callbacks.open(current); });
+                card.setPadding(ui.dp(16), ui.dp(14), ui.dp(10), ui.dp(8));
+                card.setBackground(ui.borderedRipple(ui.surface, 20)); card.setFocusable(true); card.setClickable(true);
+                ui.pressFeedback(card, .995f);
+                card.setOnClickListener(v -> { JSONObject latest = latest(); if (latest != null && callbacks != null) callbacks.open(latest); });
                 card.setAccessibilityDelegate(NativeUi.buttonAccessibility());
-                LinearLayout top = ui.row(); top.setGravity(Gravity.TOP); top.addView(brand);
-                LinearLayout words = ui.column(); LinearLayout.LayoutParams wordParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); wordParams.setMargins(ui.dp(10), 0, 0, 0);
+                LinearLayout provenance = ui.row(); provenance.addView(toolBadge);
+                View chevron = ui.icon("chevron", 20); LinearLayout.LayoutParams chevronParams = new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)); chevronParams.setMargins(ui.dp(4), 0, ui.dp(4), 0);
+                provenance.addView(new View(ui.activity), new LinearLayout.LayoutParams(0, 1, 1)); provenance.addView(chevron, chevronParams);
+                card.addView(provenance, matchWrap()); card.addView(ui.space(12));
+                LinearLayout top = ui.row(); top.setGravity(Gravity.TOP);
+                LinearLayout words = ui.column(); LinearLayout.LayoutParams wordParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); wordParams.setMargins(0, 0, ui.dp(6), 0);
                 top.addView(words, wordParams); title.setMaxLines(2); title.setEllipsize(TextUtils.TruncateAt.END); title.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
                 source.setTextColor(ui.muted); source.setMaxLines(1); source.setEllipsize(TextUtils.TruncateAt.END);
                 words.addView(title, matchWrap()); words.addView(ui.space(6)); words.addView(source, matchWrap());
-                View chevron = ui.icon("chevron", 20); LinearLayout.LayoutParams chevronParams = new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)); chevronParams.setMargins(ui.dp(4), ui.dp(2), ui.dp(4), 0); top.addView(chevron, chevronParams);
-                card.addView(top, matchWrap()); card.addView(ui.space(6));
+                card.addView(top, matchWrap()); card.addView(ui.space(8));
                 LinearLayout bottom = ui.row();
                 status.setPadding(ui.dp(8), ui.dp(4), ui.dp(8), ui.dp(4)); status.setMaxLines(1);
                 bottom.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                 updated.setTextColor(ui.muted); updated.setGravity(Gravity.END); updated.setMaxLines(1); updated.setEllipsize(TextUtils.TruncateAt.END);
                 LinearLayout.LayoutParams updatedParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); updatedParams.setMargins(ui.dp(8), 0, 0, 0); bottom.addView(updated, updatedParams);
-                archive = (NativeUi.Icon) ui.iconButton("archive", "归档任务", () -> { if (current != null && callbacks != null) callbacks.archive(current); });
+                archive = (NativeUi.Icon) ui.iconButton("archive", "归档任务", () -> { JSONObject latest = latest(); if (latest != null && callbacks != null) callbacks.archive(latest); });
                 archive.setInk(ui.muted); bottom.addView(archive); card.addView(bottom, matchWrap());
                 for (View info : new View[]{title, source, status, updated}) info.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             }
+            JSONObject latest() { return current == null ? null : latestTasks.get(current.optString("id")); }
             void bind(JSONObject task) {
                 current = task; JSONObject computer = devices.get(task.optString("device_id"));
                 String titleValue = value(task, "title", "未命名任务"), deviceName = value(computer, "name", "未知电脑");
                 String state = status(task, computer, stale); setText(title, titleValue); setText(source, deviceName);
-                ui.bindBrand(brand, task.optString("tool")); bindStatus(ui, status, state);
+                ui.bindToolBadge(toolBadge, task.optString("tool")); bindStatus(ui, status, state);
                 setText(updated, relative(task.optString("updated_at")));
                 boolean archived = task.optBoolean("archived"); archive.setName(archived ? "restore" : "archive");
                 archive.setContentDescription((archived ? "恢复：" : "归档：") + titleValue);
@@ -190,10 +202,10 @@ public final class NativePages {
         private final List<JSONObject> rows = new ArrayList<>(); private boolean stale; private String signature = "";
         public DeviceAdapter(NativeUi ui, OnDevice callback) { this.ui = ui; this.callback = callback; }
         public void update(JSONArray computers, boolean stale) {
-            String next = String.valueOf(computers) + "|" + stale + "|" + System.currentTimeMillis() / 60000;
-            if (next.equals(signature)) return; signature = next; this.stale = stale; rows.clear();
+            String next = NativeListPresentation.devicesKey(computers, stale, System.currentTimeMillis() / 60000);
+            boolean changed = !next.equals(signature); signature = next; this.stale = stale; rows.clear();
             if (computers != null) for (int i = 0; i < computers.length(); i++) { JSONObject item = computers.optJSONObject(i); if (item != null) rows.add(item); }
-            notifyDataSetChanged();
+            if (changed) notifyDataSetChanged();
         }
         @Override public int getCount() { return rows.size(); }
         @Override public JSONObject getItem(int position) { return rows.get(position); }
@@ -211,8 +223,8 @@ public final class NativePages {
             JSONObject current;
             DeviceHolder() {
                 outer.setPadding(0, 0, 0, ui.dp(10)); outer.addView(card, matchWrap());
-                card.setBackground(ui.ripple(ui.surface, 20)); card.setFocusable(true); card.setClickable(true);
-                card.setOnClickListener(v -> { if (current != null && callback != null) callback.open(current); }); card.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+                card.setBackground(ui.borderedRipple(ui.surface, 20)); card.setFocusable(true); card.setClickable(true); ui.pressFeedback(card, .995f);
+                card.setOnClickListener(v -> { if (current != null && callback != null) { for (JSONObject item : rows) if (item.optString("id").equals(current.optString("id"))) { callback.open(item); break; } } }); card.setAccessibilityDelegate(NativeUi.buttonAccessibility());
                 LinearLayout top = ui.row(); LinearLayout badge = ui.row(); badge.setGravity(Gravity.CENTER); badge.setBackground(ui.rounded(ui.soft, 12)); badge.addView(ui.icon("monitor", 22)); top.addView(badge, new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
                 LinearLayout words = ui.column(); LinearLayout.LayoutParams wordsParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); wordsParams.setMargins(ui.dp(10), 0, ui.dp(8), 0); top.addView(words, wordsParams);
                 title.setMaxLines(2); title.setEllipsize(TextUtils.TruncateAt.END); platform.setTextColor(ui.muted); platform.setMaxLines(1); platform.setEllipsize(TextUtils.TruncateAt.END);
@@ -239,6 +251,8 @@ public final class NativePages {
         private final NativeUi ui;
         private final TextView note, state, time, project;
         private final LinearLayout projectRow;
+        private final LinearLayout errorSection, errorCard;
+        private final TextView errorUnavailable, errorSummary, errorLocation, errorSuggestion;
         public TaskDetail(NativeUi ui) {
             this.ui = ui; view = ui.column();
             note = ui.text("", 13, false); note.setTextColor(ui.warning); note.setPadding(0, 0, 0, ui.dp(12)); view.addView(note, matchWrap());
@@ -246,6 +260,18 @@ public final class NativePages {
             facts.addView(fact("状态", state), matchWrap()); facts.addView(ui.space(14)); facts.addView(fact("更新", time), matchWrap());
             projectRow = fact("项目", project); projectRow.setPadding(0, ui.dp(14), 0, 0); facts.addView(projectRow, matchWrap());
             view.addView(facts, matchWrap());
+            errorSection = ui.column(); errorSection.addView(ui.space(16));
+            errorUnavailable = ui.text("", 13, false); errorUnavailable.setTextColor(ui.muted);
+            errorUnavailable.setPadding(ui.dp(4), 0, ui.dp(4), 0); errorSection.addView(errorUnavailable, matchWrap());
+            errorCard = ui.card(); LinearLayout errorHeading = ui.row();
+            NativeUi.Icon errorIcon = (NativeUi.Icon) ui.icon("error", 20); errorIcon.setInk(ui.danger); errorHeading.addView(errorIcon);
+            TextView errorTitle = ui.text("错误分析", 15, true); LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); headingParams.setMarginStart(ui.dp(8)); errorHeading.addView(errorTitle, headingParams);
+            errorCard.addView(errorHeading, matchWrap()); errorCard.addView(ui.space(12));
+            errorSummary = ui.text("", 14, false); errorCard.addView(errorSummary, matchWrap());
+            errorCard.addView(ui.space(16)); errorLocation = ui.text("", 13, false); errorCard.addView(fact("位置", errorLocation), matchWrap());
+            errorCard.addView(ui.space(14)); errorSuggestion = ui.text("", 13, false); errorCard.addView(fact("建议", errorSuggestion), matchWrap());
+            errorCard.addView(ui.space(14)); TextView evidence = ui.text("依据已收到的输出，具体原因仍需核实。", 12, false); evidence.setTextColor(ui.muted); errorCard.addView(evidence, matchWrap());
+            errorSection.addView(errorCard, matchWrap()); errorSection.setVisibility(View.GONE); view.addView(errorSection, matchWrap());
         }
         public LinearLayout view() { return view; }
         private LinearLayout fact(String label, TextView value) {
@@ -258,6 +284,12 @@ public final class NativePages {
             String noteText = "unknown".equals(code) ? "状态已过期，显示最后收到的记录。" : "waiting".equals(code) ? "请到电脑处理批准请求。" : "";
             setText(note, noteText); note.setVisibility(noteText.isEmpty() ? View.GONE : View.VISIBLE);
             setText(time, absolute(value(task, "updated_at", ""))); String projectValue = value(task, "project", ""); setText(project, projectValue); projectRow.setVisibility(projectValue.isEmpty() ? View.GONE : View.VISIBLE);
+            NativeErrorPresentation.Detail error = NativeErrorPresentation.from(task, syncOutput, code);
+            errorSection.setVisibility(error.visible ? View.VISIBLE : View.GONE);
+            errorUnavailable.setVisibility(error.hasAnalysis ? View.GONE : View.VISIBLE);
+            errorCard.setVisibility(error.hasAnalysis ? View.VISIBLE : View.GONE);
+            setText(errorUnavailable, error.hasAnalysis ? "" : error.summary);
+            setText(errorSummary, error.summary); setText(errorLocation, error.location); setText(errorSuggestion, error.suggestion);
         }
     }
 
@@ -273,7 +305,7 @@ public final class NativePages {
     public static String statusLabel(String status) {
         switch (status) { case "running": return "执行中"; case "waiting": return "等待批准"; case "completed": return "本轮结束"; case "error": return "执行出错"; case "idle": return "空闲"; case "online": return "在线"; case "offline": return "离线"; default: return "状态未知"; }
     }
-    public static String toolName(String tool) { return "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "任务"; }
+    public static String toolName(String tool) { return NativeListPresentation.toolLabel(tool); }
     private static int statusColor(NativeUi ui, String state) { return "waiting".equals(state) ? ui.warning : "error".equals(state) ? ui.danger : "running".equals(state) || "online".equals(state) ? ui.accent : ui.muted; }
     private static void bindStatus(NativeUi ui, TextView label, String state) {
         setText(label, statusLabel(state)); label.setTextColor(statusColor(ui, state));

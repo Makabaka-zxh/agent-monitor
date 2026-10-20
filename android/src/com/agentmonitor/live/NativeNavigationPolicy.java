@@ -10,6 +10,52 @@ public final class NativeNavigationPolicy {
     private NativeNavigationPolicy() {}
     private static String encode(String id) throws Exception { return URLEncoder.encode(id, "UTF-8").replace("+", "%20"); }
 
+    public static String safePage(String page) {
+        if (page == null) return "tasks";
+        switch (page) {
+            case "tasks": case "task": case "usage": case "account":
+            case "devices": case "device": case "profile": case "sync": case "sessions":
+            case "pairing": case "pairing-confirm": return page;
+            default: return "tasks";
+        }
+    }
+
+    /** The second tab is usage; computer management belongs to My Account. */
+    public static String[] rootPages() { return new String[]{"tasks", "usage", "account"}; }
+
+    public static boolean rootPage(String page) {
+        return "tasks".equals(page) || "usage".equals(page) || "account".equals(page);
+    }
+
+    /** A task reached from a computer stays in that computer's navigation branch. */
+    public static String tabForPage(String page, String taskReturnDevice) {
+        switch (safePage(page)) {
+            case "tasks": return "tasks";
+            case "task": return validReturnDevice(taskReturnDevice) ? "account" : "tasks";
+            case "usage": return "usage";
+            default: return "account";
+        }
+    }
+
+    public static final class BackTarget {
+        public final String page, id;
+        private BackTarget(String page, String id) { this.page = page; this.id = id; }
+    }
+
+    /** Null means a root page may finish; descendants always return to their owner. */
+    public static BackTarget backTarget(String page, String taskReturnDevice) {
+        switch (safePage(page)) {
+            case "tasks": case "usage": case "account": return null;
+            case "task": return validReturnDevice(taskReturnDevice)
+                    ? new BackTarget("device", taskReturnDevice) : new BackTarget("tasks", "");
+            case "device": case "pairing": return new BackTarget("devices", "");
+            case "pairing-confirm": return new BackTarget("pairing", "");
+            default: return new BackTarget("account", "");
+        }
+    }
+
+    private static boolean validReturnDevice(String id) { return NativeWebPolicy.validTaskId(id); }
+
     public static String notificationUri(String taskId, long generation) {
         if (!NativeWebPolicy.validTaskId(taskId) || generation < 0) return null;
         try { return "agentmonitor://task/" + encode(taskId) + "?generation=" + generation; }

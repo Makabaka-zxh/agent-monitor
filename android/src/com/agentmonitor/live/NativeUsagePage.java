@@ -3,6 +3,7 @@ package com.agentmonitor.live;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.LinearLayout;
@@ -30,7 +31,10 @@ public final class NativeUsagePage {
     private TextView status, refresh;
     private JSONObject summary;
     private boolean busy, failed;
-    private static final class Selection { LocalDate week, day; String source = ""; boolean pickerOpen; }
+    private static final class Selection {
+        NativeUsageSelectionPolicy.Selection saved = new NativeUsageSelectionPolicy.Selection();
+        boolean pickerOpen;
+    }
     private static final class Source {
         final String key, name; final List<JSONObject> windows = new ArrayList<>();
         Source(String key, String name) { this.key = key; this.name = name; }
@@ -38,9 +42,30 @@ public final class NativeUsagePage {
     public NativeUsagePage(NativeUi ui, Help help, Runnable retry, Runnable reminders) {
         this.ui = ui; this.help = help; this.retry = retry; this.reminders = reminders; view = ui.column(); render();
     }
+    /** The Activity owns the identity boundary and discards this on account changes. */
+    public Bundle saveState() {
+        Bundle saved = new Bundle();
+        for (String tool : new String[]{"codex", "claude"}) {
+            Selection state = selections.get(tool); if (state == null) continue;
+            Bundle item = new Bundle();
+            if (state.saved.week != null) item.putString("week", state.saved.week.toString());
+            if (state.saved.day != null) item.putString("day", state.saved.day.toString());
+            item.putString("source", NativeUsageSelectionPolicy.source(state.saved.source)); saved.putBundle(tool, item);
+        }
+        return saved;
+    }
+    public void restoreState(Bundle saved) {
+        selections.clear();
+        for (String tool : new String[]{"codex", "claude"}) {
+            Bundle item = saved == null ? null : saved.getBundle(tool); if (item == null) continue;
+            Selection state = new Selection();
+            state.saved = NativeUsageSelectionPolicy.restore(item.getString("week", ""), item.getString("day", ""), item.getString("source", ""));
+            selections.put(tool, state);
+        }
+        render();
+    }
     public void update(JSONObject value, boolean busy, boolean failed) {
         this.busy = busy; this.failed = failed;
-        if (value == null) selections.clear();
         String next = value == null ? "" : value.toString(); summary = value;
         if (!next.equals(signature)) { signature = next; render(); }
         updateStatus(); tick();
@@ -77,7 +102,7 @@ public final class NativeUsagePage {
         final TextView caption = ui.text("", 14), amount = ui.text("—", 26, true), unit = ui.text("Token", 13);
         final Map<String, Long> history = new LinkedHashMap<>();
         final List<Source> sources = new ArrayList<>();
-        LocalDate start, today; boolean hasHistory; TextView weekName;
+        LocalDate start, today, displayedWeek, displayedDay; boolean hasHistory; TextView weekName;
         ProviderCard(String tool, JSONObject data) {
             this.data = data; Selection found = selections.get(tool);
             if (found == null) { found = new Selection(); selections.put(tool, found); }
@@ -101,7 +126,7 @@ public final class NativeUsagePage {
             LinearLayout heading = ui.row(); heading.addView(ui.brand(tool, 28));
             TextView name = ui.text(tool.equals("codex") ? "Codex" : "Claude Code", 17, true);
             LinearLayout.LayoutParams words = new LinearLayout.LayoutParams(0, -2, 1); words.leftMargin = ui.dp(10); heading.addView(name, words);
-            heading.addView(ui.iconButton("info", "查看" + name.getText() + "用量说明", () -> help.show(name.getText().toString(), providerHelp(tool, data, findSource(state.source)))));
+            heading.addView(ui.iconButton("info", "查看" + name.getText() + "用量说明", () -> help.show(name.getText().toString(), providerHelp(tool, data, findSource(state.saved.source)))));
             view.addView(heading, wrap()); view.addView(ui.space(8));
             caption.setTextColor(ui.muted); unit.setTextColor(ui.muted); amount.setSingleLine(true);
             amount.setAutoSizeTextTypeUniformWithConfiguration(18, 26, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
@@ -112,30 +137,30 @@ public final class NativeUsagePage {
         }
         private void renderWeek() {
             chartArea.removeAllViews(); today = NativeUsagePresentation.today(System.currentTimeMillis());
-            state.week = NativeUsagePresentation.clampWeek(state.week, start, today);
-            state.day = NativeUsagePresentation.selection(state.day, state.week, start, today);
+            NativeUsageSelectionPolicy.Calendar calendar = NativeUsageSelectionPolicy.calendar(state.saved, start, today, hasHistory);
+            displayedWeek = calendar.week; displayedDay = calendar.day;
             LinearLayout nav = ui.row();
             View previous = ui.iconButton("back", "查看上一周", () -> moveWeek(-1));
-            previous.setEnabled(state.week.isAfter(NativeUsagePresentation.monday(start))); previous.setAlpha(previous.isEnabled() ? 1f : .3f); nav.addView(previous);
+            previous.setEnabled(displayedWeek.isAfter(NativeUsagePresentation.monday(start))); previous.setAlpha(previous.isEnabled() ? 1f : .3f); nav.addView(previous);
             weekName = ui.text("", 14, true); weekName.setGravity(Gravity.CENTER); weekName.setMinHeight(ui.dp(48));
             weekName.setBackground(ui.ripple(android.graphics.Color.TRANSPARENT, 12)); weekName.setFocusable(true); weekName.setClickable(true);
             weekName.setAccessibilityDelegate(NativeUi.buttonAccessibility()); weekName.setContentDescription("返回本周");
-            weekName.setOnClickListener(v -> { LocalDate current = NativeUsagePresentation.today(System.currentTimeMillis()); state.week = NativeUsagePresentation.monday(current); state.day = current; renderWeek(); });
+            weekName.setOnClickListener(v -> { LocalDate current = NativeUsagePresentation.today(System.currentTimeMillis()); state.saved.week = NativeUsagePresentation.monday(current); state.saved.day = current; renderWeek(); });
             nav.addView(weekName, new LinearLayout.LayoutParams(0, -2, 1));
             View next = ui.iconButton("chevron", "查看下一周", () -> moveWeek(1));
-            next.setEnabled(state.week.isBefore(NativeUsagePresentation.monday(today))); next.setAlpha(next.isEnabled() ? 1f : .3f); nav.addView(next);
+            next.setEnabled(displayedWeek.isBefore(NativeUsagePresentation.monday(today))); next.setAlpha(next.isEnabled() ? 1f : .3f); nav.addView(next);
             chartArea.addView(nav, wrap());
-            Long[] amounts = new Long[7]; for (int i = 0; i < 7; i++) amounts[i] = history.get(state.week.plusDays(i).toString());
-            chartArea.addView(new NativeUsageChart(ui, state.week, amounts, start, today, state.day, day -> { state.day = day; updateAmount(System.currentTimeMillis()); }), wrap());
+            Long[] amounts = new Long[7]; for (int i = 0; i < 7; i++) amounts[i] = history.get(displayedWeek.plusDays(i).toString());
+            chartArea.addView(new NativeUsageChart(ui, displayedWeek, amounts, start, today, displayedDay, day -> { state.saved.week = displayedWeek; state.saved.day = day; displayedDay = day; updateAmount(System.currentTimeMillis()); }), wrap());
             updateAmount(System.currentTimeMillis());
         }
-        private void moveWeek(int delta) { state.week = state.week.plusWeeks(delta); state.day = null; renderWeek(); }
+        private void moveWeek(int delta) { state.saved.week = displayedWeek.plusWeeks(delta); state.saved.day = null; renderWeek(); }
         void updateAmount(long now) {
             LocalDate current = NativeUsagePresentation.today(now);
-            setText(caption, state.day.equals(current) ? "今日已记录" : NativeUsagePresentation.shortDay(state.day) + " 已记录");
-            Long tokens = history.get(state.day.toString()); setText(amount, NativeUsagePresentation.exact(tokens));
+            setText(caption, displayedDay.equals(current) ? "今日已记录" : NativeUsagePresentation.shortDay(displayedDay) + " 已记录");
+            Long tokens = history.get(displayedDay.toString()); setText(amount, NativeUsagePresentation.exact(tokens));
             setText(unit, tokens != null ? "Token" : !hasHistory && busy ? "正在读取历史" : "暂无可用记录");
-            if (weekName != null) setText(weekName, (state.week.equals(NativeUsagePresentation.monday(current)) ? "本周 · " : "") + NativeUsagePresentation.range(state.week));
+            if (weekName != null) setText(weekName, (displayedWeek.equals(NativeUsagePresentation.monday(current)) ? "本周 · " : "") + NativeUsagePresentation.range(displayedWeek));
         }
         private void collectSources() {
             Map<String, Source> found = new LinkedHashMap<>(); JSONArray windows = data == null ? null : data.optJSONArray("quotas");
@@ -149,12 +174,14 @@ public final class NativeUsagePage {
                 source.windows.add(quota);
             }
             sources.addAll(found.values());
-            if (findSource(state.source) == null) state.pickerOpen = false;
-            if (sources.size() <= 1) state.pickerOpen = false;
-            if (findSource(state.source) == null && !sources.isEmpty()) {
-                Source best = sources.get(0); for (Source item : sources) if (sourceScore(item) > sourceScore(best)) best = item;
-                state.source = best.key;
+            String[] available = new String[sources.size()]; Source best = null;
+            for (int index = 0; index < sources.size(); index++) {
+                Source item = sources.get(index); available[index] = item.key;
+                if (best == null || sourceScore(item) > sourceScore(best)) best = item;
             }
+            String next = NativeUsageSelectionPolicy.sourceAfterSnapshot(state.saved.source, available, best == null ? "" : best.key, summary != null);
+            if (!next.equals(state.saved.source) || sources.size() <= 1) state.pickerOpen = false;
+            state.saved.source = next;
         }
         private long sourceScore(Source source) {
             long best = 0, now = System.currentTimeMillis();
@@ -164,15 +191,15 @@ public final class NativeUsagePage {
         private Source findSource(String key) { for (Source source : sources) if (source.key.equals(key)) return source; return null; }
         private void renderQuotas() {
             for (int i = quotas.size() - 1; i >= 0; i--) if (quotas.get(i).owner == this) quotas.remove(i);
-            quotaArea.removeAllViews(); Source source = findSource(state.source);
+            quotaArea.removeAllViews(); Source source = findSource(state.saved.source);
             if (source != null) {
                 LinearLayout choices = ui.column(); choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE);
                 TextView choose = ui.button("来源 · " + source.name + (sources.size() > 1 ? "  ▾" : ""), false,
                         () -> { if (sources.size() > 1) { state.pickerOpen = !state.pickerOpen; choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE); } else help.show("额度来源", source.name + "\n\n额度来自这台电脑登录的账号。不同电脑的百分比不合并。\n\n" + windowsHelp(source)); });
                 choose.setTextSize(14); choose.setMaxLines(2); quotaArea.addView(choose, wrap());
                 if (sources.size() > 1) for (Source item : sources) {
-                    choices.addView(ui.space(6)); choices.addView(ui.button((item.key.equals(state.source) ? "✓  " : "") + item.name, false,
-                            () -> { state.source = item.key; state.pickerOpen = false; renderQuotas(); }), wrap());
+                    choices.addView(ui.space(6)); choices.addView(ui.button((item.key.equals(state.saved.source) ? "✓  " : "") + item.name, false,
+                            () -> { state.saved.source = item.key; state.pickerOpen = false; renderQuotas(); }), wrap());
                 }
                 quotaArea.addView(choices, wrap()); quotaArea.addView(ui.space(14));
             }

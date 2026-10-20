@@ -1,0 +1,3 @@
+<inset xmlns:android="http://schemas.android.com/apk/res/android" android:inset="12dp">
+  <bitmap android:src="@drawable/monitor_brand" android:gravity="fill" />
+</inset>

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
-Register or remove this project's per-user, at-logon task.
-Registration does not start the task or change a running service.
+Register or remove this project's per-user task with periodic recovery.
+Registration does not stop a running service. The first recovery tick is in one minute.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Register')]
 param(
@@ -188,17 +188,25 @@ try {
 
     $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $taskArguments -WorkingDirectory $projectRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentSid
+    # An action's nonzero process exit is not a reliable RestartOnFailure trigger.
+    # Retry starting the same task; IgnoreNew below keeps an existing instance.
+    # Omit RepetitionDuration so recovery does not expire after one day.
+    $recoveryTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinutes(1)) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1)
+    $recoveryTrigger.Id = 'MonitorRecoveryTick'
+    $recoveryTrigger.ExecutionTimeLimit = 'PT0S'
+    $recoveryTrigger.Repetition.StopAtDurationEnd = $false
     $principal = New-ScheduledTaskPrincipal -UserId $currentSid -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $definition = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $ownershipMarker
+    $definition = New-ScheduledTask -Action $action -Trigger @($trigger, $recoveryTrigger) -Principal $principal -Settings $settings -Description $ownershipMarker
     $registration = @{ TaskName = $taskName; TaskPath = $taskPath; InputObject = $definition; ErrorAction = 'Stop' }
     # Never use Force when a same-name task was not inspected and proven ours.
     if ($null -ne $existing) { $registration.Force = $true }
     Register-ScheduledTask @registration | Out-Null
-    Write-Host 'Registered AgentMonitor-PublicHub for this user''s next Windows logon. The task was not started.'
+    Write-Host 'Registered AgentMonitor-PublicHub for logon and one-minute recovery while this user is signed in. Running instances are kept. Disable the task before intentionally stopping the service.'
 } catch {
     [Console]::Error.WriteLine("Autostart setup failed: {0}", $_.Exception.Message)
     exit 1

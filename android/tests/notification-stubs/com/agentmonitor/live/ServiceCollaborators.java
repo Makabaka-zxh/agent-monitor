@@ -8,7 +8,7 @@ import org.json.JSONObject;
 
 final class MainActivity {}
 final class R {
-    static final class drawable { static final int ic_claude = 1, ic_codex = 2, claude = 3, codex = 4; }
+    static final class drawable { static final int ic_claude = 1, ic_codex = 2, claude = 3, codex = 4, ic_monitor = 5, monitor_brand = 6; }
 }
 final class SessionStore {
     static String currentToken = "offline-test-token";

@@ -47,7 +47,7 @@ public final class TrackingService extends Service {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final DeviceBrand deviceBrand = DeviceBrand.detect(Build.MANUFACTURER, Build.BRAND);
     private NotificationManager manager;
-    private String title = "任务", tool = "codex", token = "", notificationTaskId = "";
+    private String title = "任务", tool = "", token = "", notificationTaskId = "";
     private LivePresentation.Data presentationData = new LivePresentation.Data();
     private long started, lastSuccess, lastConfirmedRunning, lastConfirmedTask, nextFetch, epoch;
     // In until-task-end mode this confirmation clock also records an explicit waiting state.
@@ -178,7 +178,8 @@ public final class TrackingService extends Service {
         trackedId = clean(intent.getStringExtra("task_id"), 512);
         notificationTaskId = trackedId;
         title = clean(intent.getStringExtra("title"), 160);
-        tool = "claude".equals(intent.getStringExtra("tool")) ? "claude" : "codex";
+        String requestedTool = intent.getStringExtra("tool");
+        tool = "claude".equals(requestedTool) || "codex".equals(requestedTool) ? requestedTool : "";
         presentationData = new LivePresentation.Data();
         durationMs = TrackingPolicy.durationMs(intent.getIntExtra("duration_minutes", TrackingPolicy.DEFAULT_DURATION_MINUTES));
         untilTaskEnd = durationMs == TrackingPolicy.UNTIL_TASK_END_MS;
@@ -398,14 +399,14 @@ public final class TrackingService extends Service {
         String target = NativeNavigationPolicy.notificationUri(notificationTaskId, epoch);
         if (target != null) open.setAction(NativeNavigationPolicy.NOTIFICATION_ACTION).setData(Uri.parse(target));
         PendingIntent content = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        int accent = "claude".equals(tool) ? 0xffbf785c : 0xff7766df;
+        int accent = "claude".equals(tool) ? 0xffbf785c : "codex".equals(tool) ? 0xff7766df : 0xff356555;
         String displayMessage = message.startsWith("更新暂停") ? "正在重连" : message;
-        String toolLabel = "claude".equals(tool) ? "Claude Code" : "Codex";
-        String compactTool = "claude".equals(tool) ? "Claude" : "Codex";
-        int smallIcon = "claude".equals(tool) ? R.drawable.ic_claude : R.drawable.ic_codex;
+        String toolLabel = "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "任务";
+        String compactTool = "claude".equals(tool) ? "Claude" : "codex".equals(tool) ? "Codex" : "任务";
+        int smallIcon = R.drawable.ic_monitor;
         // The expanded content template needs its own full-color brand icon; the monochrome
         // small icon is reserved for the status bar and the compact live-update presentation.
-        Icon contentIcon = Icon.createWithResource(this, "claude".equals(tool) ? R.drawable.claude : R.drawable.codex);
+        Icon contentIcon = Icon.createWithResource(this, "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : R.drawable.monitor_brand);
         lockscreenRedacted = shouldRedactLockscreen();
         // Completion notices outlive this service, so remain brand-only when the screen later locks.
         boolean brandOnly = lockscreenRedacted || !ongoing;

@@ -204,7 +204,7 @@ Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release
 foreach ($test in @('NotificationDiagnosticsTest', 'XiaomiOnboardingTest')) {
     Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $diagnosticsTestsDirectory, "com.agentmonitor.live.$test")
 }
-foreach ($policy in @('NativeUsageFormat', 'UsageAlertPolicy', 'NativeUsagePresentation')) {
+foreach ($policy in @('NativeUsageFormat', 'UsageAlertPolicy', 'NativeUsagePresentation', 'NativeUsageSelectionPolicy')) {
     Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-classpath', (Join-Path $buildDirectory 'policy-tests'), '-d', (Join-Path $buildDirectory 'policy-tests'), (Join-Path $projectDirectory "src/com/agentmonitor/live/$policy.java"), (Join-Path $projectDirectory "tests/$($policy)Test.java"))
     Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 'policy-tests'), "com.agentmonitor.live.$($policy)Test")
 }
@@ -246,10 +246,10 @@ $taskSearchTestsDirectory = Join-Path $buildDirectory 'task-search-tests'
 New-Item -ItemType Directory -Force -Path $taskSearchTestsDirectory | Out-Null
 $taskSearchSources = @()
 foreach ($jsonSource in @('JSONObject', 'JSONArray')) { $taskSearchSources += Join-Path $projectDirectory "tests/notification-stubs/org/json/$jsonSource.java" }
-foreach ($source in @('NativeWebPolicy', 'NativeScreenPolicy', 'NativeWorkbenchPolicy', 'NativeTaskSearchPolicy', 'NativeTaskListModel')) { $taskSearchSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java" }
-foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest')) { $taskSearchSources += Join-Path $projectDirectory "tests/$test.java" }
+foreach ($source in @('NativeWebPolicy', 'NativeScreenPolicy', 'NativeWorkbenchPolicy', 'NativeTaskSearchPolicy', 'NativeTaskListModel', 'NativeSearchPresentationPolicy', 'NativeListPresentation', 'NativeErrorPresentation')) { $taskSearchSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java" }
+foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest', 'NativeSearchPresentationPolicyTest', 'NativePresentationTest')) { $taskSearchSources += Join-Path $projectDirectory "tests/$test.java" }
 Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release', '8', '-d', $taskSearchTestsDirectory) + $taskSearchSources)
-foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest')) { Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $taskSearchTestsDirectory, "com.agentmonitor.live.$test") }
+foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest', 'NativeSearchPresentationPolicyTest', 'NativePresentationTest')) { Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $taskSearchTestsDirectory, "com.agentmonitor.live.$test") }
 $connectionTestSources = @(Get-ChildItem -LiteralPath (Join-Path $projectDirectory 'tests/connection-stubs') -Filter '*.java' -Recurse -File | ForEach-Object { $_.FullName })
 foreach ($source in @('PairingGate', 'NativeConnection')) { $connectionTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java" }
 $connectionTestSources += Join-Path $projectDirectory 'tests/NativeConnectionTest.java'

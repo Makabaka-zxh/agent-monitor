@@ -17,6 +17,7 @@ public final class NativeNavigationPolicyTest {
     private static String target(String uri) { return NativeNavigationPolicy.notificationUrl(ACTION, uri); }
 
     public static void main(String[] args) {
+        nativeTabHierarchy();
         check(ACTION.equals("com.agentmonitor.live.OPEN_TASK"), "notification action is fixed and app-specific");
         String taskA = "local:codex:task_A", taskB = "home:claude:task-B";
         String a = NativeNavigationPolicy.notificationUri(taskA, 10);
@@ -88,5 +89,49 @@ public final class NativeNavigationPolicyTest {
         check(NativeNavigationPolicy.restorableHistory(new String[]{ORIGIN + ":443/#/tasks"}, 0, false), "explicit default HTTPS port remains same origin");
         check(!NativeNavigationPolicy.restorableHistory(new String[]{ORIGIN + ":444/#/tasks"}, 0, false), "different port cannot restore a workbench");
         System.out.println("NativeNavigationPolicyTest: " + checks + " checks passed");
+    }
+
+    private static void nativeTabHierarchy() {
+        check(Arrays.equals(NativeNavigationPolicy.rootPages(), new String[]{"tasks", "usage", "account"}),
+                "usage is the second root and computer management lives below My Account");
+        String[] callerCopy = NativeNavigationPolicy.rootPages(); callerCopy[1] = "devices";
+        check("usage".equals(NativeNavigationPolicy.rootPages()[1]), "callers cannot rewrite the root order");
+        for (String root : new String[]{"tasks", "usage", "account"}) {
+            check(NativeNavigationPolicy.rootPage(root), "each bottom destination is a root");
+            check(root.equals(NativeNavigationPolicy.tabForPage(root, "old-device")), "stale task ancestry cannot redirect a root tab");
+            check(NativeNavigationPolicy.backTarget(root, "old-device") == null, "root Back finishes instead of entering another tab");
+        }
+        for (String child : new String[]{"devices", "device", "profile", "sync", "sessions", "pairing", "pairing-confirm"}) {
+            check(!NativeNavigationPolicy.rootPage(child), "account descendants expose Back");
+            check("account".equals(NativeNavigationPolicy.tabForPage(child, "")), "account descendant keeps My Account selected");
+            check(child.equals(NativeNavigationPolicy.safePage(child)), "existing saved descendant remains restorable");
+        }
+        expectBack("devices", "", "account", "");
+        expectBack("device", "", "devices", "");
+        expectBack("pairing", "", "devices", "");
+        expectBack("pairing-confirm", "", "pairing", "");
+        for (String child : new String[]{"profile", "sync", "sessions"}) expectBack(child, "", "account", "");
+        check(!NativeNavigationPolicy.rootPage("task"), "task detail is never a root");
+        check("tasks".equals(NativeNavigationPolicy.tabForPage("task", "")), "task-list and notification detail belong to Tasks");
+        expectBack("task", "", "tasks", "");
+        check("account".equals(NativeNavigationPolicy.tabForPage("task", "synthetic-device")), "computer task detail keeps My Account selected");
+        expectBack("task", "synthetic-device", "device", "synthetic-device");
+        // A restored task can retain its original computer, but corrupted or missing
+        // ancestry must not select a hidden page or pass an arbitrary identifier.
+        for (String invalid : new String[]{null, "", "bad/id", "bad?id", "bad\nid", repeated(513)}) {
+            check("tasks".equals(NativeNavigationPolicy.tabForPage("task", invalid)), "invalid saved ancestry falls back to Tasks");
+            expectBack("task", invalid, "tasks", "");
+        }
+        for (String invalid : new String[]{null, "", "unknown", "Tasks", "usage/other"}) {
+            check("tasks".equals(NativeNavigationPolicy.safePage(invalid)), "unknown saved page safely selects Tasks");
+            check("tasks".equals(NativeNavigationPolicy.tabForPage(invalid, "synthetic-device")), "unknown page does not inherit stale ancestry");
+            check(NativeNavigationPolicy.backTarget(invalid, "synthetic-device") == null, "invalid restored root has no hidden Back destination");
+        }
+    }
+
+    private static void expectBack(String page, String device, String expectedPage, String expectedId) {
+        NativeNavigationPolicy.BackTarget back = NativeNavigationPolicy.backTarget(page, device);
+        check(back != null && expectedPage.equals(back.page) && expectedId.equals(back.id),
+                "Back respects the native parent and exact synthetic selection");
     }
 }

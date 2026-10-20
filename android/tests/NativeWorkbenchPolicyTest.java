@@ -12,6 +12,7 @@ public final class NativeWorkbenchPolicyTest {
         emptyStatesDistinguishServiceAndComputer();
         coldLaunchRequestsOnlyVisibleData();
         navigationAndNotificationReadsStayScoped();
+        computerManagementUnderAccountKeepsWorkspaceReads();
         pauseResumeAndLoginChangesRespectCurrentPage();
         System.out.println("NativeWorkbenchPolicyTest: " + checks + " checks passed");
     }
@@ -83,6 +84,18 @@ public final class NativeWorkbenchPolicyTest {
         reads.load("profile", true, false);
         reads.load("profile", true, true);
         reads.expect("account");
+    }
+    private static void computerManagementUnderAccountKeepsWorkspaceReads() {
+        PageReads reads = new PageReads();
+        // Being under My Account changes navigation, never the data owner:
+        // computers and their tasks still need the workbench snapshot.
+        for (String page : new String[]{"account", "devices", "device", "task", "device", "devices", "account", "usage"})
+            reads.load(page, true, true);
+        reads.expect("account", "workbench", "workbench", "workbench", "workbench", "workbench", "account", "usage");
+        for (String page : new String[]{"devices", "pairing", "pairing-confirm", "pairing", "devices"})
+            reads.load(page, true, true);
+        reads.expect("workbench", "workbench");
+        reads.load("usage", false, true); reads.load("devices", true, false); reads.expect();
     }
     private static void filterSaveDoesNotDiscardTaskRead() {
         NativeWorkbenchPolicy.RevisionGate gate = new NativeWorkbenchPolicy.RevisionGate();

@@ -187,6 +187,7 @@ class UpgradeTests(unittest.TestCase):
                 project = root / 'source'
                 (project / 'agent_monitor').mkdir(parents=True)
                 (project / 'agent_monitor/remote_agent.py').write_text('# synthetic source')
+                (project / 'agent_monitor/error_analysis.py').write_text('# synthetic diagnostic module')
                 locations = service.paths(home)
                 for key in ('base', 'state', 'hooks'):
                     locations[key].mkdir(parents=True, exist_ok=True)
@@ -216,6 +217,8 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(environment['HTTPS_PROXY'], 'http://retained.invalid')
                 release = json.loads(locations['current'].read_text())['release']
                 self.assertTrue((locations['releases'] / release / 'scripts/collector_policy.py').is_file())
+                self.assertEqual((locations['releases'] / release / 'agent_monitor/error_analysis.py').read_text(),
+                                 '# synthetic diagnostic module')
 
 
 class StatusProtocolTests(unittest.TestCase):

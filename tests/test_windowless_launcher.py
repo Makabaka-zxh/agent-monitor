@@ -238,6 +238,7 @@ def test_serve_passes_same_socket_and_keeps_security_and_local_collection(projec
 
         async def startup(self, sockets=None):
             seen["sockets"] = sockets
+            sockets[0].listen()
             self.started = True
 
         def run(self, sockets=None):
@@ -247,9 +248,9 @@ def test_serve_passes_same_socket_and_keeps_security_and_local_collection(projec
     monkeypatch.setitem(sys.modules, "agent_monitor.server", types.SimpleNamespace(create_app=fake_app))
     old_logging_disable = logging.root.manager.disable
     old_path = sys.path[:]
-    current = config(project)
     try:
         with launcher.reserved_socket(0) as listener:
+            current = config(project, listener.getsockname()[1])
             launcher.serve(current, listener, lambda: started.append(True))
             assert seen["sockets"] == [listener]
     finally:
@@ -269,7 +270,6 @@ def test_serve_passes_same_socket_and_keeps_security_and_local_collection(projec
 
 @pytest.mark.parametrize("status_write_fails", [False, True])
 def test_serve_marks_stopping_before_socket_shutdown_without_blocking_cleanup(project, monkeypatch, status_write_fails):
-    current = config(project)
     seen = []
     original_write_status = launcher.write_status
 
@@ -283,13 +283,17 @@ def test_serve_marks_stopping_before_socket_shutdown_without_blocking_cleanup(pr
             self.started = False
 
         async def startup(self, sockets=None):
+            sockets[0].listen()
             self.started = True
 
         async def shutdown(self, sockets=None):
-            recorded = status(current)
-            assert recorded["phase"] == ("running" if status_write_fails else "stopping")
-            assert set(recorded) == {"phase", "time", "pid", "reason", "exception_type"}
-            assert recorded["reason"] == recorded["exception_type"] == ""
+            if status_write_fails:
+                assert not (current.state_dir / launcher.STATUS_FILE).exists()
+            else:
+                recorded = status(current)
+                assert recorded["phase"] == "stopping"
+                assert set(recorded) == {"phase", "time", "pid", "reason", "exception_type"}
+                assert recorded["reason"] == recorded["exception_type"] == ""
             seen.extend(sockets)
 
         def run(self, sockets=None):
@@ -307,7 +311,12 @@ def test_serve_marks_stopping_before_socket_shutdown_without_blocking_cleanup(pr
     old_path = sys.path[:]
     try:
         with launcher.reserved_socket(0) as listener:
-            launcher.serve(current, listener, lambda: launcher.write_status(current.state_dir, "running"))
+            current = config(project, listener.getsockname()[1])
+            if status_write_fails:
+                with pytest.raises(launcher.LauncherError, match="listener-diagnostics-unavailable"):
+                    launcher.serve(current, listener, lambda: launcher.write_status(current.state_dir, "running"))
+            else:
+                launcher.serve(current, listener, lambda: launcher.write_status(current.state_dir, "running"))
             assert seen == [listener]
     finally:
         logging.disable(old_logging_disable)

@@ -21,9 +21,9 @@ private struct BrandIcon: View {
     var size: CGFloat = 32
     var body: some View {
         Group {
-            if let image = MonitorResources.image(tool == "claude" ? "Claude" : "Codex") { Image(nsImage: image).resizable().scaledToFit() }
+            if let image = MonitorResources.image(tool == "claude" ? "Claude" : tool == "codex" ? "Codex" : "AppIcon") { Image(nsImage: image).resizable().scaledToFit() }
             else { Image(systemName: "terminal").resizable().scaledToFit() }
-        }.frame(width: size, height: size).accessibilityLabel(tool == "claude" ? "Claude Code" : "Codex")
+        }.frame(width: size, height: size).accessibilityLabel(tool == "claude" ? "Claude Code" : tool == "codex" ? "Codex" : "任务")
     }
 }
 private struct StatusBadge: View {
@@ -76,6 +76,13 @@ struct RootView: View {
                 .listStyle(.sidebar)
                 .navigationTitle("Monitor")
                 .navigationSplitViewColumnWidth(min: 155, ideal: 175, max: 220)
+                .safeAreaInset(edge: .top) {
+                    HStack(spacing: 10) {
+                        if let image = MonitorResources.image("AppIcon") { Image(nsImage: image).resizable().scaledToFit().frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 10)) }
+                        Text("Monitor").font(.custom("MiSans-Regular", size: 15)).fontWeight(.semibold)
+                        Spacer()
+                    }.padding(.horizontal, 14).padding(.bottom, 8).accessibilityElement(children: .combine)
+                }
                 .safeAreaInset(edge: .bottom) {
                     HStack(spacing: 8) { Circle().fill(store.fresh ? Color.green : Color.secondary).frame(width: 6, height: 6); Text(store.fresh ? "\(store.onlineCount) 台在线" : "连接待更新").foregroundStyle(.secondary); Spacer() }
                         .font(.custom("MiSans-Regular", size: 12)).padding(18)

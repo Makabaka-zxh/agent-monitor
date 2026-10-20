@@ -1,6 +1,6 @@
 "use strict";
-const SHELL_CACHE = "agent-monitor-shell-v19";
-const SHELL = ["/", "/index.html", "/app.js", "/features.js", "/style.css", "/manifest.webmanifest", "/assets/vendor/jsQR-1.4.0.js", "/assets/app-icon.svg", "/assets/app-icon-192.png", "/assets/app-icon-512.png", "/assets/apple-touch-icon.png", "/assets/claude-official.png", "/assets/codex-official.png", "/assets/misans.css"];
+const SHELL_CACHE = "agent-monitor-shell-v20";
+const SHELL = ["/", "/index.html", "/app.js", "/features.js", "/style.css", "/manifest.webmanifest", "/assets/vendor/jsQR-1.4.0.js", "/assets/app-icon.svg", "/assets/app-icon-192.png", "/assets/app-icon-512.png", "/assets/app-icon-maskable-512.png", "/assets/favicon-32.png", "/assets/favicon-64.png", "/assets/apple-touch-icon.png", "/assets/claude-official.png", "/assets/codex-official.png", "/assets/misans.css"];
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL.map((path) => new Request(path, { cache: "reload" })))).then(() => self.skipWaiting()));
 });

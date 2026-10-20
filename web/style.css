@@ -73,3 +73,4 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
   body:has(.profile-form input:not([type=file]):focus,.manual-pairing input:focus) .navigation{display:none}
   body:has(.profile-form input:not([type=file]):focus,.manual-pairing input:focus) .app-shell{padding-bottom:calc(24px + env(safe-area-inset-bottom))}
 }
+.monitor-wordmark{display:flex;align-items:center;gap:10px;margin:0 0 18px;font-size:12px;letter-spacing:.04em;color:var(--muted)}.monitor-wordmark img{display:block;border-radius:10px;background:#fff;object-fit:contain}
