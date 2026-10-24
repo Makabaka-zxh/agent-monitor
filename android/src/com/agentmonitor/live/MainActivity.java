@@ -69,6 +69,7 @@ public final class MainActivity extends Activity {
     private LinearLayout taskSearchPanel;
     private android.animation.ValueAnimator taskSearchAnimation;
     private boolean taskSearchExpanded;
+    private NativeSearchPresentationPolicy.FocusRestore pendingTaskSearchFocus;
     private LinearLayout accountCard;
     private TextView accountName, accountRetry;
     private ImageView accountAvatar;
@@ -161,6 +162,10 @@ public final class MainActivity extends Activity {
                     saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken));
             taskSearchExpanded = NativeSearchPresentationPolicy.restoreExpanded(saved.getBoolean("task_search_expanded"),
                     taskQuery, saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken));
+            pendingTaskSearchFocus = NativeSearchPresentationPolicy.restoreFocus(saved.getString("page", "tasks"),
+                    saved.getBoolean("task_search_expanded"), saved.getBoolean("task_search_focused"),
+                    saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken), pageEpoch,
+                    saved.getInt("task_search_selection_start", -1), saved.getInt("task_search_selection_end", -1));
             if (!loadedToken.isEmpty() && tokenFingerprint(loadedToken).equals(saved.getString("state_fingerprint", ""))) usagePageState = saved.getBundle("usage_page_state");
         }
         UsageAlerts.sync(this);
@@ -187,7 +192,7 @@ public final class MainActivity extends Activity {
     private void reconcileConnection() {
         JSONObject store = SessionStore.read(this); String token = fullConnection(store) ? store.optString("reader_token") : "";
         if (token.equals(loadedToken)) return;
-        sessionEpoch++; actionRevision++; pageEpoch++; loadedToken = token; taskQuery = ""; taskSearchExpanded = false; taskReturnDevice = ""; selectedId = ""; page = "tasks"; snapshot = null; account = null; lastSuccess = 0; nextSnapshot = 0; failed = false;
+        sessionEpoch++; actionRevision++; pageEpoch++; pendingTaskSearchFocus = null; loadedToken = token; taskQuery = ""; taskSearchExpanded = false; taskReturnDevice = ""; selectedId = ""; page = "tasks"; snapshot = null; account = null; lastSuccess = 0; nextSnapshot = 0; failed = false;
         usageSummary = null; usagePageState = null; nativeUsage = null; usageBusy = false; usageFailed = false; nextUsage = 0;
         usageRequestRevision = 0; usageAcceptedRevision = 0; usageAlertRevision = 0;
         UsageAlerts.sync(this);
@@ -318,6 +323,7 @@ public final class MainActivity extends Activity {
         });
     }
     private void navigate(String destination, String id) {
+        pendingTaskSearchFocus = null;
         savePosition(); captureDraft(); if (destination.equals("task")) taskReturnDevice = page.equals("device") ? selectedId : "";
         page = safePage(destination); selectedId = id == null ? "" : id; pageEpoch++; actionRevision++; cancelDuration(); clearNotificationRequest();
         showPage(true); loadCurrentPage();
@@ -327,6 +333,7 @@ public final class MainActivity extends Activity {
 
     private void showPage(boolean animate) {
         if (body == null) return;
+        if (!page.equals("tasks") || loadedToken.isEmpty()) pendingTaskSearchFocus = null;
         if (taskSearchInput != null && taskSearchInput.hasFocus()) hideTaskSearchKeyboard();
         cancelSearchAnimation(); taskSearchInput = null; taskSearchClear = null; taskSearchSummary = null; taskSearchPanel = null; taskSearchToggle = null;
         UsageAlerts.dismissSettings(this);
@@ -531,10 +538,20 @@ public final class MainActivity extends Activity {
         updateWorkspace();
     }
     private void hideTaskSearchKeyboard() {
+        pendingTaskSearchFocus = null;
         if (taskSearchInput == null) return;
         InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(taskSearchInput.getWindowToken(), 0);
         taskSearchInput.clearFocus();
+    }
+    private void restoreTaskSearchFocus() {
+        final EditText field = taskSearchInput;
+        if (pendingTaskSearchFocus == null || field == null) return;
+        int[] selection = pendingTaskSearchFocus.take(page, taskSearchExpanded, tokenFingerprint(loadedToken),
+                pageEpoch, visible && !isFinishing() && !isDestroyed(), hasWindowFocus(), field.length());
+        if (!pendingTaskSearchFocus.pending()) pendingTaskSearchFocus = null;
+        // Restore editing focus/selection, not an unconditional request to open the IME.
+        if (selection != null && field.requestFocus()) field.setSelection(selection[0], selection[1]);
     }
     private NativePages.TaskCallbacks taskCallbacks() { return new NativePages.TaskCallbacks() { public void open(JSONObject task) { navigate("task", task.optString("id")); } public void archive(JSONObject task) { MainActivity.this.archive(task); } }; }
     private void attachList(LinearLayout column) {
@@ -1079,6 +1096,13 @@ public final class MainActivity extends Activity {
         captureDraft(); saved.putString("page", page); saved.putString("id", selectedId); saved.putString("tool", tool); saved.putString("scope", scope);
         saved.putString("task_query", loadedToken.isEmpty() ? "" : NativeTaskSearchPolicy.boundedQuery(taskQuery));
         saved.putBoolean("task_search_expanded", !loadedToken.isEmpty() && taskSearchExpanded);
+        boolean editingSearch = !loadedToken.isEmpty() && page.equals("tasks") && taskSearchExpanded
+                && taskSearchInput != null && taskSearchInput.hasFocus();
+        saved.putBoolean("task_search_focused", editingSearch);
+        if (editingSearch) {
+            saved.putInt("task_search_selection_start", taskSearchInput.getSelectionStart());
+            saved.putInt("task_search_selection_end", taskSearchInput.getSelectionEnd());
+        }
         if (profileDraft) { saved.putBoolean("profile_draft", true); saved.putString("draft_name", draftName); saved.putString("draft_avatar", draftAvatar); }
         if (list != null) saved.putParcelable("list_position", list.onSaveInstanceState()); if (scroll != null) saved.putInt("scroll_y", scroll.getScrollY());
         saved.putString("pairing_code", pairingCode); saved.putString("pairing_expires", pairingExpires);
@@ -1089,6 +1113,11 @@ public final class MainActivity extends Activity {
         super.onResume(); visible = true; reconcileConnection(); updateLogin(); resumeNotificationRequest(); handler.removeCallbacks(heartbeat); loadCurrentPage(); handler.post(heartbeat);
         UsageAlerts.sync(this);
         if (!pendingAvatarUri.isEmpty() && !avatarBusy && !loadedToken.isEmpty() && page.equals("profile")) readAvatar(Uri.parse(pendingAvatarUri));
+        restoreTaskSearchFocus();
+    }
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) restoreTaskSearchFocus();
     }
     @Override protected void onPause() { visible = false; if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); super.onPause(); }
     @Override protected void onDestroy() {
