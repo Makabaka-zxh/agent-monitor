@@ -380,7 +380,7 @@ async function delayedPairingAfterNavigation({ page, holdNext, routeTo, settle, 
   assert.equal(count('POST', '/api/pairing'), 1);
 }
 async function unchangedPollPreservesNodes({ page, poll, routeTo }) {
-  assert.equal(await page.locator('[data-filter]').count(), 3);
+  assert.equal(await page.locator('[data-filter]').count(), 4);
   assert.equal(await page.locator('#navigation button').count(), 3);
   const references = await page.evaluateHandle(() => ({
     cards: [...document.querySelectorAll('button.task')],
@@ -621,12 +621,12 @@ async function taskView(page, value) {
 async function activeAndBrandFiltersCompose({ page, count, poll }) {
   assert.equal(await page.locator('[data-task-view="active"][aria-pressed="true"]').count(), 1);
   assert.deepEqual(await taskIds(page), ['status-0', 'status-1', 'status-2']);
-  assert.deepEqual(await page.locator('.filter .count').allTextContents(), ['3', '2', '1']);
+  assert.deepEqual(await page.locator('.filter .count').allTextContents(), ['3', '2', '1', '0']);
   await page.locator('[data-filter="claude"]').click();
   assert.deepEqual(await taskIds(page), ['status-1', 'status-2']);
   await taskView(page, 'all');
   assert.deepEqual(await taskIds(page), ['status-1', 'status-2', 'status-4']);
-  assert.deepEqual(await page.locator('.filter .count').allTextContents(), ['6', '3', '3']);
+  assert.deepEqual(await page.locator('.filter .count').allTextContents(), ['6', '3', '3', '0']);
   await taskView(page, 'archived');
   assert.deepEqual(await taskIds(page), ['status-6']);
   await poll();
@@ -635,6 +635,31 @@ async function activeAndBrandFiltersCompose({ page, count, poll }) {
   assert.deepEqual(await taskIds(page), []);
   assert.equal(await page.locator('[data-task-view="archived"][aria-pressed="true"]').count(), 1);
   assert.equal(count('PATCH', '/api/tasks/status-6/archive'), 0, 'Changing filters must not archive or restore anything');
+}
+function antigravitySnapshot() {
+  const snapshot = initialSnapshot();
+  snapshot.devices[0].sources = [{ tool: 'antigravity', available: true }, { tool: 'codex', available: false }];
+  snapshot.tasks.push(
+    { ...snapshot.tasks[0], id: 'ag-active', title: 'Antigravity 测试任务', tool: 'antigravity' },
+    { ...snapshot.tasks[0], id: 'ag-completed', title: 'Antigravity 历史任务', tool: 'antigravity', status: 'completed' },
+  );
+  return snapshot;
+}
+async function antigravityTaskFiltering({ page, mock, poll }) {
+  const filter = page.locator('[data-filter="antigravity"]');
+  assert.equal(await filter.locator('.count').textContent(), '1', 'Only the running Antigravity task is active');
+  await filter.click();
+  await until(() => mock.preferences.tool_filter === 'antigravity', 'Antigravity preference was saved');
+  assert.deepEqual(await taskIds(page), ['ag-active']);
+  await taskView(page, 'all');
+  assert.equal(await filter.locator('.count').textContent(), '2');
+  assert.deepEqual(await taskIds(page), ['ag-active', 'ag-completed']);
+  await poll();
+  assert.equal(await filter.getAttribute('aria-pressed'), 'true');
+  await page.locator('button.task[data-id="ag-active"]').click();
+  assert.match(await page.locator('#header .subtitle').textContent(), /Antigravity/);
+  await page.getByRole('button', { name: '查看电脑', exact: true }).click();
+  assert.equal(await page.locator('[data-key="device-task-sources"]').textContent(), '任务来源：Antigravity');
 }
 async function archiveSurvivesOldSnapshotsAndCanRestore({ page, mock, holdNext, poll, settle }) {
   const original = clone(mock.snapshot);
@@ -1704,6 +1729,7 @@ async function captureSmallPreviews(browser, directory) {
   const cases = [
     ...originalCases.map(([name, test]) => [name, async (app) => { await taskView(app.page, 'all'); await test(app); }]),
     ['active/brand/archive filters compose and default excludes finished/unknown/idle', activeAndBrandFiltersCompose, { snapshot: statusSnapshot() }],
+    ['Antigravity selection is saved and task details identify the source', antigravityTaskFiltering, { snapshot: antigravitySnapshot(), viewport: { width: 320, height: 720 } }],
     ['archive and restore survive snapshots requested before either change', archiveSurvivesOldSnapshotsAndCanRestore],
     ['a rejected archive returns the task to its previous view', rejectedArchiveRollsBack],
     ['fresh archive changes from another device are not masked by local history', freshArchiveChangesFromAnotherDeviceApply],

@@ -5,6 +5,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -17,8 +18,12 @@ import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewParent;
+import android.view.ViewTreeObserver;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -32,7 +37,8 @@ import org.json.JSONObject;
 /** Final answers and explicit user actions, separate from the frequent status snapshot. */
 public final class NativeTaskResults {
     public static final int SAVE_DOCUMENT = 24;
-    private static final int PREVIEW_CHARACTERS = 8000;
+    private static final int PREVIEW_CHARACTERS = 600;
+    private static final long DRAFT_SAVE_DELAY_MS = 350;
     public interface Host {
         boolean connected();
         boolean visible();
@@ -46,83 +52,235 @@ public final class NativeTaskResults {
     private final String taskId, token, preferencesKey;
     private final SharedPreferences preferences;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable saveDraft = this::persistDraft;
     private final ExecutorService io = Executors.newFixedThreadPool(2);
     public final LinearLayout view;
+    /** Mount once near the task heading; this is not a child of the result/reply body. */
+    public final LinearLayout attentionView;
+    private final boolean interactive;
     private final LinearLayout outputActions, fileRows, replyCard;
-    private final TextView resultText, resultNote, expand, txtButton, copyButton, replyStatus, sendButton;
+    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle;
     private final EditText replyInput;
-    private final View refreshButton;
+    private final View resultHeading, refreshButton;
     private final ResultRefresh resultRefresh = new ResultRefresh();
+    private final NativeSessionControls controls;
     private JSONObject result;
-    private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", capabilityReason = "";
+    private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", commandReason = "", capabilityReason = "";
     private boolean syncEnabled, replyBusy, sendBusy, downloadBusy, expanded, replyAvailable, knownReply, loadingDraft, filesPending;
+    private boolean replyExpanded;
+    private ViewTreeObserver replyRevealTree, resultRevealTree;
+    private ViewTreeObserver.OnPreDrawListener replyReveal, resultReveal;
     private volatile boolean disposed;
     private long replyRefreshAt, submittedAt;
     private Download pendingDownload;
     private String downloadFeedback = "";
+    private String submittedSelection = "";
+    private boolean submittedSelectionInvalid;
 
-    public NativeTaskResults(NativeUi ui, String taskId, String token, Host host, Bundle saved) {
-        this.ui = ui; this.activity = ui.activity; this.taskId = taskId; this.token = token; this.host = host;
+    public NativeTaskResults(NativeUi ui, String taskId, String token, boolean interactive, Host host, Bundle saved) {
+        this.ui = ui; this.activity = ui.activity; this.taskId = taskId; this.token = token; this.host = host; this.interactive = interactive;
         preferences = activity.getSharedPreferences("native_replies", Activity.MODE_PRIVATE);
         preferencesKey = hash(token) + ":" + hash(taskId);
         requestId = preferences.getString(preferencesKey + ":id", ""); submittedText = preferences.getString(preferencesKey + ":text", "");
         commandState = preferences.getString(preferencesKey + ":state", "");
+        submittedSelection = preferences.getString(preferencesKey + ":submitted_selection", "");
+        if (!submittedSelection.isEmpty()) try { submittedSelectionInvalid = !NativeSessionControlPolicy.selectionSnapshot(new JSONObject(submittedSelection)); } catch (Exception invalid) { submittedSelectionInvalid = true; }
         submittedAt = preferences.getLong(preferencesKey + ":created_at", 0);
         if (!requestId.matches("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")) { requestId = ""; submittedText = ""; commandState = ""; }
         view = ui.column();
-        LinearLayout title = ui.row(); title.addView(ui.text("最终结果", 16, true), new LinearLayout.LayoutParams(0, -2, 1));
-        refreshButton = ui.iconButton("refresh", "刷新最终结果", () -> { resultRefresh.restart(SystemClock.elapsedRealtime()); fetchResult(); fetchReply(true); }); title.addView(refreshButton);
-        view.addView(title, wrap()); view.addView(ui.space(8));
-        LinearLayout resultCard = ui.card(); resultText = ui.text("输出同步已关闭", 15, false);
-        resultText.setTextIsSelectable(true); resultText.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG); resultText.setLineSpacing(ui.dp(5), 1.08f); resultText.setTextColor(ui.muted);
-        resultCard.addView(resultText, wrap());
-        expand = ui.button("展开全文", false, () -> { expanded = !expanded; renderText(); }); expand.setVisibility(View.GONE);
-        LinearLayout.LayoutParams expandSpace = wrap(); expandSpace.topMargin = ui.dp(16); resultCard.addView(expand, expandSpace);
-        view.addView(resultCard, wrap());
-        outputActions = ui.row(); copyButton = ui.button("复制", false, this::copy); txtButton = ui.button("保存 TXT", false, this::chooseTxt);
-        outputActions.addView(copyButton, new LinearLayout.LayoutParams(0, -2, 1)); LinearLayout.LayoutParams txtParams = new LinearLayout.LayoutParams(0, -2, 1); txtParams.leftMargin = ui.dp(10); outputActions.addView(txtButton, txtParams);
-        LinearLayout.LayoutParams actionsSpace = wrap(); actionsSpace.topMargin = ui.dp(12); view.addView(outputActions, actionsSpace); outputActions.setVisibility(View.GONE);
-        resultNote = ui.text("", 13, false); resultNote.setTextColor(ui.warning); resultNote.setPadding(0, ui.dp(12), 0, 0); resultNote.setVisibility(View.GONE); view.addView(resultNote, wrap());
-        fileRows = ui.column(); view.addView(fileRows, wrap()); view.addView(ui.space(24));
-        view.addView(ui.text("回复", 16, true), wrap()); view.addView(ui.space(12));
-        replyCard = ui.card(); replyInput = new EditText(activity); replyInput.setTypeface(ui.regular); replyInput.setTextColor(ui.text); replyInput.setHintTextColor(ui.muted);
-        replyInput.setTextSize(15); replyInput.setHint("继续这个任务…"); replyInput.setMinLines(3); replyInput.setMaxLines(8); replyInput.setGravity(Gravity.TOP | Gravity.START);
+        controls = interactive ? new NativeSessionControls(ui, taskId, host, (method, path, value, done) -> request(method, path, value, done::done), preferences, preferencesKey, this::updateSend) : null;
+        attentionView = interactive ? controls.view : ui.column();
+        LinearLayout resultBody = ui.column();
+        LinearLayout title = ui.row(); resultHeading = title;
+        title.addView(ui.heading("最终结果", 20), new LinearLayout.LayoutParams(0, -2, 1));
+        refreshButton = ui.iconButton("refresh", "刷新最终结果", () -> { resultRefresh.restart(SystemClock.elapsedRealtime()); fetchResult(); fetchReply(true); });
+        title.addView(refreshButton);
+        resultBody.addView(title, wrap());
+        expand = resultToggle("展开全文");
+        resultBody.addView(expand, wrap());
+        resultBody.addView(ui.space(12));
+        resultText = ui.text("输出同步已关闭", 16);
+        resultText.setTextIsSelectable(true); resultText.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG); resultText.setLineSpacing(ui.dp(6), 1.1f); resultText.setTextColor(ui.muted);
+        resultBody.addView(resultText, wrap());
+        collapseAtEnd = resultToggle("收起全文");
+        resultBody.addView(collapseAtEnd, wrap());
+        outputActions = ui.row(); outputActions.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); copyButton = quietAction("复制", this::copy); txtButton = quietAction("保存 TXT", this::chooseTxt);
+        for (TextView action : new TextView[]{copyButton, txtButton}) {
+            action.setMinWidth(ui.dp(48)); action.setPadding(ui.dp(10), ui.dp(10), ui.dp(10), ui.dp(10));
+            outputActions.addView(action, new LinearLayout.LayoutParams(-2, -2));
+        }
+        LinearLayout.LayoutParams actionsSpace = wrap(); actionsSpace.topMargin = ui.dp(4); resultBody.addView(outputActions, actionsSpace); outputActions.setVisibility(View.GONE);
+        resultNote = ui.text("", 13); resultNote.setTextColor(ui.warning); resultNote.setPadding(0, ui.dp(12), 0, 0); resultNote.setVisibility(View.GONE); resultBody.addView(resultNote, wrap());
+        view.addView(resultBody, wrap());
+        fileRows = ui.column(); view.addView(fileRows, wrap()); if (interactive) view.addView(ui.space(24));
+        View replyDivider = new View(activity); replyDivider.setBackgroundColor(ui.line); if (interactive) view.addView(replyDivider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
+        LinearLayout replyHeader = ui.row(); replyHeader.setMinimumHeight(ui.dp(48));
+        replyHeader.addView(ui.heading("回复", 18), new LinearLayout.LayoutParams(0, -2, 1));
+        replyToggle = ui.button("继续任务", this::toggleReply); replyHeader.addView(replyToggle, new LinearLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams replyHeaderSpace = wrap(); replyHeaderSpace.topMargin = ui.dp(18); if (interactive) view.addView(replyHeader, replyHeaderSpace);
+        replyStatus = ui.text("", 13, false); replyStatus.setTextColor(ui.muted);
+        replyStatus.setPadding(0, ui.dp(8), 0, ui.dp(8)); if (interactive) view.addView(replyStatus, wrap());
+        replyAvailability = ui.text("", 13, false); replyAvailability.setTextColor(ui.muted);
+        replyAvailability.setPadding(0, ui.dp(8), 0, ui.dp(8)); if (interactive) view.addView(replyAvailability, wrap());
+        replyCard = ui.column(); replyInput = new EditText(activity); replyInput.setTypeface(ui.regular); replyInput.setTextColor(ui.text); replyInput.setHintTextColor(ui.muted);
+        replyInput.setTextSize(16); replyInput.setLineSpacing(ui.dp(6), 1.08f); replyInput.setHint("继续这个任务…"); replyInput.setMinLines(2); replyInput.setMaxLines(8); replyInput.setGravity(Gravity.TOP | Gravity.START);
         replyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        replyInput.setFilters(new InputFilter[]{new InputFilter.LengthFilter(8000)}); replyInput.setBackgroundColor(android.graphics.Color.TRANSPARENT); replyInput.setPadding(0, ui.dp(4), 0, ui.dp(12));
-        replyInput.setText(preferences.getString(preferencesKey + ":draft", commandState.equals("succeeded") ? "" : submittedText));
-        replyCard.addView(replyInput, wrap()); replyStatus = ui.text("正在确认是否可回复", 14, false); replyStatus.setTextColor(ui.muted);
-        replyStatus.setPadding(0, 0, 0, ui.dp(14)); replyCard.addView(replyStatus, wrap());
-        sendButton = ui.button("发送回复", this::send); replyCard.addView(sendButton, wrap()); view.addView(replyCard, wrap());
+        replyInput.setFilters(new InputFilter[]{new InputFilter.LengthFilter(8000)}); replyInput.setBackground(ui.bordered(ui.surface, 14)); replyInput.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
+        replyInput.setText(preferences.getString(preferencesKey + ":draft", draftFallback()));
+        replyCard.addView(replyInput, wrap());
+        sendButton = ui.button("发送回复", this::send);
+        LinearLayout.LayoutParams sendSpace = new LinearLayout.LayoutParams(-1, -2); sendSpace.gravity = Gravity.END; sendSpace.topMargin = ui.dp(10);
+        replyCard.addView(sendButton, sendSpace); if (interactive) view.addView(replyCard, wrap());
         replyInput.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) { if (!loadingDraft) updateSend(); }
-            public void afterTextChanged(Editable text) { }
+            public void afterTextChanged(Editable text) {
+                if (loadingDraft) return;
+                main.removeCallbacks(saveDraft);
+                main.postDelayed(saveDraft, DRAFT_SAVE_DELAY_MS);
+            }
         });
         if (saved != null && taskId.equals(saved.getString("task")) && hash(token).equals(saved.getString("connection"))) {
-            expanded = saved.getBoolean("expanded"); pendingDownload = Download.restore(saved.getBundle("download"));
+            expanded = saved.getBoolean("expanded"); replyExpanded = saved.getBoolean("reply_expanded");
+            pendingDownload = Download.restore(saved.getBundle("download"));
         }
         updateSend();
     }
     private static LinearLayout.LayoutParams wrap() { return new LinearLayout.LayoutParams(-1, -2); }
+    private TextView quietAction(String label, Runnable action) {
+        TextView button = ui.button(label, false, action);
+        button.setTypeface(ui.regular); button.setTextSize(14); button.setTextColor(ui.muted);
+        button.setBackground(ui.ripple(android.graphics.Color.TRANSPARENT, 10));
+        return button;
+    }
+    private TextView resultToggle(String label) {
+        TextView action = quietAction(label, null);
+        action.setOnClickListener(this::toggleResult);
+        action.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        action.setPadding(0, ui.dp(12), 0, ui.dp(12)); action.setVisibility(View.GONE);
+        return action;
+    }
+    private ScrollView resultScroll() {
+        for (ViewParent parent = resultText.getParent(); parent != null; parent = parent.getParent()) {
+            if (parent instanceof ScrollView) return (ScrollView) parent;
+        }
+        return null;
+    }
+    private void toggleResult(View action) {
+        if (!current() || !host.visible() || expand.getVisibility() != View.VISIBLE) return;
+        cancelResultReveal();
+        boolean fromEnd = action == collapseAtEnd;
+        ScrollView scroll = expanded ? resultScroll() : null;
+        int anchorY = 0;
+        if (scroll != null && !fromEnd) {
+            int[] location = new int[2];
+            action.getLocationInWindow(location);
+            anchorY = location[1];
+        }
+        expanded = !expanded;
+        renderText();
+        if (scroll != null && scroll.isAttachedToWindow()) revealResultPreview(scroll, fromEnd, anchorY);
+    }
+    private void revealResultPreview(ScrollView scroll, boolean fromEnd, int anchorY) {
+        resultRevealTree = scroll.getViewTreeObserver();
+        resultReveal = new ViewTreeObserver.OnPreDrawListener() {
+            public boolean onPreDraw() {
+                if (resultReveal != this) return true;
+                cancelResultReveal();
+                if (expanded || !current() || !host.visible() || !expand.isShown()
+                        || !scroll.isAttachedToWindow() || resultScroll() != scroll) return true;
+                int[] location = new int[2];
+                scroll.getLocationInWindow(location);
+                int top = location[1] + scroll.getPaddingTop();
+                int bottom = location[1] + scroll.getHeight() - scroll.getPaddingBottom() - expand.getHeight();
+                int preferred = fromEnd ? top : Math.max(top, Math.min(bottom, anchorY));
+                // From the footer, bring the heading and the start of the preview below the top bar.
+                View target = fromEnd ? resultHeading : expand;
+                target.getLocationInWindow(location);
+                int before = scroll.getScrollY();
+                scroll.scrollBy(0, location[1] - preferred);
+                return scroll.getScrollY() == before;
+            }
+        };
+        resultRevealTree.addOnPreDrawListener(resultReveal);
+        scroll.postInvalidateOnAnimation();
+    }
+    private void cancelResultReveal() {
+        if (resultReveal == null) return;
+        ViewTreeObserver observer = resultRevealTree.isAlive() ? resultRevealTree : view.getViewTreeObserver();
+        if (observer.isAlive()) observer.removeOnPreDrawListener(resultReveal);
+        resultReveal = null; resultRevealTree = null;
+    }
+    private boolean replyNeedsAttention() {
+        return NativeReplyPresentationPolicy.needsAttention(sendBusy, unresolved(), commandState);
+    }
+    private void toggleReply() {
+        if (!interactive || replyNeedsAttention()) return;
+        if (!replyExpanded) { openReplyFromUser(); return; }
+        replyExpanded = false;
+        cancelReplyReveal();
+        InputMethodManager keyboard = activity.getSystemService(InputMethodManager.class);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(replyInput.getWindowToken(), 0);
+        replyInput.clearFocus();
+        persistDraft();
+        updateSend();
+    }
+    private void openReplyFromUser() {
+        if (!interactive || !current() || !host.visible() || !replyCard.isAttachedToWindow()) return;
+        boolean opening = replyCard.getVisibility() != View.VISIBLE;
+        if (!replyNeedsAttention()) replyExpanded = true;
+        updateSend();
+        if (opening) ui.reveal(replyCard);
+        // Only an intentional tap schedules focus. Refresh and state restoration
+        // may show the editor without opening the keyboard.
+        cancelReplyReveal();
+        replyRevealTree = replyCard.getViewTreeObserver();
+        replyReveal = new ViewTreeObserver.OnPreDrawListener() {
+            public boolean onPreDraw() {
+                if (replyReveal != this) return true;
+                cancelReplyReveal();
+                if (!current() || !host.visible() || !replyCard.isShown()) return true;
+                View target = replyInput.isEnabled() ? replyInput : replyStatus;
+                if (!target.isShown() || target.getWidth() == 0 || target.getHeight() == 0) return true;
+                target.requestRectangleOnScreen(new Rect(0, 0, target.getWidth(), target.getHeight()), false);
+                if (target == replyInput && replyInput.hasWindowFocus() && replyInput.requestFocus()) {
+                    InputMethodManager keyboard = activity.getSystemService(InputMethodManager.class);
+                    if (keyboard != null) keyboard.showSoftInput(replyInput, InputMethodManager.SHOW_IMPLICIT);
+                }
+                return true;
+            }
+        };
+        replyRevealTree.addOnPreDrawListener(replyReveal);
+        replyCard.postInvalidateOnAnimation();
+    }
+    private void cancelReplyReveal() {
+        if (replyReveal == null) return;
+        ViewTreeObserver observer = replyRevealTree.isAlive() ? replyRevealTree : replyCard.getViewTreeObserver();
+        if (observer.isAlive()) observer.removeOnPreDrawListener(replyReveal);
+        replyReveal = null; replyRevealTree = null;
+    }
     private boolean current() { return !disposed && host.connected(); }
+    public void showModelSettings() { if (interactive) controls.openSettings(); }
     private void setText(TextView target, String text) { if (!android.text.TextUtils.equals(target.getText(), text)) target.setText(text); }
     public void update(JSONObject task, boolean syncOutput) {
         if (disposed) return;
+        if (interactive) controls.update(task);
         boolean syncChanged = syncEnabled != syncOutput;
         if (syncChanged) {
             syncEnabled = syncOutput; resultRefresh.reset();
-            if (!syncEnabled) { result = null; fullText = ""; resultSignature = ""; fileRows.removeAllViews(); outputActions.setVisibility(View.GONE); expand.setVisibility(View.GONE); setText(resultText, "输出同步已关闭"); resultText.setTextColor(ui.muted); setResultNote(""); }
+            if (!syncEnabled) { result = null; fullText = ""; resultSignature = ""; fileRows.removeAllViews(); outputActions.setVisibility(View.GONE); expand.setVisibility(View.GONE); collapseAtEnd.setVisibility(View.GONE); setText(resultText, "输出同步已关闭"); resultText.setTextColor(ui.muted); setResultNote(""); }
             else if (result == null) setText(resultText, "正在读取最终结果");
         }
         String marker = task.optString("final_result_id") + "|" + task.optString("final_result_at") + "|" + task.optString("status");
         boolean changed = !marker.equals(snapshotMarker); snapshotMarker = marker;
         if (syncEnabled && (syncChanged || changed)) resultRefresh.expect(marker, task.optString("final_result_id"), SystemClock.elapsedRealtime());
-        if (unresolved()) resultRefresh.rememberReply(requestId, result == null ? "" : result.optString("result_id"));
+        if (interactive && unresolved()) resultRefresh.rememberReply(requestId, result == null ? "" : result.optString("result_id"));
         if (syncEnabled) fetchResult();
         if (!knownReply || changed) fetchReply(changed);
     }
     public void tick() {
         if (!current() || !host.visible()) return;
+        if (interactive) controls.tick();
         long now = SystemClock.elapsedRealtime();
         if (syncEnabled) {
             if (resultRefresh.expired(now)) setResultNote("结果尚未同步完成，点右上角重试");
@@ -130,14 +288,30 @@ public final class NativeTaskResults {
         }
         if (now >= replyRefreshAt) fetchReply(false);
     }
+    private String draftFallback() { return commandState.equals("succeeded") ? "" : submittedText; }
+    private void persistDraft() {
+        if (!interactive) return;
+        main.removeCallbacks(saveDraft);
+        if (disposed) return;
+        String key = preferencesKey + ":draft";
+        String current = replyInput.getText().toString();
+        if (NativeReplyPresentationPolicy.draftNeedsWrite(preferences.getString(key, null), current, draftFallback())) {
+            preferences.edit().putString(key, current).apply();
+        }
+    }
     public void pause() {
-        if (!disposed) preferences.edit().putString(preferencesKey + ":draft", replyInput.getText().toString()).apply();
+        cancelReplyReveal();
+        cancelResultReveal();
+        if (interactive) controls.pause();
+        persistDraft();
     }
     public Bundle saveState() {
+        persistDraft();
         Bundle saved = new Bundle(); saved.putString("task", taskId); saved.putString("connection", hash(token)); saved.putBoolean("expanded", expanded);
+        saved.putBoolean("reply_expanded", replyExpanded);
         if (pendingDownload != null) saved.putBundle("download", pendingDownload.save()); return saved;
     }
-    public void dispose() { pause(); disposed = true; resultRefresh.reset(); main.removeCallbacksAndMessages(null); io.shutdownNow(); }
+    public void dispose() { pause(); if (interactive) controls.dispose(); disposed = true; resultRefresh.reset(); main.removeCallbacksAndMessages(null); io.shutdownNow(); }
     private void request(String method, String path, JSONObject payload, Received done) {
         if (!current()) return;
         io.execute(() -> {
@@ -172,29 +346,32 @@ public final class NativeTaskResults {
         resultSignature = signature;
         fullText = result.optBoolean("available") ? result.optString("text") : "";
         if (fullText.isEmpty()) {
-            setText(resultText, result.optString("reason", "本轮还没有最终结果")); resultText.setTextColor(ui.muted); expand.setVisibility(View.GONE);
+            setText(resultText, result.optString("reason", "本轮还没有最终结果")); resultText.setTextColor(ui.muted); expand.setVisibility(View.GONE); collapseAtEnd.setVisibility(View.GONE);
         } else renderText();
         outputActions.setVisibility(fullText.isEmpty() ? View.GONE : View.VISIBLE);
         setResultNote(result.optBoolean("truncated") ? "结果超出同步上限，完整内容请在电脑查看" : "");
         fileRows.removeAllViews(); filesPending = false; JSONArray files = result.optJSONArray("files");
         if (files != null && files.length() > 0) {
-            fileRows.addView(ui.space(24)); fileRows.addView(ui.text("配套文件", 16, true), wrap()); fileRows.addView(ui.space(12));
+            fileRows.addView(ui.space(18)); fileRows.addView(ui.heading("配套文件", 16), wrap()); fileRows.addView(ui.space(6));
             for (int i = 0; i < files.length(); i++) {
                 JSONObject file = files.optJSONObject(i); if (file == null) continue;
                 final Download download = fileDownload(file); if (download == null) continue;
-                TextView button = ui.button(download.name, false, () -> choose(download)); button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); button.setMaxLines(2); button.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                TextView button = quietAction(download.name, () -> choose(download)); button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); button.setMaxLines(2); button.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                button.setPadding(0, ui.dp(12), 0, ui.dp(12));
                 boolean ready = file.optBoolean("ready", true); if (!ready) filesPending = true; button.setEnabled(ready); button.setAlpha(ready ? 1f : .5f); button.setContentDescription((ready ? "保存文件：" : "文件同步中：") + download.name);
-                if (!ready) button.setText(download.name + " · 同步中"); fileRows.addView(button, wrap()); fileRows.addView(ui.space(10));
+                if (!ready) button.setText(download.name + " · 同步中"); fileRows.addView(button, wrap());
             }
         }
         updateDownloadButtons();
     }
     private void renderText() {
         if (fullText.isEmpty()) return;
-        boolean longText = fullText.length() > PREVIEW_CHARACTERS;
-        int end = Math.min(fullText.length(), PREVIEW_CHARACTERS); if (end > 0 && end < fullText.length() && Character.isHighSurrogate(fullText.charAt(end - 1))) end--;
+        int end = NativeResultPreview.end(fullText, PREVIEW_CHARACTERS);
+        boolean longText = end < fullText.length();
         setText(resultText, longText && !expanded ? fullText.substring(0, end) + "\n…" : fullText); resultText.setTextColor(ui.text);
-        expand.setVisibility(longText ? View.VISIBLE : View.GONE); expand.setText(expanded ? "收起全文" : "展开全文");
+        expand.setVisibility(longText ? View.VISIBLE : View.GONE); setText(expand, expanded ? "收起全文" : "展开全文");
+        // Render the end control with the expanded text; no geometry from an unfinished layout is needed.
+        collapseAtEnd.setVisibility(longText && expanded ? View.VISIBLE : View.GONE);
     }
     private void setResultNote(String message) { setText(resultNote, message); resultNote.setVisibility(message.isEmpty() ? View.GONE : View.VISIBLE); }
     private void copy() {
@@ -257,6 +434,7 @@ public final class NativeTaskResults {
         for (int i = 0; i < fileRows.getChildCount(); i++) { View child = fileRows.getChildAt(i); if (child instanceof TextView && child.getContentDescription() != null && child.getContentDescription().toString().startsWith("保存文件：")) { child.setEnabled(ready); child.setAlpha(ready ? 1 : .5f); } }
     }
     private void fetchReply(boolean force) {
+        if (!interactive) return;
         if (!current() || !host.visible() || replyBusy || sendBusy || !force && SystemClock.elapsedRealtime() < replyRefreshAt) return;
         replyBusy = true; replyRefreshAt = SystemClock.elapsedRealtime() + (unresolved() ? 3000 : 10000);
         String requested = unresolved() ? requestId : "";
@@ -272,56 +450,87 @@ public final class NativeTaskResults {
         });
     }
     private boolean unresolved() { return !requestId.isEmpty() && !commandState.equals("succeeded") && !commandState.equals("failed") && !commandState.equals("blocked"); }
-    private boolean canRetryOriginal() { long age = System.currentTimeMillis() - submittedAt; return commandState.equals("not_found") && !submittedText.isEmpty() && submittedAt > 0 && age >= 0 && age <= 24L * 60 * 60 * 1000; }
+    private boolean canRetryOriginal() { long age = System.currentTimeMillis() - submittedAt; return !submittedSelectionInvalid && commandState.equals("not_found") && !submittedText.isEmpty() && submittedAt > 0 && age >= 0 && age <= 24L * 60 * 60 * 1000; }
     private void consumeCommand(JSONObject value) {
         String state = value.optString("state"); if (state.isEmpty()) return;
         boolean changed = !commandState.equals(state); commandState = state;
         String id = value.optString("request_id", value.optString("id"));
         if (requestId.isEmpty() && id.matches("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")) requestId = id;
         if (changed && !requestId.isEmpty()) preferences.edit().putString(preferencesKey + ":id", requestId).putString(preferencesKey + ":state", state).apply();
-        String reason = value.optString("reason"); if (!reason.isEmpty()) capabilityReason = reason;
+        commandReason = NativeReplyPresentationPolicy.commandReason(commandReason, changed, value.optString("reason"));
         resultRefresh.reply(id.isEmpty() ? requestId : id, state,
                 result == null ? "" : result.optString("result_id"), changed, SystemClock.elapsedRealtime());
         if ("succeeded".equals(state) && changed) {
-            if (replyInput.getText().toString().trim().equals(submittedText)) { loadingDraft = true; replyInput.setText(""); loadingDraft = false; preferences.edit().remove(preferencesKey + ":draft").apply(); }
+            if (replyInput.getText().toString().trim().equals(submittedText)) {
+                main.removeCallbacks(saveDraft);
+                loadingDraft = true;
+                replyInput.setText("");
+                loadingDraft = false;
+                preferences.edit().remove(preferencesKey + ":draft").apply();
+            }
         }
     }
     private void updateSend() {
+        if (!interactive) return;
         boolean pending = unresolved();
+        controls.setReplyLocked(sendBusy || pending);
         replyInput.setEnabled(!sendBusy && !pending); replyInput.setAlpha(sendBusy || pending ? .7f : 1f);
-        String status;
-        if (sendBusy) status = "正在发送…";
-        else if (commandState.equals("dispatching")) status = "等待电脑确认";
-        else if (commandState.equals("queued")) status = "等待电脑接收";
-        else if (commandState.equals("running")) status = "正在回复";
-        else if (commandState.equals("succeeded")) status = "回复完成";
-        else if (commandState.equals("blocked")) status = capabilityReason.isEmpty() ? "需要在电脑处理批准请求" : capabilityReason;
-        else if (commandState.equals("failed")) status = capabilityReason.isEmpty() ? "回复未完成" : capabilityReason;
-        else if (commandState.equals("not_found")) status = canRetryOriginal() ? "电脑还没有接收这条回复" : "这条回复无法确认，请到电脑查看";
-        else if (commandState.equals("uncertain") || pending) status = "发送结果尚未确认，请先查询";
-        else status = knownReply ? replyAvailable ? "" : capabilityReason.isEmpty() ? "当前任务暂不可回复" : capabilityReason : capabilityReason.isEmpty() ? "正在确认是否可回复" : capabilityReason;
+        boolean retry = pending && canRetryOriginal();
+        boolean selectionReady = controls.canSendReply();
+        String status = NativeReplyPresentationPolicy.commandStatus(sendBusy, pending, commandState, retry, commandReason);
+        String availability = NativeReplyPresentationPolicy.capabilityStatus(sendBusy, pending, knownReply, replyAvailable, selectionReady, capabilityReason);
         setText(replyStatus, status); replyStatus.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
-        sendButton.setText(pending ? canRetryOriginal() ? "重试原回复" : "查询发送结果" : "发送回复");
-        boolean enabled = !sendBusy && (pending ? !replyBusy : knownReply && replyAvailable && !replyInput.getText().toString().trim().isEmpty());
+        setText(replyAvailability, availability); replyAvailability.setVisibility(availability.isEmpty() ? View.GONE : View.VISIBLE);
+        replyStatus.setTextColor(commandState.equals("failed") ? ui.danger
+                : commandState.equals("blocked") || commandState.equals("uncertain") || commandState.equals("not_found") ? ui.warning : ui.muted);
+        setText(sendButton, pending ? retry ? "重试原回复" : "查询发送结果" : "发送回复");
+        boolean enabled = !sendBusy && (pending ? !replyBusy : selectionReady && knownReply && replyAvailable && !replyInput.getText().toString().trim().isEmpty());
         sendButton.setEnabled(enabled); sendButton.setAlpha(enabled ? 1f : .5f);
+        boolean attention = replyNeedsAttention();
+        boolean showReply = NativeReplyPresentationPolicy.expanded(replyExpanded, attention);
+        boolean hasDraft = replyInput.length() > 0;
+        replyCard.setVisibility(showReply ? View.VISIBLE : View.GONE);
+        setText(replyToggle, showReply ? "收起" : hasDraft ? "继续草稿" : "继续任务");
+        replyToggle.setContentDescription(showReply ? "收起回复输入框，保留草稿" : hasDraft ? "继续草稿，展开回复输入框" : "继续任务，展开回复输入框");
+        if (!Boolean.valueOf(showReply).equals(replyToggle.getTag())) {
+            replyToggle.setTextColor(showReply ? ui.muted : ui.dark ? ui.bg : android.graphics.Color.WHITE);
+            replyToggle.setBackground(ui.ripple(showReply ? android.graphics.Color.TRANSPARENT : ui.accent, showReply ? 10 : 16));
+            replyToggle.setTag(showReply);
+        }
+        replyToggle.setVisibility(attention ? View.GONE : View.VISIBLE);
     }
     private void send() {
+        if (!interactive) return;
         if (!current() || !host.visible() || sendBusy) return;
         boolean retry = unresolved() && canRetryOriginal();
         if (unresolved() && !retry) { fetchReply(true); updateSend(); return; }
-        String text = retry ? submittedText : replyInput.getText().toString().trim(); if (text.isEmpty() || !retry && (!knownReply || !replyAvailable)) return;
-        if (!retry) { requestId = UUID.randomUUID().toString(); submittedAt = System.currentTimeMillis(); } submittedText = text; commandState = "";
+        String draft = replyInput.getText().toString();
+        String text = retry ? submittedText : draft.trim(); if (text.isEmpty() || !retry && (!knownReply || !replyAvailable)) return;
+        JSONObject selected = null;
+        if (!retry) {
+            try { selected = controls.selectionForSend(); submittedSelection = selected == null ? "" : selected.toString(); submittedSelectionInvalid = false; }
+            catch (IllegalStateException stale) { host.notice("模型选项已变化，请重新选择或继承电脑设置"); return; }
+            requestId = UUID.randomUUID().toString(); submittedAt = System.currentTimeMillis();
+        } submittedText = text; commandState = "";
         // Commit the id before transport. A lost response can be queried after recreation, never resent blindly.
-        if (!preferences.edit().putString(preferencesKey + ":id", requestId).putString(preferencesKey + ":text", text).putString(preferencesKey + ":draft", text).putString(preferencesKey + ":state", "").putLong(preferencesKey + ":created_at", submittedAt).commit()) { if (!retry) requestId = ""; else commandState = "not_found"; host.notice("无法保存发送记录，请稍后重试"); updateSend(); return; }
+        SharedPreferences.Editor record = preferences.edit().putString(preferencesKey + ":id", requestId)
+            .putString(preferencesKey + ":text", text).putString(preferencesKey + ":draft", draft)
+            .putString(preferencesKey + ":submitted_selection", submittedSelection)
+            .putString(preferencesKey + ":state", "").putLong(preferencesKey + ":created_at", submittedAt);
+        boolean consumeTurnOptions = !retry && controls.attachTurnOptionConsumption(record, selected);
+        if (!record.commit()) { if (!retry) requestId = ""; else commandState = "not_found"; host.notice("无法保存发送记录，请稍后重试"); updateSend(); return; }
+        if (consumeTurnOptions) controls.turnOptionsConsumed(selected);
+        main.removeCallbacks(saveDraft);
+        commandReason = "";
         resultRefresh.rememberReply(requestId, result == null ? "" : result.optString("result_id"));
         sendBusy = true; updateSend(); final String sendingId = requestId;
-        JSONObject payload = new JSONObject(); try { payload.put("task_id", taskId).put("text", text).put("request_id", sendingId); } catch (Exception impossible) { sendBusy = false; updateSend(); return; }
+        JSONObject payload = new JSONObject(); try { payload.put("task_id", taskId).put("text", text).put("request_id", sendingId); if (!submittedSelection.isEmpty()) payload.put("selection", new JSONObject(submittedSelection)); } catch (Exception invalid) { sendBusy = false; submittedSelectionInvalid = true; commandState = "uncertain"; updateSend(); return; }
         request("POST", "/api/native/tasks/reply", payload, (value, failure) -> {
             sendBusy = false; if (!sendingId.equals(requestId)) return;
             if (failure == null) {
                 JSONObject command = value.optJSONObject("command"); consumeCommand(command == null ? value : command);
                 if (commandState.isEmpty()) commandState = "uncertain";
-            } else { commandState = "uncertain"; capabilityReason = failure.getMessage(); }
+            } else commandState = "uncertain";
             replyRefreshAt = 0; updateSend(); fetchReply(true);
         });
     }

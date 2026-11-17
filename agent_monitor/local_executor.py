@@ -5,7 +5,7 @@ grants, retries, forks, global settings changes, or tool-output forwarding.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import os
@@ -14,6 +14,7 @@ import queue
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -22,11 +23,17 @@ import uuid
 
 from . import collector
 from .task_results import resolve_local_session, _unlinked
+from .failure_reasons import FAILURE_LABELS, failure_code_for_codex, failure_code_for_claude, has_codex_error_info
+from .model_capabilities import normalize_catalog, selected_settings
+from .provider_controls import normalize_request, UnsupportedControl
+from .session_controls import ModelSelection, reply_fingerprint
 
 MAX_PROMPT_CHARS = 8_000
 MAX_LINE_BYTES = 1024 * 1024
 MAX_STREAM_BYTES = 32 * 1024 * 1024
 MAX_COMMANDS = 512
+RESUME_JOURNAL_SAMPLE_BYTES = 64 * 1024
+RESUME_JOURNAL_EVENT_BYTES = 32 * 1024
 INACTIVE = frozenset({"idle", "completed", "error"})
 REASONS = {
     "unavailable": "这台电脑暂时无法续接这个会话",
@@ -39,11 +46,13 @@ REASONS = {
     "invalid": "回复内容或任务标识无效",
     "closed": "电脑端服务正在关闭",
     "duplicate": "这条回复已经处理过，请刷新查看结果",
+    "declined": "已拒绝本次操作，本轮已停止",
     "cancelled": "本次回复已停止，部分操作可能已经执行",
     "timeout": "等待执行结果超时，请在电脑上确认后再继续",
     "protocol": "未能确认这轮回复的执行结果，请在电脑上查看",
     "failed": "代理未能完成本轮回复，请在电脑上查看",
 }
+REASONS.update(FAILURE_LABELS)
 
 
 class ExecutionIssue(Exception):
@@ -56,9 +65,102 @@ def _same_path(a, b) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+def _codex_approval_path(value, cwd):
+    return (isinstance(value, str) and bool(value) and "\x00" not in value
+            and Path(value).is_absolute() and ".." not in Path(value).parts and _same_path(value, cwd))
+
+
+def _codex_local_approval_environment(environments, cwd):
+    # Codex reserves "local"; a registered remote environment cannot use it.
+    # Only the selection reported by this owned child on the verified resume
+    # is authority. Neither a request field nor a matching path is enough alone.
+    if not isinstance(environments, list) or len(environments) != 1:
+        return False
+    env = environments[0]
+    if not isinstance(env, dict) or set(env) != {"environmentId", "cwd", "runtimeWorkspaceRoots"}:
+        return False
+    roots = env.get("runtimeWorkspaceRoots")
+    return (env.get("environmentId") == "local" and _codex_approval_path(env.get("cwd"), cwd)
+            and isinstance(roots, list) and len(roots) == 1 and _codex_approval_path(roots[0], cwd))
+
+
 def _stamp(path: Path) -> tuple:
-    value = path.stat()
+    return _stat_stamp(path.stat())
+
+
+def _stat_stamp(value):
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+
+def _codex_store_cli() -> str | None:
+    """Resolve the console CLI in the current user's registered Codex Store package."""
+    import ctypes
+    from ctypes import wintypes as w
+
+    try:
+        # Use AppModel's current-user registration, including non-default install
+        # volumes. Do not search WindowsApps, executable aliases, or user caches.
+        api = ctypes.WinDLL("kernelbase.dll", winmode=0x800)  # LOAD_LIBRARY_SEARCH_SYSTEM32
+        packages = api.GetPackagesByPackageFamily
+        packages.argtypes = [w.LPCWSTR, ctypes.POINTER(w.UINT), ctypes.POINTER(w.LPWSTR),
+                             ctypes.POINTER(w.UINT), w.LPWSTR]
+        names = (w.LPWSTR * 32)()
+        buffer = ctypes.create_unicode_buffer(8192)
+        count, length = w.UINT(len(names)), w.UINT(len(buffer))
+        if packages("OpenAI.Codex_2p2nqsd0c76g0", ctypes.byref(count), names,
+                    ctypes.byref(length), buffer) != 0:
+            return None
+        main_packages = [name for name in names[:count.value] if name and re.fullmatch(
+            r"OpenAI\.Codex_(?:[0-9]{1,5}\.){3}[0-9]{1,5}_(?:x64|arm64)__2p2nqsd0c76g0", name)]
+        if len(main_packages) != 1:
+            return None
+        name = main_packages[0]
+        origin = w.UINT()
+        get_origin = api.GetStagedPackageOrigin
+        get_origin.argtypes = [w.LPCWSTR, ctypes.POINTER(w.UINT)]
+        if get_origin(name, ctypes.byref(origin)) != 0 or origin.value != 3:  # PackageOrigin_Store
+            return None
+        location = ctypes.create_unicode_buffer(32768)
+        length = w.UINT(len(location))
+        get_path = api.GetPackagePathByFullName
+        get_path.argtypes = [w.LPCWSTR, ctypes.POINTER(w.UINT), w.LPWSTR]
+        if get_path(name, ctypes.byref(length), location) != 0:
+            return None
+        root = Path(location.value)
+        cli = root / "app" / "resources" / "codex.exe"
+        if (not root.is_absolute() or root.drive.startswith("\\\\") or ".." in root.parts
+                or root.name.casefold() != name.casefold()
+                or not _unlinked(cli) or not cli.is_file()):
+            return None
+        # The package also contains the similarly named Electron GUI. Verify the
+        # fixed resource really is a console PE for the registered architecture.
+        with cli.open("rb") as stream:
+            dos = stream.read(64)
+            if len(dos) != 64 or dos[:2] != b"MZ":
+                return None
+            stream.seek(int.from_bytes(dos[60:64], "little"))
+            pe = stream.read(94)
+        machine = 0x8664 if "_x64__" in name else 0xAA64
+        flags = int.from_bytes(pe[22:24], "little")
+        if (len(pe) == 94 and pe[:4] == b"PE\0\0" and int.from_bytes(pe[4:6], "little") == machine
+                and flags & 0x0002 and not flags & 0x2000  # executable image, not a DLL
+                and int.from_bytes(pe[20:22], "little") >= 70
+                and pe[24:26] == b"\x0b\x02" and pe[92:94] == b"\x03\x00"):
+            return str(cli)
+    except (AttributeError, OSError, ValueError):
+        pass  # Missing/unsupported AppModel, inaccessible package, or a concurrent update.
+    return None
+
+
+def _windows_exe(path: Path) -> str | None:
+    try:
+        if path.is_file():
+            target = path.resolve(strict=True)
+            if target.suffix.casefold() == ".exe" and not _same_path(target.parent, Path.cwd()):
+                return str(target)
+    except (OSError, RuntimeError):
+        pass
+    return None
 
 
 def find_executable(tool: str) -> str | None:
@@ -68,22 +170,29 @@ def find_executable(tool: str) -> str | None:
     entries = [p for p in os.environ.get("PATH", "").split(os.pathsep)
                if p and Path(p).is_absolute() and not _same_path(p, Path.cwd())]
     search = os.pathsep.join(entries)
-    found = shutil.which(tool + (".exe" if os.name == "nt" else ""), path=search)
-    if found and Path(found).is_file():
-        return str(Path(found).resolve())
     if os.name != "nt":
-        return None
+        found = shutil.which(tool, path=search)
+        return str(Path(found).resolve()) if found and Path(found).is_file() else None
+    # shutil.which("codex.exe") on Windows may append PATHEXT and return
+    # codex.exe.cmd, or prepend the current directory. Only probe exact names.
+    for directory in entries:
+        found = _windows_exe(Path(directory) / (tool + ".exe"))
+        if found:
+            return found
     shim = shutil.which(tool, path=search)
-    if not shim:
-        return None
-    base = Path(shim).parent
-    if tool == "claude":
-        candidates = [base / "node_modules/@anthropic-ai/claude-code/bin/claude.exe"]
-    else:
-        candidates = [base / ("node_modules/@openai/" + package + "/vendor/" + arch + "/codex/codex.exe")
-                      for package in ("codex", "codex-win32-x64", "codex-win32-arm64")
-                      for arch in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")]
-    return next((str(p.resolve()) for p in candidates if p.is_file()), None)
+    if shim and Path(shim).is_absolute() and not _same_path(Path(shim).parent, Path.cwd()):
+        base = Path(shim).parent
+        if tool == "claude":
+            candidates = [base / "node_modules/@anthropic-ai/claude-code/bin/claude.exe"]
+        else:
+            candidates = [base / ("node_modules/@openai/" + package + "/vendor/" + arch + "/codex/codex.exe")
+                          for package in ("codex", "codex-win32-x64", "codex-win32-arm64")
+                          for arch in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")]
+        for candidate in candidates:
+            found = _windows_exe(candidate)
+            if found:
+                return found
+    return _codex_store_cli() if tool == "codex" else None
 
 
 def supported_tools() -> list[str]:
@@ -171,9 +280,106 @@ class _Target:
     model: str | None = None
     effort: str | None = None
     claude_mode: str | None = None
+    claude_original_mode: str | None = None
+    directory_identity: tuple = ()
+    status: str = ""
 
 
-def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, executable_finder=find_executable) -> _Target:
+def _codex_resume_checkpoint(target):
+    """Remember the existing end of an already verified, plain Codex journal."""
+    if target.path.suffix != ".jsonl" or not _unlinked(target.path):
+        return None
+    size = target.stamp[2]
+    offset = max(0, size - RESUME_JOURNAL_SAMPLE_BYTES)
+    if size <= 0:
+        return None
+    try:
+        with target.path.open("rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or _stat_stamp(info) != target.stamp:
+                return None
+            handle.seek(offset)
+            tail = handle.read(size - offset)
+            if len(tail) != size - offset or not tail.endswith(b"\n") or _stamp(target.path) != target.stamp:
+                return None
+        return offset, hashlib.sha256(tail).digest()
+    except (OSError, ValueError):
+        return None
+
+
+def _no_duplicate_json_fields(pairs):
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("duplicate journal fields")
+    return value
+
+
+def _codex_resume_metadata(target, fresh, checkpoint, resumed):
+    """Accept one event written by the particular owned app-server resume."""
+    size, new_size = target.stamp[2], fresh.stamp[2]
+    if (checkpoint is None or target.stamp[:2] != fresh.stamp[:2]
+            or not 0 < new_size - size <= RESUME_JOURNAL_EVENT_BYTES):
+        return False
+    offset, digest = checkpoint
+    try:
+        if not _unlinked(target.path):
+            return False
+        with target.path.open("rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or _stat_stamp(info) != fresh.stamp:
+                return False
+            handle.seek(offset)
+            previous = handle.read(size - offset)
+            data = handle.read(new_size - size + 1)
+            if (_stat_stamp(os.fstat(handle.fileno())) != fresh.stamp or _stamp(target.path) != fresh.stamp
+                    or len(previous) != size - offset or hashlib.sha256(previous).digest() != digest
+                    or len(data) != new_size - size or not data.endswith(b"\n") or data.count(b"\n") != 1):
+                return False
+        event = json.loads(data, object_pairs_hook=_no_duplicate_json_fields)
+        if (not isinstance(event, dict) or set(event) != {"type", "timestamp", "ordinal", "payload"}
+                or event["type"] != "event_msg" or type(event["ordinal"]) is not int or event["ordinal"] < 0
+                or not isinstance(event["timestamp"], str)
+                or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z", event["timestamp"])):
+            return False
+        payload = event["payload"]
+        if (not isinstance(payload, dict) or set(payload) != {"type", "thread_id", "thread_settings"}
+                or payload["type"] != "thread_settings_applied" or payload["thread_id"] != target.session_id):
+            return False
+        settings = payload["thread_settings"]
+        bindings = {"model": "model", "model_provider_id": "modelProvider", "service_tier": "serviceTier",
+                    "approval_policy": "approvalPolicy", "approvals_reviewer": "approvalsReviewer",
+                    "reasoning_effort": "reasoningEffort", "collaboration_mode": "collaborationMode",
+                    "disabled_plugin_ids": "disabledPluginIds"}
+        if (not isinstance(settings, dict) or set(settings) != set(bindings) | {
+                "cwd", "runtime_workspace_roots", "permission_profile", "requested_approvals_reviewer",
+                "active_permission_profile"}
+                or any(settings[k] != resumed.get(v) for k, v in bindings.items())
+                or settings["requested_approvals_reviewer"] != "user" or settings["approval_policy"] != "untrusted"
+                or settings["approvals_reviewer"] != "user" or not isinstance(settings["cwd"], str)
+                or not _same_path(settings["cwd"], target.cwd)):
+            return False
+        # The app-server response can serialize `extends: null`; the journal
+        # omits it. This child uses a fresh profile with no inherited settings.
+        active = resumed.get("activePermissionProfile")
+        marker = active.get("id") if isinstance(active, dict) else None
+        if (not isinstance(marker, str) or not re.fullmatch(r"monitor_reply_[0-9a-f]{24}", marker)
+                or set(active) - {"id", "extends"} or active.get("extends") is not None
+                or settings["active_permission_profile"] != {"id": marker}):
+            return False
+        roots, echo_roots = settings["runtime_workspace_roots"], resumed.get("runtimeWorkspaceRoots")
+        if (not isinstance(roots, list) or not isinstance(echo_roots, list) or len(roots) != len(echo_roots)
+                or not all(isinstance(a, str) and isinstance(b, str) and _same_path(a, b)
+                           for a, b in zip(roots, echo_roots))):
+            return False
+        profile = settings["permission_profile"]
+        return (isinstance(profile, dict) and set(profile) == {"type", "file_system", "network"}
+                and profile["network"] == "restricted"
+                and _permission_profile({"permission_profile": profile}, target.cwd) == target.profile)
+    except (OSError, ValueError, TypeError, RecursionError, ExecutionIssue):
+        return False
+
+
+def _resolve_target(source_id, resolver):
     if not isinstance(source_id, str) or len(source_id) > 200:
         raise ExecutionIssue("invalid")
     resolved = resolver(source_id)
@@ -184,6 +390,14 @@ def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, e
             raise ExecutionIssue("invalid")
         if not _unlinked(resolved.path) or not _unlinked(resolved.cwd) or not resolved.cwd.is_dir():
             raise ExecutionIssue("unavailable")
+        return resolved
+    except (OSError, ValueError, TypeError) as exc:
+        raise ExecutionIssue("unavailable") from exc
+
+
+def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, executable_finder=find_executable) -> _Target:
+    resolved = _resolve_target(source_id, resolver)
+    try:
         before = _stamp(resolved.path)
         if status_reader:
             task = status_reader(resolved)
@@ -196,7 +410,7 @@ def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, e
             raise ExecutionIssue("unknown")
         if task.get("status") not in INACTIVE:
             raise ExecutionIssue("busy" if task.get("status") in {"running", "waiting"} else "unknown")
-        profile = model = effort = claude_mode = None
+        profile = model = effort = claude_mode = original_mode = None
         if resolved.tool == "codex":
             _, rows, _ = collector._read_window(resolved.path, max_bytes=1024 * 1024)
             contexts = [r["payload"] for r in rows if r.get("type") == "turn_context" and isinstance(r.get("payload"), dict)]
@@ -215,12 +429,19 @@ def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, e
             if not modes or modes[-1] not in {"plan", "manual", "default", "dontAsk", "auto", "acceptEdits", "bypassPermissions"}:
                 raise ExecutionIssue("permissions")
             claude_mode = "plan" if modes[-1] == "plan" else "dontAsk"
+            original_mode = modes[-1]
+            observed_models = [r.get("message", {}).get("model") for r in rows
+                               if isinstance(r.get("message"), dict)]
+            model = next((m for m in reversed(observed_models) if isinstance(m, str) and
+                          re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}", m)), None)
         if before != _stamp(resolved.path):
             raise ExecutionIssue("changed")
         executable = executable_finder(resolved.tool)
         if not executable:
             raise ExecutionIssue("cli")
-        return _Target(source_id, resolved.tool, resolved.session_id, resolved.path, resolved.cwd, before, executable, profile, model, effort, claude_mode)
+        directory = resolved.cwd.stat()
+        return _Target(source_id, resolved.tool, resolved.session_id, resolved.path, resolved.cwd, before, executable,
+                       profile, model, effort, claude_mode, original_mode, (directory.st_dev, directory.st_ino), task["status"])
     except (OSError, ValueError, TypeError, RecursionError) as exc:
         raise ExecutionIssue("unavailable") from exc
 
@@ -256,17 +477,24 @@ def _toml(value) -> str:
     raise ValueError("Unsupported profile value")
 
 
-def _command(target: _Target) -> tuple[list[str], str | None]:
+def _command(target: _Target, *, interactive=False, settings=None) -> tuple[list[str], str | None]:
     if target.tool == "claude":
-        if target.claude_mode not in {"plan", "dontAsk"}:
+        mode = target.claude_original_mode if interactive else target.claude_mode
+        if mode not in ({"default", "plan", "dontAsk", "acceptEdits"} if interactive else {"plan", "dontAsk"}):
             raise ExecutionIssue("permissions")
         argv = [target.executable, "--print", "--resume", target.session_id, "--output-format", "stream-json",
-                "--verbose", "--permission-mode", target.claude_mode]
-        if target.claude_mode == "plan":
+                "--verbose", "--permission-mode", mode]
+        if mode == "plan":
             argv += ["--disallowedTools", "ExitPlanMode"]
+        if interactive:
+            argv += ["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]
+        if settings:
+            argv += ["--model", settings["model"]]
+            if settings.get("effort"): argv += ["--effort", settings["effort"]]
         return argv, None
-    digest = hashlib.sha256(json.dumps(target.profile, sort_keys=True).encode()).hexdigest()[:24]
-    name = "monitor_reply_" + digest
+    # Unique to the owned child. Another process using the same effective
+    # permissions cannot produce matching resume metadata for this attempt.
+    name = "monitor_reply_" + uuid.uuid4().hex[:24]
     return [target.executable, "-c", "permissions." + name + "=" + _toml(target.profile),
             "-c", "default_permissions=" + _toml(name), "app-server", "--stdio"], name
 
@@ -437,11 +665,13 @@ class _Transport:
     def send(self, message):
         self.send_bytes((json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n").encode())
 
-    def next(self):
+    def next(self, *, wait=True):
         while True:
             self.check()
             try: line = self.events.get(timeout=.1)
-            except queue.Empty: continue
+            except queue.Empty:
+                if not wait: return None
+                continue
             if line is None: raise ExecutionIssue("protocol", "uncertain")
             try: value = json.loads(line)
             except (ValueError, UnicodeError, RecursionError): raise ExecutionIssue("protocol", "uncertain")
@@ -469,13 +699,17 @@ def _reject_request(transport, message):
 def _rpc_response(transport, wanted, pending=None):
     while True:
         message = transport.next()
+        if pending is not None and "id" in message and isinstance(message.get("method"), str):
+            if len(pending) >= 64: raise ExecutionIssue("protocol", "uncertain")
+            pending.append(message)
+            continue
         _reject_request(transport, message)
         if message.get("id") == wanted:
             if "error" in message: raise ExecutionIssue("failed", "failed")
             if not isinstance(message.get("result"), dict): raise ExecutionIssue("protocol", "uncertain")
             return message["result"]
-        if pending is not None and message.get("method") == "turn/completed":
-            if len(pending) >= 8: raise ExecutionIssue("protocol", "uncertain")
+        if pending is not None and isinstance(message.get("method"), str):
+            if len(pending) >= 64: raise ExecutionIssue("protocol", "uncertain")
             pending.append(message)
 
 
@@ -487,46 +721,60 @@ class _Run:
     thread: threading.Thread | None = None
     state: str = "running"
     reason: str = ""
+    error_code: str = ""
+    fingerprint: str = ""
+    selection: dict | None = None
 
 
 class LocalReplyExecutor:
     def __init__(self, emit: Callable[[dict], None], *, timeout_seconds=1800, resolver=resolve_local_session,
-                 status_reader=None, executable_finder=find_executable, process_factory=_Process):
+                 status_reader=None, executable_finder=find_executable, process_factory=_Process,
+                 interaction_handler=None, catalog_provider=None):
         self.emit = emit
         self.timeout = max(.05, min(float(timeout_seconds), 3600))
         self.inspect_options = {"resolver": resolver, "status_reader": status_reader, "executable_finder": executable_finder}
         self.process_factory = process_factory
+        self.interaction_handler, self.catalog_provider = interaction_handler, catalog_provider
         self.lock = threading.Lock()
         self.runs = {}
         self.closed = False
 
     def _result(self, run):
-        return {"command_id": run.command_id, "state": run.state, "reason": run.reason}
+        return {"command_id": run.command_id, "state": run.state, "reason": run.reason, "error_code": run.error_code}
 
     def _emit(self, value):
         try: self.emit(dict(value))
         except Exception: pass  # A UI/store callback cannot grant permissions or restart work.
 
-    def start(self, command_id: str, source_id: str, prompt: str) -> dict:
+    def start(self, command_id: str, source_id: str, prompt: str, *, selection=None) -> dict:
         if not isinstance(command_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", command_id):
             return {"command_id": "", "state": "blocked", "reason": REASONS["invalid"]}
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS or "\x00" in prompt:
             return {"command_id": command_id, "state": "blocked", "reason": REASONS["invalid"]}
+        try:
+            chosen = ModelSelection.model_validate(selection) if selection is not None else None
+            fingerprint = hashlib.sha256((str(source_id) + "\0" + reply_fingerprint(prompt, chosen)).encode()).hexdigest()
+        except (ValueError, TypeError):
+            return {"command_id": command_id, "state": "blocked", "reason": REASONS["invalid"], "error_code": "invalid"}
         with self.lock:
-            if command_id in self.runs: return self._result(self.runs[command_id])
+            if command_id in self.runs:
+                if self.runs[command_id].fingerprint != fingerprint:
+                    return {"command_id": command_id, "state": "blocked", "reason": REASONS["duplicate"], "error_code": "duplicate"}
+                return self._result(self.runs[command_id])
             if self.closed or len(self.runs) >= MAX_COMMANDS:
                 return {"command_id": command_id, "state": "blocked", "reason": REASONS["closed" if self.closed else "duplicate"]}
             if any(r.source_id == source_id and r.state == "running" for r in self.runs.values()):
                 return {"command_id": command_id, "state": "blocked", "reason": REASONS["busy"]}
-            run = _Run(command_id, source_id)
+            run = _Run(command_id, source_id, fingerprint=fingerprint,
+                       selection=chosen.model_dump() if chosen else None)
             self.runs[command_id] = run
         try: target = _inspect(source_id, **self.inspect_options)
         except ExecutionIssue as exc:
-            with self.lock: run.state, run.reason = exc.state, REASONS[exc.code]
+            with self.lock: run.state, run.reason, run.error_code = exc.state, REASONS[exc.code], exc.code
             return self._result(run)
         with self.lock:
             if self.closed or run.cancelled.is_set():
-                run.state, run.reason = "blocked", REASONS["closed"]
+                run.state, run.reason, run.error_code = "blocked", REASONS["closed"], "closed"
                 return self._result(run)
             run.thread = threading.Thread(target=self._execute, args=(run, target, prompt), daemon=True,
                                           name="monitor-reply-" + command_id[:12])
@@ -537,39 +785,74 @@ class LocalReplyExecutor:
         fresh = _inspect(target.source_id, **self.inspect_options)
         if fresh != target: raise ExecutionIssue("changed")
 
+    def _fresh_after_codex_resume(self, target, checkpoint, resumed):
+        if checkpoint is not None:
+            try:
+                changed = _stamp(target.path) != target.stamp
+            except (OSError, ValueError):
+                raise ExecutionIssue("changed") from None
+            if changed:
+                fresh = _inspect(target.source_id, **self.inspect_options)
+                if (replace(fresh, stamp=target.stamp) != target
+                        or not _codex_resume_metadata(target, fresh, checkpoint, resumed)):
+                    raise ExecutionIssue("changed")
+                target = fresh
+        self._fresh(target)
+        return target
+
     def _execute(self, run, target, prompt):
         process = transport = None
-        state, reason = "uncertain", REASONS["protocol"]
+        state, reason, code = "uncertain", REASONS["protocol"], "protocol"
         try:
             self._fresh(target)
             if run.cancelled.is_set(): raise ExecutionIssue("cancelled", "uncertain")
-            argv, profile_name = _command(target)
+            settings = None
+            if run.selection:
+                catalog = (self.catalog_provider(target.source_id) if self.catalog_provider else
+                           discover_reply_catalog(target.source_id, process_factory=self.process_factory, **self.inspect_options))
+                try: settings = selected_settings(run.selection, catalog, provider=target.tool, session_id=target.session_id)
+                except (ValueError, TypeError, KeyError): raise ExecutionIssue("changed")
+                self._fresh(target)
+                if run.cancelled.is_set(): raise ExecutionIssue("cancelled", "uncertain")
+            interactive = self.interaction_handler is not None
+            argv, profile_name = _command(target, interactive=interactive, settings=settings)
             process = self.process_factory(argv, target.cwd)
             transport = _Transport(process, run.cancelled, self.timeout)
             self._emit(self._result(run))
-            if target.tool == "codex": self._codex(transport, target, profile_name, prompt, run.command_id)
+            if target.tool == "codex": self._codex(transport, target, profile_name, prompt, run, settings)
+            elif interactive: self._claude_controlled(transport, target, prompt, run, settings)
             else: self._claude(transport, target, prompt)
-            state, reason = "succeeded", ""
+            state, reason, code = "succeeded", "", ""
         except ExecutionIssue as exc:
-            state, reason = exc.state, REASONS[exc.code]
+            state, reason, code = exc.state, REASONS[exc.code], exc.code
         except Exception:
-            state, reason = ("uncertain", REASONS["protocol"]) if process else ("blocked", REASONS["unavailable"])
+            state, code = ("uncertain", "protocol") if process else ("blocked", "unavailable")
+            reason = REASONS[code]
         finally:
             if transport: transport.done.set()
             if process:
                 try: process.close(graceful=state == "succeeded")
-                except (OSError, ValueError, subprocess.TimeoutExpired): state, reason = "uncertain", REASONS["protocol"]
-            with self.lock: run.state, run.reason = state, reason
+                except (OSError, ValueError, subprocess.TimeoutExpired): state, reason, code = "uncertain", REASONS["protocol"], "protocol"
+            with self.lock: run.state, run.reason, run.error_code = state, reason, code
             self._emit(self._result(run))
 
-    def _codex(self, transport, target, profile, prompt, command_id):
+    def _codex(self, transport, target, profile, prompt, run, settings=None):
         transport.send({"id": 1, "method": "initialize", "params": {
             "clientInfo": {"name": "agent_monitor_local_reply", "version": "1"}, "capabilities": {"experimentalApi": True}}})
         _rpc_response(transport, 1)
         transport.send({"method": "initialized", "params": {}})
+        collaboration_modes = None
+        if settings:
+            try:
+                rows = _codex_model_rows(transport)
+                collaboration_modes = _codex_collaboration_modes(transport)
+                current = normalize_catalog("codex", rows, collaboration_modes=collaboration_modes)
+                settings = selected_settings(run.selection, current, provider="codex", session_id=target.session_id)
+            except (ValueError, KeyError, TypeError): raise ExecutionIssue("changed")
         params = {"threadId": target.session_id, "cwd": str(target.cwd), "permissions": profile,
                   "approvalPolicy": "untrusted", "approvalsReviewer": "user", "excludeTurns": True}
         if target.model: params["model"] = target.model
+        checkpoint = _codex_resume_checkpoint(target)
         transport.send({"id": 2, "method": "thread/resume", "params": params})
         resumed = _rpc_response(transport, 2)
         thread = resumed.get("thread", {})
@@ -580,26 +863,92 @@ class LocalReplyExecutor:
             raise ExecutionIssue("permissions")
         if resumed.get("sandbox", {}).get("networkAccess", True) is not False:
             raise ExecutionIssue("permissions")
-        self._fresh(target)
+        target = self._fresh_after_codex_resume(target, checkpoint, resumed)
+        environments = thread.get("environments")
+        local_approval_environment = _codex_local_approval_environment(environments, target.cwd)
         params = {"threadId": target.session_id, "input": [{"type": "text", "text": prompt}],
                   "cwd": str(target.cwd), "permissions": profile, "approvalPolicy": "untrusted", "approvalsReviewer": "user",
-                  "clientUserMessageId": command_id}
-        if target.effort: params["effort"] = target.effort
+                  "clientUserMessageId": run.command_id}
+        # next_message is the application time, not a promised expiry. The
+        # provider may retain these settings for subsequent turns in this thread.
+        if settings:
+            params["model"] = settings["model"]
+            if "effort" in settings: params["effort"] = settings["effort"]
+            if "service_tier" in settings: params["serviceTierForTurn"] = settings["service_tier"]
+        elif target.effort: params["effort"] = target.effort
+        mode = settings.get("collaboration_mode") if settings else None
+        active_mode = resumed.get("collaborationMode")
+        if mode is None and isinstance(active_mode, dict) and active_mode.get("mode") == "plan":
+            # Some provider versions restore the prior Plan. Limit Monitor's
+            # opt-in to one turn; ordinary replies retain the verified profile.
+            if collaboration_modes is None:
+                collaboration_modes = _codex_collaboration_modes(transport)
+            if "plan" not in collaboration_modes:
+                raise ExecutionIssue("changed")
+            mode = "default"
+        if mode is not None:
+            active_settings = active_mode.get("settings") if isinstance(active_mode, dict) else None
+            active_settings = active_settings if isinstance(active_settings, dict) else {}
+            model = params.get("model") or resumed.get("model") or target.model or active_settings.get("model")
+            effort = params.get("effort")
+            if not settings:
+                effort = effort or resumed.get("reasoningEffort") or active_settings.get("reasoning_effort")
+            if not isinstance(model, str) or len(model) > 120 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]+\])?", model):
+                raise ExecutionIssue("changed")
+            if effort is not None and (not isinstance(effort, str) or not re.fullmatch(r"[a-z0-9_]{1,32}", effort)):
+                raise ExecutionIssue("changed")
+            # Codex gives collaborationMode precedence over top-level model
+            # and effort. Repeat the validated choice here without custom instructions.
+            params["collaborationMode"] = {"mode": mode, "settings": {
+                "model": model, "reasoning_effort": effort, "developer_instructions": None}}
+            self._fresh(target)
         transport.send({"id": 3, "method": "turn/start", "params": params})
         pending = []
         started = _rpc_response(transport, 3, pending)
         turn_id = started.get("turn", {}).get("id")
         if not isinstance(turn_id, str) or not turn_id: raise ExecutionIssue("protocol", "uncertain")
+        seen, previews = {}, {}
+        failure_code = ""
+        stopped_by_phone = False
         while True:
             message = pending.pop(0) if pending else transport.next()
-            _reject_request(transport, message)
+            if "id" in message and isinstance(message.get("method"), str):
+                if not self.interaction_handler: _reject_request(transport, message)
+                control_params = message.get("params")
+                if not isinstance(control_params, dict): _reject_request(transport, message)
+                local_command = False
+                if message["method"] == "item/commandExecution/requestApproval" and environments is not None:
+                    local_command = (local_approval_environment and control_params.get("environmentId") == "local"
+                                     and _codex_approval_path(control_params.get("cwd"), target.cwd))
+                    if not local_command: _reject_request(transport, message)
+                item_id = control_params.get("itemId")
+                preview = previews.get(item_id) if isinstance(item_id, str) else None
+                stopped_by_phone = self._interactive(transport, target, run, turn_id, message, pending, seen,
+                    file_preview=preview, codex_local_command=local_command) or stopped_by_phone
+                continue
+            mp = message.get("params", {})
+            if message.get("method") == "item/started" and mp.get("threadId") == target.session_id and mp.get("turnId") == turn_id:
+                item = mp.get("item", {})
+                if item.get("type") == "fileChange" and isinstance(item.get("id"), str):
+                    changes = item.get("changes")
+                    if isinstance(changes, list) and 0 < len(changes) <= 64:
+                        preview = json.dumps(changes, ensure_ascii=False)
+                        if len(preview) <= 8000: previews[item["id"]] = preview
+            if message.get("method") == "error" and mp.get("threadId") == target.session_id and mp.get("turnId") == turn_id:
+                failure_code = failure_code_for_codex(mp.get("error")) or ""
             if message.get("method") != "turn/completed": continue
             params = message.get("params", {})
             turn = params.get("turn", {})
             if params.get("threadId") != target.session_id or turn.get("id") != turn_id:
                 raise ExecutionIssue("protocol", "uncertain")
             if turn.get("status") == "completed" and not turn.get("error"): return
-            raise ExecutionIssue("failed", "failed" if turn.get("status") == "failed" else "uncertain")
+            final_error = turn.get("error")
+            if stopped_by_phone and turn.get("status") == "interrupted" and not final_error:
+                raise ExecutionIssue("declined", "failed")
+            final_code = failure_code_for_codex(final_error)
+            if has_codex_error_info(final_error): failure_code = final_code
+            raise ExecutionIssue(final_code or failure_code or "failed",
+                                 "failed" if turn.get("status") == "failed" else "uncertain")
 
     def _claude(self, transport, target, prompt):
         self._fresh(target)
@@ -617,7 +966,117 @@ class LocalReplyExecutor:
             if not initialized or session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
             if message.get("permission_denials"): raise ExecutionIssue("approval")
             if message.get("subtype") == "success" and message.get("is_error") is False: return
-            raise ExecutionIssue("failed", "failed")
+            raise ExecutionIssue(failure_code_for_claude(message.get("error_type")) or "failed", "failed")
+
+    def _directory_current(self, target):
+        if not _unlinked(target.cwd) or not target.cwd.is_dir(): raise ExecutionIssue("changed")
+        value = target.cwd.stat()
+        if (value.st_dev, value.st_ino) != target.directory_identity: raise ExecutionIssue("changed")
+
+    def _resolve_control(self, request, state):
+        callback = getattr(self.interaction_handler, "resolve", None)
+        if callback:
+            try: callback(request.public["id"], request.public["revision"], state)
+            except Exception: pass  # A lost acknowledgement must not replay an action.
+
+    def _interactive(self, transport, target, run, turn_id, message, pending, seen, *, file_preview=None,
+                     codex_local_command=False):
+        request = None
+        canceled = threading.Event()
+        acknowledged = False
+        try:
+            request = normalize_request(target.tool, message, command_id=run.command_id,
+                source_id=target.source_id, session_id=target.session_id, turn_id=turn_id, file_preview=file_preview,
+                codex_local_command=codex_local_command)
+            key = (type(request.wire_id), request.wire_id)
+            if key in seen or len(seen) >= 128: raise UnsupportedControl("duplicate provider request")
+            seen[key] = request.public["revision"]
+        except (UnsupportedControl, ValueError, TypeError):
+            if target.tool == "codex": _reject_request(transport, message)
+            transport.send({"type": "control_response", "response": {"subtype": "error",
+                "request_id": message.get("request_id"), "error": "Request requires the desktop client"}})
+            raise ExecutionIssue("approval")
+        completed = queue.Queue(maxsize=1)
+        queued = list(pending)
+        pending.clear()
+        def ask():
+            try: completed.put(self.interaction_handler(dict(request.public), canceled))
+            except Exception: completed.put(None)
+        threading.Thread(target=ask, daemon=True, name="monitor-decision").start()
+        try:
+            while True:
+                transport.check()
+                if time.time() >= request.public["expires_at"]: raise ExecutionIssue("approval")
+                # Consume provider resolution/cancellation before accepting a phone reply.
+                incoming = queued.pop(0) if queued else transport.next(wait=False)
+                if incoming is not None:
+                    params = incoming.get("params", {})
+                    resolved = (target.tool == "codex" and incoming.get("method") == "serverRequest/resolved"
+                        and params.get("threadId") == target.session_id and params.get("requestId") == request.wire_id)
+                    resolved = resolved or (target.tool == "claude" and incoming.get("type") == "control_cancel_request"
+                        and incoming.get("request_id") == request.wire_id)
+                    ended = ((target.tool == "codex" and incoming.get("method") == "turn/completed") or
+                             (target.tool == "claude" and incoming.get("type") == "result"))
+                    if resolved: return
+                    if len(pending) >= 64: raise ExecutionIssue("protocol", "uncertain")
+                    pending.append(incoming)
+                    if ended: return
+                    continue
+                try: decision = completed.get_nowait()
+                except queue.Empty: continue
+                if canceled.is_set() or run.cancelled.is_set(): raise ExecutionIssue("cancelled", "uncertain")
+                if decision is None: raise ExecutionIssue("approval")
+                self._directory_current(target)
+                try: response = request.response(decision)
+                except UnsupportedControl: raise ExecutionIssue("approval")
+                if time.time() >= request.public["expires_at"]: raise ExecutionIssue("approval")
+                transport.send(response)
+                acknowledged = True
+                # Writing the original channel proves forwarding, not provider
+                # acceptance and certainly not successful tool execution.
+                self._resolve_control(request, "forwarded")
+                return target.tool == "codex" and response.get("result", {}).get("decision") == "cancel"
+        finally:
+            pending.extend(queued)
+            canceled.set()
+            if not acknowledged: self._resolve_control(request, "cancelled")
+
+    def _claude_controlled(self, transport, target, prompt, run, settings):
+        initialized = _claude_initialize(transport)
+        if settings:
+            try:
+                current = normalize_catalog("claude", initialized.get("models"))
+                selected_settings(run.selection, current, provider="claude", session_id=target.session_id)
+            except (ValueError, KeyError, TypeError): raise ExecutionIssue("changed")
+        self._fresh(target)
+        transport.send({"type": "user", "session_id": target.session_id, "uuid": run.command_id,
+                        "message": {"role": "user", "content": prompt}})
+        pending, seen = [], {}
+        session_initialized = False
+        failure_code = ""
+        while True:
+            message = pending.pop(0) if pending else transport.next()
+            session = message.get("session_id")
+            if session is not None and session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
+            if message.get("type") == "system" and message.get("subtype") == "init":
+                if session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
+                if message.get("permissionMode") != target.claude_original_mode: raise ExecutionIssue("permissions")
+                # init.model is an observation, not an echo of the CLI's model
+                # alias. Do not abort an already-started turn for a valid alias
+                # resolution, or infer a mapping/applied effort from this field.
+                session_initialized = True
+            if message.get("type") == "control_request":
+                if not session_initialized: raise ExecutionIssue("protocol", "uncertain")
+                self._interactive(transport, target, run, run.command_id, message, pending, seen)
+                continue
+            if message.get("type") == "assistant":
+                if "error" in message: failure_code = failure_code_for_claude(message.get("error"))
+            if message.get("type") != "result": continue
+            if not session_initialized or session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
+            if message.get("permission_denials"): raise ExecutionIssue("approval")
+            if message.get("subtype") == "success" and message.get("is_error") is False: return
+            if "error_type" in message: failure_code = failure_code_for_claude(message.get("error_type"))
+            raise ExecutionIssue(failure_code or "failed", "failed")
 
     def cancel(self, command_id: str) -> bool:
         with self.lock:
@@ -633,3 +1092,126 @@ class LocalReplyExecutor:
             for run in active: run.cancelled.set()
         for run in active:
             if run.thread is not None and run.thread is not threading.current_thread(): run.thread.join(timeout=5)
+
+
+def _claude_initialize(transport):
+    transport.send({"type": "control_request", "request_id": "monitor-initialize",
+                    "request": {"subtype": "initialize", "hooks": None}})
+    for _ in range(64):
+        message = transport.next()
+        if message.get("type") == "control_request": raise ExecutionIssue("approval")
+        if message.get("type") != "control_response": continue
+        response = message.get("response", {})
+        if response.get("request_id") != "monitor-initialize": raise ExecutionIssue("protocol", "uncertain")
+        if response.get("subtype") != "success" or response.get("pending_permission_requests"):
+            raise ExecutionIssue("protocol", "uncertain")
+        if not isinstance(response.get("response"), dict): raise ExecutionIssue("protocol", "uncertain")
+        return response["response"]
+    raise ExecutionIssue("protocol", "uncertain")
+
+
+def _codex_model_rows(transport):
+    rows, cursor, cursors = [], None, set()
+    for page in range(8):
+        transport.send({"id": 20 + page, "method": "model/list", "params": {"cursor": cursor, "limit": 64}})
+        response = _rpc_response(transport, 20 + page)
+        if not isinstance(response.get("data"), list): raise ValueError("invalid catalog")
+        rows.extend(response["data"])
+        if len(rows) > 256: raise ValueError("catalog too large")
+        cursor = response.get("nextCursor")
+        if cursor is None: return rows
+        if not isinstance(cursor, str) or not cursor or cursor in cursors: raise ValueError("invalid cursor")
+        cursors.add(cursor)
+    raise ValueError("catalog too large")
+
+
+def _codex_collaboration_modes(transport):
+    """Require a native Plan preset and a native way back to ordinary replies."""
+    transport.send({"id": 31, "method": "collaborationMode/list", "params": {}})
+    # A CLI missing the optional method may return an RPC error or no result.
+    # Preserve that CLI's legacy model catalog and ordinary replies either way.
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        event = transport.next(wait=False)
+        if event is None: continue
+        _reject_request(transport, event)
+        if event.get("id") != 31: continue
+        value = event.get("result")
+        rows = value.get("data") if isinstance(value, dict) and "error" not in event else None
+        if not isinstance(rows, list) or len(rows) > 32:
+            return ()
+        modes = {row.get("mode") for row in rows if isinstance(row, dict) and isinstance(row.get("mode"), str)}
+        return ("plan",) if {"plan", "default"} <= modes else ()
+    return ()
+
+
+def _catalog_observation(resolved):
+    """A missing or changing observation cannot invalidate the provider's list."""
+    try:
+        before = _stamp(resolved.path)
+        _, rows, _ = collector._read_window(resolved.path, max_bytes=1024 * 1024)
+        model = effort = None
+        if resolved.tool == "codex":
+            for row in reversed(rows):
+                context = row.get("payload")
+                if row.get("type") == "turn_context" and isinstance(context, dict):
+                    if isinstance(context.get("cwd"), str) and _same_path(context["cwd"], resolved.cwd):
+                        model, effort = context.get("model"), context.get("effort")
+                    break
+        else:
+            for row in reversed(rows):
+                message = row.get("message")
+                if row.get("sessionId") == resolved.session_id and not row.get("isSidechain") and isinstance(message, dict) and message.get("model"):
+                    model = message["model"]
+                    break
+        if before == _stamp(resolved.path):
+            valid_model = isinstance(model, str) and len(model) <= 120 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]+\])?", model)
+            valid_effort = isinstance(effort, str) and re.fullmatch(r"[a-z0-9_]{1,32}", effort)
+            return model if valid_model else None, effort if valid_model and valid_effort else None
+    except (OSError, ValueError, TypeError):
+        pass
+    return None, None
+
+
+def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_reader=None,
+                           executable_finder=find_executable, process_factory=_Process, timeout_seconds=15, cancelled=None):
+    """Capability handshake only. No user message, turn/start, or config read/write.
+
+    An unavailable/unsupported catalog is represented as None, never synthesized.
+    The subprocess is owned and closed even when its handshake fails.
+    """
+    process = transport = None
+    try:
+        target = _resolve_target(source_id, resolver)
+        executable = executable_finder(target.tool)
+        if not executable:
+            return None
+        # Listing capabilities does not open the live session or send a turn.
+        if target.tool == "codex":
+            argv = [executable, "app-server", "--stdio"]
+        else:
+            argv = [executable, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
+                    "--verbose", "--no-session-persistence", "--permission-mode", "dontAsk", "--tools", "",
+                    "--strict-mcp-config", "--settings", '{"disableAllHooks":true}']
+        process = process_factory(argv, target.cwd)
+        transport = _Transport(process, cancelled or threading.Event(), min(30, max(.05, timeout_seconds)))
+        modes = ()
+        if target.tool == "codex":
+            transport.send({"id": 1, "method": "initialize", "params": {
+                "clientInfo": {"name": "agent_monitor_capabilities", "version": "1"}, "capabilities": {"experimentalApi": True}}})
+            _rpc_response(transport, 1)
+            transport.send({"method": "initialized", "params": {}})
+            rows = _codex_model_rows(transport)
+            modes = _codex_collaboration_modes(transport)
+        else:
+            rows = _claude_initialize(transport).get("models")
+        model, effort = _catalog_observation(target)
+        return normalize_catalog(target.tool, rows, current_model=model, current_effort=effort,
+                                 collaboration_modes=modes)
+    except Exception:
+        return None
+    finally:
+        if transport: transport.done.set()
+        if process:
+            try: process.close()
+            except (OSError, ValueError, subprocess.TimeoutExpired): pass

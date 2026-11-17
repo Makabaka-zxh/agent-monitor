@@ -221,7 +221,7 @@ final class UpdateClient {
         long number = number(value, key); if (number < 0 || number > Integer.MAX_VALUE) throw new IOException("更新信息数字无效"); return (int) number;
     }
     private static String notes(Object raw) {
-        if (!(raw instanceof String) || ((String) raw).trim().isEmpty()) return "此版本未提供更新说明。";
+        if (!(raw instanceof String) || ((String) raw).trim().isEmpty()) return "此版本未提供更新说明";
         String text = (String) raw; StringBuilder result = new StringBuilder();
         for (int index = 0; index < text.length() && result.length() < 8000; index++) {
             char c = text.charAt(index);

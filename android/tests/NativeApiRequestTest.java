@@ -23,6 +23,13 @@ public final class NativeApiRequestTest {
         check(NativeApi.allowedRequest("PATCH", "/api/native/preferences"), "preference mutation accepted");
         check(NativeApi.allowedRequest("PATCH", "/api/native/tasks/archive"), "task id stays in JSON");
         check(NativeApi.allowedRequest("POST", "/api/native/tasks/reply"), "explicit native reply admitted");
+        check(NativeApi.allowedRequest("GET", NativeApi.taskPath("controls", task)), "controls bound to one task");
+        check(NativeApi.allowedRequest("POST", "/api/native/tasks/controls/decision"), "explicit native decision admitted");
+        check(!NativeApi.allowedRequest("GET", "/api/native/tasks/controls/decision"), "GET cannot approve");
+        check(!NativeApi.allowedRequest("GET", "/api/native/tasks/controls"), "controls need task identity");
+        check(NativeApi.taskPath("controls", task, "request_id", uuid).isEmpty(), "controls cannot add unknown keys");
+        check(!NativeApi.allowedDownload(NativeApi.taskPath("controls", task)), "controls are not downloadable output");
+        check(!NativeApi.allowedRequest("POST", "/api/native/tasks/controls/decision?task_id=a"), "decision identity belongs in body");
         String resultPath = NativeApi.taskPath("result", task);
         String txtPath = NativeApi.taskPath("result.txt", task, "result_id", digest);
         String filePath = NativeApi.taskPath("result/file", task, "result_id", digest, "file_id", digest);

@@ -17,6 +17,135 @@ from agent_monitor import local_executor as le
 SESSION = "12345678-1234-5678-9012-123456789abc"
 
 
+@pytest.fixture
+def codex_store_package(tmp_path, monkeypatch):
+    """A simulated current-user AppModel registration, never an executable child."""
+    import ctypes as c
+
+    family = "OpenAI.Codex_2p2nqsd0c76g0"
+    main = "OpenAI.Codex_1.2.3.4_x64__2p2nqsd0c76g0"
+    state = SimpleNamespace(names=[main], origin=3, root=tmp_path / main, api_error=False)
+    cli = state.root / "app/resources/codex.exe"
+    cli.parent.mkdir(parents=True)
+    pe = bytearray(94)
+    pe[:6] = b"PE\0\0\x64\x86"
+    pe[20:26] = b"\xf0\x00\x22\x00\x0b\x02"
+    pe[92:94] = b"\x03\x00"
+    cli.write_bytes(b"MZ" + bytes(58) + (64).to_bytes(4, "little") + pe)
+
+    def packages(selected_family, count, names, length, buffer):
+        assert selected_family == family
+        if state.api_error:
+            return 5
+        for i, value in enumerate(state.names):
+            names[i] = value
+        c.cast(count, c.POINTER(c.c_uint))[0] = len(state.names)
+        return 0
+
+    def origin(name, value):
+        assert name in state.names
+        c.cast(value, c.POINTER(c.c_uint))[0] = state.origin
+        return 0
+
+    def install_path(name, length, buffer):
+        assert name in state.names
+        buffer.value = str(state.root)
+        return 0
+
+    api = SimpleNamespace(GetPackagesByPackageFamily=packages, GetStagedPackageOrigin=origin,
+                          GetPackagePathByFullName=install_path)
+    monkeypatch.setattr(c, "WinDLL", lambda name, *, winmode: api, raising=False)
+    return state, cli
+
+
+def test_store_finds_console_cli_and_ignores_resource_packages(codex_store_package):
+    state, cli = codex_store_package
+    state.names.append("OpenAI.Codex_1.2.3.4_neutral_some-resource_2p2nqsd0c76g0")
+    assert le._codex_store_cli() == str(cli)
+
+
+def test_store_rejects_a_reparse_point_in_package_resources(codex_store_package, monkeypatch):
+    _, cli = codex_store_package
+    original = Path.lstat
+
+    def lstat(path):
+        info = original(path)
+        if path == cli.parent:
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    assert le._codex_store_cli() is None
+
+
+@pytest.mark.parametrize("failure", ["unregistered", "wrong_publisher", "ambiguous", "developer_package",
+                                     "relative_path", "api_error", "missing", "script", "gui", "arm64_in_x64", "dll"])
+def test_store_fails_closed(codex_store_package, failure):
+    state, cli = codex_store_package
+    if failure == "unregistered":
+        state.names.clear()
+    elif failure == "wrong_publisher":
+        state.names[0] = state.names[0].replace("2p2nqsd0c76g0", "not-the-store")
+    elif failure == "ambiguous":
+        state.names.append(state.names[0].replace("1.2.3.4", "2.0.0.0"))
+    elif failure == "developer_package":
+        state.origin = 5
+    elif failure == "relative_path":
+        state.root = Path(state.root.name)
+    elif failure == "api_error":
+        state.api_error = True
+    elif failure == "missing":
+        cli.unlink()
+    elif failure == "script":
+        cli.write_bytes(b"@echo off")
+    else:
+        data = bytearray(cli.read_bytes())
+        offset, value = {"gui": (92, b"\x02\x00"), "arm64_in_x64": (4, b"\x64\xaa"),
+                         "dll": (22, b"\x22\x20")}[failure]
+        data[64+offset:66+offset] = value
+        cli.write_bytes(data)
+    assert le._codex_store_cli() is None
+
+
+@pytest.mark.skipif(le.os.name != "nt", reason="Windows native resolver precedence")
+def test_native_resolution_keeps_path_and_npm_ahead_of_store(codex_store_package, monkeypatch, tmp_path):
+    _, packaged = codex_store_package
+    native = tmp_path / "codex.exe"
+    native.touch()
+    shim = tmp_path / "codex.cmd"
+    npm = tmp_path / "node_modules/@openai/codex/vendor/x86_64-pc-windows-msvc/codex/codex.exe"
+    npm.parent.mkdir(parents=True)
+    npm.touch()
+    shim.touch()
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+    assert le.find_executable("codex") == str(native)
+    native.unlink()
+    assert le.find_executable("codex") == str(npm)
+    npm.unlink()
+    assert le.find_executable("codex") == str(packaged)
+    # An implicitly prepended working directory/shim must not win on Windows.
+    native.touch()
+    monkeypatch.chdir(tmp_path)
+    assert le.find_executable("codex") == str(packaged)
+
+
+@pytest.mark.skipif(le.os.name != "nt", reason="Windows PATHEXT behavior")
+def test_windows_pathext_script_cannot_shadow_or_replace_cli(codex_store_package, monkeypatch, tmp_path):
+    _, packaged = codex_store_package
+    first, second = tmp_path / "scripts", tmp_path / "native"
+    first.mkdir()
+    second.mkdir()
+    (first / "codex.exe.cmd").touch()
+    native = second / "codex.exe"
+    native.touch()
+    monkeypatch.setenv("PATH", le.os.pathsep.join(map(str, (first, second))))
+    monkeypatch.setenv("PATHEXT", ".CMD;.EXE")
+    assert le.find_executable("codex") == str(native)
+    native.unlink()
+    assert le.find_executable("codex") == str(packaged)
+
+
 class Pipe:
     def __init__(self): self.queue = queue.Queue(); self.closed = False
     def put(self, value): self.queue.put(value if isinstance(value, bytes) else (json.dumps(value)+"\n").encode())
@@ -45,7 +174,7 @@ class Child:
     def __init__(self, argv, cwd, *, outcome="success", resumed=None):
         self.argv, self.cwd, self.outcome, self.resumed = argv, cwd, outcome, resumed
         self.tool = "codex" if "app-server" in argv else "claude"
-        self.profile = argv[2].split(".", 1)[1].split("=", 1)[0] if self.tool == "codex" else None
+        self.profile = argv[2].split(".", 1)[1].split("=", 1)[0] if self.tool == "codex" and argv[1] == "-c" else None
         self.requests = []
         self.close_calls = 0
         self.proc = SimpleNamespace(stdout=Pipe(), stderr=Pipe())
@@ -142,7 +271,7 @@ def run_case(target, tool="codex", outcome="success", timeout=.7, status_reader=
 def test_exact_session_success_and_stdin_only(target, tool):
     response, events, children, executor = run_case(target, tool)
     assert response["state"] == "running"
-    assert events[-1] == {"command_id": "command-1", "state": "succeeded", "reason": ""}
+    assert events[-1] == {"command_id": "command-1", "state": "succeeded", "reason": "", "error_code": ""}
     child = children[0]
     assert child.close_calls == 1
     assert all("literal" not in str(arg) for arg in child.argv)
@@ -162,7 +291,7 @@ def test_exact_session_success_and_stdin_only(target, tool):
     else:
         assert child.argv[child.argv.index("--resume")+1] == SESSION
         assert child.argv[child.argv.index("--permission-mode")+1] == "dontAsk"
-    assert executor.start("command-1", tool+":"+SESSION, "again")["state"] == "succeeded"
+    assert executor.start("command-1", tool+":"+SESSION, "again")["error_code"] == "duplicate"
     assert len(children) == 1
 
 

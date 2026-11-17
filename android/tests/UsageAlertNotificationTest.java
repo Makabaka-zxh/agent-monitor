@@ -53,7 +53,7 @@ public final class UsageAlertNotificationTest {
         Notification test = UsageAlertNotification.test(context, "monitor_usage_v1", false);
         ordinary(test, "Codex", R.drawable.codex);
         check("测试提醒".contentEquals(test.contentText), "collapsed test explicitly identified");
-        check(test.bigText.toString().equals("测试提醒\n用于检查通知显示，不代表真实额度。"), "expanded test never fabricates usage or reset values");
+        check(test.bigText.toString().equals("测试提醒\n用于检查通知显示，不代表真实额度"), "expanded test never fabricates usage or reset values");
         check(!test.bigText.toString().contains("%") && !test.bigText.toString().contains("Token"), "no synthetic quota or usage number");
         check(test.timeoutAfter == 120000, "test expires after two minutes");
         check((test.flags & Notification.FLAG_ONLY_ALERT_ONCE) != 0, "repeated manual test does not repeatedly sound while its notice remains active");
@@ -64,7 +64,7 @@ public final class UsageAlertNotificationTest {
         Notification locked = UsageAlertNotification.test(context, "monitor_usage_v1", true);
         ordinary(locked, "Codex", R.drawable.codex);
         check("测试提醒".contentEquals(locked.contentText)
-                && "测试提醒\n用于检查通知显示，不代表真实额度。".contentEquals(locked.bigText),
+                && "测试提醒\n用于检查通知显示，不代表真实额度".contentEquals(locked.bigText),
                 "locked test stays hidden by SECRET visibility and remains identifiable after unlock");
         check(locked.timeoutAfter == 120000, "locked test remains bounded");
         check((locked.flags & Notification.FLAG_ONLY_ALERT_ONCE) != 0, "locked test retains once-only alert behavior");

@@ -9,9 +9,18 @@ public final class XiaomiLiveNotificationTest {
         String codex = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "codex", true);
         String claude = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "claude", true);
         check(codex != null && claude != null, "both supported providers produce a minimal candidate");
-        check(codex.contains("\"aodTitle\":\"Codex\"") && claude.contains("\"aodTitle\":\"Claude\""),
-                "always-on content remains the provider label");
-        check(codex.replace("Codex", "Claude").equals(claude), "provider is the only variable payload text");
+        check(codex.contains("\"aodTitle\":\"Codex · 执行中\"") && claude.contains("\"aodTitle\":\"Claude Code · 执行中\""),
+                "always-on content identifies provider and confirmed running state");
+        check(codex.replace("Codex", "Claude Code").equals(claude), "provider is the only variable default payload text");
+        check(codex.contains("\"content\":\"执行中\""), "island and expanded content carry useful running state");
+        for (String summary : new String[]{"执行中", "执行中 · 已跟踪 不足1分", "执行中 · 已跟踪 2分", "执行中 · 已跟踪 1时25分", "执行中 · 已跟踪 2天3时"}) {
+            String value = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "codex", true, summary);
+            check(value != null && value.contains("\"content\":\"" + summary + "\""), "bounded anonymous duration reaches expanded content");
+        }
+        for (String unsafe : new String[]{null, "", "等待批准", "正在重连", "执行中 · 私密任务", "执行中\",\"task\":\"private", "执行中\nsecret", "执行中 · 已跟踪 -1分", "执行中 · 已跟踪 2分 secret"}) {
+            check(XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "codex", true, unsafe) == null,
+                    "unrecognized or private summary falls back to native notification");
+        }
         check(codex.length() < 1024, "minimal candidate has a bounded IPC payload");
         check(codex.contains("\"business\":\"agent_monitor\""), "scene does not impersonate taxi or media");
         check(codex.contains("\"filterWhenNoPermission\":false"), "OEM permission failure preserves ordinary notifications");

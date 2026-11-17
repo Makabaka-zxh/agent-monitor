@@ -36,6 +36,9 @@ MAX_TEXT_CACHE_BYTES = 64 * 1024 * 1024
 MAX_FILES = 12
 CHUNK_BYTES = 512 * 1024
 HEX_ID = re.compile(r"^[0-9a-f]{64}$")
+_CODEX_UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+_CODEX_ROLLOUT = re.compile(r"rollout-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-(" +
+                            _CODEX_UUID + r")\.jsonl")
 DELIVERABLE_TYPES = frozenset({
     ".txt", ".md", ".csv", ".tsv", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".odt", ".ods", ".odp", ".rtf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
@@ -137,6 +140,22 @@ class LocalSession:
     source_id: str
 
 
+def _exact_codex_backup(paths, wanted):
+    matches = [path for path in paths if (name := _CODEX_ROLLOUT.fullmatch(path.name)) and name[1] == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _read_extra_codex_head(path, base):
+    identity = collector._plain_codex_identity(path, base)
+    if identity is None or identity.st_nlink != 1:
+        return []
+    with path.open("rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or not os.path.samestat(info, identity):
+            return []
+        return collector._json_lines(handle.read(collector.HEAD_BYTES))
+
+
 def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *, require_workspace=True) -> LocalSession | None:
     if not isinstance(source_id, str) or len(source_id) > 200:
         return None
@@ -148,23 +167,28 @@ def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *, 
     base = home / ("sessions" if tool == "codex" else "projects")
     if not _unlinked(base):
         return None
-    files, _, _ = collector._recent_files(base, collector.MAX_SESSION_FILES, claude=tool == "claude")
+    # Callers authorize a task before submitting its source id. Rank the same
+    # bounded metadata lookahead, but never sample its other transcript heads.
+    backup = []
+    discovery = {"_codex_backup": backup} if tool == "codex" and re.fullmatch(_CODEX_UUID, wanted) else {}
+    files, _, _ = collector._recent_files(base, collector.MAX_SESSION_FILES, claude=tool == "claude", **discovery)
     # Session filenames normally contain the exact id. Try that bounded subset
     # first; retain metadata verification and a fallback for legacy filenames.
     files.sort(key=lambda path: wanted not in path.name)
-    for path in files:
+    extra_path = _exact_codex_backup(backup, wanted)
+    for path in files if extra_path is None else (*files, extra_path):
         if not _unlinked(path):
             continue
         try:
             # Metadata must be in the complete head, never inferred from name.
-            head = collector._read_head(path)
+            extra = path == extra_path
+            head = _read_extra_codex_head(path, base) if extra else collector._read_head(path)
             if tool == "codex":
                 metadata = next((row.get("payload") for row in head if row.get("type") == "session_meta"
                                  and isinstance(row.get("payload"), dict)), None)
                 if not metadata:
                     continue
-                source = metadata.get("source")
-                if metadata.get("parent_thread_id") or isinstance(source, dict) and "subagent" in source:
+                if collector._codex_is_subagent(metadata):
                     continue
                 session = metadata.get("id") or metadata.get("session_id")
                 cwd = metadata.get("cwd")
@@ -177,7 +201,7 @@ def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *, 
             if session != wanted or not isinstance(cwd, str) or not Path(cwd).is_absolute():
                 continue
             root = Path(cwd)
-            if require_workspace and (not root.is_dir() or not _unlinked(root)):
+            if (require_workspace or extra) and (not root.is_dir() or not _unlinked(root)):
                 continue
             return LocalSession(path, root, wanted, tool, source_id)
         except (OSError, ValueError):
@@ -272,8 +296,9 @@ def read_deliverable(path: Path, session: LocalSession, final: dict, expected_sh
 
 
 class LocalResults:
-    def __init__(self, *, codex_home=None, claude_home=None):
+    def __init__(self, *, codex_home=None, claude_home=None, antigravity_home=None):
         self.codex_home, self.claude_home = codex_home, claude_home
+        self.antigravity_home = antigravity_home
         self.cache: dict[str, tuple] = {}
         self.lock = threading.RLock()
 
@@ -283,6 +308,9 @@ class LocalResults:
         return resolve_local_session(source_id, self.codex_home, self.claude_home, require_workspace=False)
 
     def read(self, source_id: str) -> dict | None:
+        if source_id.startswith("antigravity:"):
+            from .antigravity import read_antigravity_result
+            return read_antigravity_result(source_id.removeprefix("antigravity:"), base=self.antigravity_home)
         session = self.resolve(source_id)
         if not session:
             return None
@@ -358,7 +386,7 @@ class FinalFile(BaseModel):
 class FinalUpload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_id: str = Field(min_length=1, max_length=200)
-    tool: str = Field(pattern=r"^(codex|claude)$")
+    tool: str = Field(pattern=r"^(codex|claude|antigravity)$")
     result_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     text: str = Field(min_length=1, max_length=MAX_RESULT_CHARS)
     completed_at: str = Field(max_length=40)
@@ -500,6 +528,8 @@ class TaskResults:
         _, source, row = self._task(device + ":" + payload.source_id)
         if row["local"] or json.loads(row["payload"])["tool"] != payload.tool:
             raise HTTPException(403, "任务不属于这台电脑")
+        if payload.tool == "antigravity" and payload.files:
+            raise HTTPException(422, "Antigravity 只同步最终回复文本")
         expected = sha256((payload.tool + "\n" + payload.completed_at + "\n" + payload.text).encode())
         if expected != payload.result_id or len({file.id for file in payload.files}) != len(payload.files):
             raise HTTPException(422, "结果校验失败")

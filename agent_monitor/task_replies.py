@@ -13,6 +13,8 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .store import ONLINE_SECONDS, iso
+from .failure_reasons import FAILURE_LABELS
+from .session_controls import ModelSelection, reply_fingerprint
 
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 LIVE = ("queued", "dispatching", "running")
@@ -29,7 +31,16 @@ REASONS = {
     "claude_missing": "电脑连接器未找到 Claude Code 命令程序，请在电脑上安装或配置后重试",
     "unavailable": "此会话暂时不能续接", "expired": "发送已过期，请确认任务后重新发送",
     "revoked": "账号连接已失效，本次回复已停止", "restarted": "服务曾中断，请核对任务后再发送",
+    # Local continuation reports only these fixed diagnostics; never pass through
+    # the executor's free-text reason or a provider's raw exception.
+    "permissions": "无法保留这个会话的权限设置，请在电脑上继续",
+    "changed": "任务状态或设置已变化，请刷新后重新发送",
+    "cli": "电脑端未找到所需的命令程序，请检查安装后重试",
+    "approval": "这一步需要在电脑端确认权限或补充信息",
+    "declined": "已拒绝本次操作，本轮已停止",
+    "settings_changed": "模型设置已过期或变化，请刷新后重新选择",
 }
+REASONS.update(FAILURE_LABELS)
 
 
 class ReplyInput(BaseModel):
@@ -37,6 +48,7 @@ class ReplyInput(BaseModel):
     task_id: str = Field(min_length=1, max_length=500)
     request_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
     text: str = Field(min_length=1, max_length=8000)
+    selection: ModelSelection | None = None
 
     @field_validator("text")
     @classmethod
@@ -67,6 +79,7 @@ class TaskReplies:
         self.executor = None
         self.stopping = threading.Event()
         self.lifecycle_lock = threading.RLock()
+        self.closed = False
         self._capabilities = {}
         with store.lock, store.db:
             store.db.executescript("""
@@ -81,9 +94,16 @@ class TaskReplies:
             """)
             if 'claimed_at' not in {r['name'] for r in store.db.execute('PRAGMA table_info(task_replies)')}:
                 store.db.execute('ALTER TABLE task_replies ADD COLUMN claimed_at REAL')
+            columns = {r['name'] for r in store.db.execute('PRAGMA table_info(task_replies)')}
+            if 'selection' not in columns:
+                store.db.execute("ALTER TABLE task_replies ADD COLUMN selection TEXT NOT NULL DEFAULT ''")
+            if 'request_schema' not in columns:
+                store.db.execute('ALTER TABLE task_replies ADD COLUMN request_schema INTEGER NOT NULL DEFAULT 1')
             # Never replay a command after a hub restart; the tool may have received it.
             store.db.execute("UPDATE task_replies SET state='uncertain',reason_code='restarted',"
                              "prompt='',finished_at=? WHERE state IN ('queued','dispatching','running')", (time.time(),))
+        from .task_interactions import TaskInteractions
+        self.controls = TaskInteractions(store, self)
 
     def _task(self, task_id):
         device_id, sep, source_id = task_id.partition(":")
@@ -114,16 +134,18 @@ class TaskReplies:
             value["delivery_ms"] = max(0, round((row["started_at"] - row["queued_at"]) * 1000))
         return value
 
-    def _base_capability(self, task_id):
+    def _base_capability(self, task_id, *, for_catalog=False):
         device_id, source_id, row, task = self._task(task_id)
         reason = ""
-        if row["archived"]:
+        if task.get("tool") not in {"codex", "claude"}:
+            reason = "unsupported"
+        elif row["archived"]:
             reason = "archived"
         elif time.time() - row["last_seen"] >= ONLINE_SECONDS:
             reason = "offline"
-        elif task.get("status") not in {"completed", "idle", "error"}:
+        elif not for_catalog and task.get("status") not in {"completed", "idle", "error"}:
             reason = "busy"
-        elif self.store.db.execute("SELECT 1 FROM task_replies WHERE device_id=? AND state IN ('queued','dispatching','running')", (device_id,)).fetchone():
+        elif not for_catalog and self.store.db.execute("SELECT 1 FROM task_replies WHERE device_id=? AND state IN ('queued','dispatching','running')", (device_id,)).fetchone():
             reason = "busy"
         elif row["local"]:
             if not self.local_enabled:
@@ -152,24 +174,29 @@ class TaskReplies:
                 "latest": self._public(latest) if latest else None}
 
     def enqueue(self, reader, data):
-        prompt_hash = hashlib.sha256(data.text.encode("utf-8")).hexdigest()
+        prompt_hash = reply_fingerprint(data.text, data.selection)
         row = self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (data.request_id,)).fetchone()
         if row:
-            if row["reader_id"] != reader["id"] or row["task_id"] != data.task_id or row["prompt_hash"] != prompt_hash:
+            expected = prompt_hash if row['request_schema'] >= 2 else hashlib.sha256(data.text.encode('utf-8')).hexdigest()
+            if (row["reader_id"] != reader["id"] or row["task_id"] != data.task_id or row["prompt_hash"] != expected
+                    or (row['request_schema'] < 2 and data.selection is not None)):
                 raise HTTPException(409, "发送编号已使用，请先查询原回复")
             return self._public(row)
         device_id, source_id, device, task, reason = self._base_capability(data.task_id)
         if reason:
             raise HTTPException(409, REASONS[reason])
+        if data.selection is not None:
+            self.controls.validate_selection(device_id, source_id, data.selection)
         # Keep request IDs as durable tombstones: an old mobile retry must never
         # become a new execution after result/history retention or a restart.
         if self.store.db.execute("SELECT COUNT(*) FROM task_replies").fetchone()[0] >= 50000:
             raise HTTPException(429, "发送记录较多，请稍后再试")
         now = time.time()
         self.store.db.execute("""INSERT INTO task_replies
-            (id,reader_id,device_id,source_id,task_id,tool,prompt,prompt_hash,state,queued_at,expires_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (data.request_id, reader["id"], device_id, source_id,
-            data.task_id, task["tool"], data.text, prompt_hash, "queued", now, now + 120))
+            (id,reader_id,device_id,source_id,task_id,tool,prompt,prompt_hash,state,queued_at,expires_at,selection,request_schema)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,2)""", (data.request_id, reader["id"], device_id, source_id,
+            data.task_id, task["tool"], data.text, prompt_hash, "queued", now, now + 120,
+            data.selection.model_dump_json() if data.selection is not None else ''))
         return self._public(self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (data.request_id,)).fetchone())
 
     def update(self, command_id, state, error_code="", *, device_id=None):
@@ -189,6 +216,8 @@ class TaskReplies:
                 self.store.db.execute('UPDATE task_replies SET started_at=COALESCE(started_at,?) WHERE id=?', (time.time(), command_id))
             self.store.db.execute("UPDATE task_replies SET state=?,reason_code=?,prompt='',finished_at=? WHERE id=?",
                                   (state, reason, time.time() if state in FINAL else None, command_id))
+            if state in FINAL:
+                self.controls.cancel_command(command_id)
             return self._public(self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (command_id,)).fetchone())
 
     def _emit(self, event):
@@ -216,11 +245,21 @@ class TaskReplies:
                     reason = "offline"
             except HTTPException:
                 reason = "unavailable"
+        selection = None
+        if not reason and row['selection']:
+            try:
+                selection = ModelSelection.model_validate_json(row['selection'])
+                self.controls.validate_selection(row['device_id'], row['source_id'], selection)
+            except (HTTPException, ValueError):
+                reason = 'settings_changed'
         if reason:
             self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code=?,prompt='',finished_at=? WHERE id=?", (reason, time.time(), row["id"]))
             return None
         self.store.db.execute("UPDATE task_replies SET state='dispatching',claimed_at=?,prompt='' WHERE id=?", (time.time(), row["id"]))
-        return {"id": row["id"], "source_id": row["source_id"], "text": row["prompt"], "tool": row["tool"]}
+        command = {"id": row["id"], "source_id": row["source_id"], "text": row["prompt"], "tool": row["tool"]}
+        if selection is not None:
+            command['selection'] = selection.model_dump(mode='json')
+        return command
 
     def poll_agent(self, device_id, supported_tools):
         with self.store.lock, self.store.db:
@@ -231,14 +270,15 @@ class TaskReplies:
                 "SELECT id FROM task_replies WHERE device_id=? AND state='blocked' AND reason_code='revoked' AND finished_at>?",
                 (device_id, time.time() - 3600)).fetchall()]
             if running:
-                return {"command": None, "cancel_ids": cancel_ids}
+                return {"command": None, "cancel_ids": cancel_ids, 'catalog_requests': self.controls.take_catalog_requests(device_id)}
             command = self._claim(device_id)
-            return {"command": command, "cancel_ids": cancel_ids}
+            return {"command": command, "cancel_ids": cancel_ids, 'catalog_requests': self.controls.take_catalog_requests(device_id)}
 
     def _tick(self):
         if self.stopping.is_set():
             return
         with self.store.lock, self.store.db:
+            self.controls.expire_invalid()
             if not self.store.db.execute("SELECT 1 FROM task_replies WHERE state IN ('queued','dispatching','running') LIMIT 1").fetchone():
                 return
             now = time.time()
@@ -249,6 +289,7 @@ class TaskReplies:
             canceled = [r["id"] for r in running if not self._valid_reader(r["reader_id"])]
             for command_id in canceled:
                 self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code='revoked',prompt='',finished_at=? WHERE id=?", (now, command_id))
+            self.controls.expire_invalid()
             locals_ = [r["id"] for r in self.store.db.execute("SELECT id FROM devices WHERE local=1").fetchall()] if self.local_enabled else []
         if self.executor:
             for command_id in canceled:
@@ -269,8 +310,9 @@ class TaskReplies:
                             self.executor = self.executor_factory(self._emit)
                         else:
                             from .local_executor import LocalReplyExecutor
-                            self.executor = LocalReplyExecutor(emit=self._emit)
-                    result = self.executor.start(command["id"], command["source_id"], command["text"])
+                            self.executor = LocalReplyExecutor(emit=self._emit, interaction_handler=self.controls.local_handler)
+                    settings = {'selection': command['selection']} if 'selection' in command else {}
+                    result = self.executor.start(command["id"], command["source_id"], command["text"], **settings)
                     if isinstance(result, dict) and result.get("state") in FINAL:
                         self.update(command["id"], result["state"], result.get("error_code", ""))
                 except Exception:
@@ -288,8 +330,15 @@ class TaskReplies:
     def close(self):
         self.stopping.set()
         with self.lifecycle_lock:
-            if self.executor:
-                self.executor.close()
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                if self.executor:
+                    self.executor.close()
+            finally:
+                with self.store.lock, self.store.db:
+                    self.store.db.execute("UPDATE task_interactions SET state='cancelled',payload='',decision='',finished_at=? WHERE state IN ('pending','submitted')", (time.time(),))
 
 
 def install_reply_routes(app, store, perform):

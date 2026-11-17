@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 import ipaddress
 import json
 import os
@@ -20,10 +21,13 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 import urllib.error
 import urllib.parse
 import urllib.request
+
+if TYPE_CHECKING:
+    from .collector import CodexGrowthTracker
 
 
 REQUEST_TIMEOUT = 10
@@ -147,6 +151,7 @@ class AgentConfig:
     name: str = ""
     sync_output: bool = False
     allow_insecure_lan: bool = False
+    antigravity_v1: bool = field(default=False, init=False, repr=False)
 
 
 def default_state_dir() -> Path:
@@ -403,10 +408,10 @@ def pair_qr(
         return config
 
 
-def _collect_snapshot(*, include_output: bool) -> dict[str, Any]:
+def _collect_snapshot(*, include_output: bool, codex_growth: CodexGrowthTracker | None = None) -> dict[str, Any]:
     from .collector import collect_snapshot
 
-    return collect_snapshot(include_output=include_output)
+    return collect_snapshot(include_output=include_output, codex_growth=codex_growth)
 
 
 def heartbeat(client: HubClient, config: AgentConfig, snapshot: dict[str, Any]) -> bool:
@@ -415,10 +420,28 @@ def heartbeat(client: HubClient, config: AgentConfig, snapshot: dict[str, Any]) 
     sources = snapshot.get("sources", {})
     if not isinstance(sources, (list, dict)):
         raise RemoteAgentError("采集结果格式无效，本次未上传")
-    result = client.post(
-        "/api/agent/heartbeat", {"tasks": snapshot["tasks"], "sources": sources}, token=config.token
-    )
-    return _output_setting(result, config.sync_output)
+    tasks = snapshot["tasks"]
+    # An older hub rejects the whole heartbeat on a new provider enum. Start
+    # with the legacy providers until this authenticated hub advertises support.
+    legacy_tasks = [task for task in tasks if not isinstance(task, dict) or task.get("tool") != "antigravity"]
+    legacy_sources = ([source for source in sources
+                       if not isinstance(source, dict) or source.get("tool") != "antigravity"]
+                      if isinstance(sources, list) else sources)
+    legacy = {"tasks": legacy_tasks, "sources": legacy_sources}
+    new_provider = len(legacy_tasks) != len(tasks) or len(legacy_sources) != len(sources)
+    send_new = config.antigravity_v1 and new_provider
+    try:
+        result = client.post("/api/agent/heartbeat", {"tasks": tasks, "sources": sources} if send_new else legacy,
+                             token=config.token)
+    except RemoteAgentError as exc:
+        # Handle an older hub restored while this connector is still running.
+        if not send_new or not isinstance(exc.__cause__, urllib.error.HTTPError) or exc.__cause__.code != 422:
+            raise
+        config.antigravity_v1 = False
+        result = client.post("/api/agent/heartbeat", legacy, token=config.token)
+    sync_output = _output_setting(result, config.sync_output)
+    config.antigravity_v1 = result.get("antigravity_v1") is True
+    return sync_output
 
 
 class ResultSync:
@@ -442,6 +465,7 @@ class ResultSync:
             return
         tasks = [task for task in snapshot.get("tasks", []) if isinstance(task, dict)
                  and isinstance(task.get("id"), str) and isinstance(task.get("final_result_id"), str)
+                 and (task.get("tool") != "antigravity" or config.antigravity_v1)
                  and HEX_ID.fullmatch(task["final_result_id"])]
         if not tasks:
             return
@@ -540,7 +564,11 @@ def _run(
     config = load_config(state_dir)
     client = HubClient(config.server, config.allow_insecure_lan)
     production_collector = collect is None
-    collect = collect or _collect_snapshot
+    if collect is None:
+        collect = _collect_snapshot
+        if not once:
+            from .collector import CodexGrowthTracker
+            collect = partial(collect, codex_growth=CodexGrowthTracker())
     sleep = sleep or time.sleep
     result_sync = None if status_only else ResultSync()
     retry_delay = HEARTBEAT_INTERVAL
@@ -573,7 +601,11 @@ def _run(
                         ]}
                 except (OSError, ValueError, TypeError) as exc:
                     raise RemoteAgentError("暂时无法读取本机任务状态") from exc
+                had_antigravity_support = config.antigravity_v1
                 sync_output = heartbeat(client, config, snapshot)
+                if not had_antigravity_support and config.antigravity_v1 and any(
+                        isinstance(task, dict) and task.get("tool") == "antigravity" for task in snapshot["tasks"]):
+                    sync_output = heartbeat(client, config, snapshot)
                 if usage is not None:
                     usage.start()
                 if replies is not None:

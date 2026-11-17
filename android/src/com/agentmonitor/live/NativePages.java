@@ -1,5 +1,6 @@
 package com.agentmonitor.live;
 
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.text.TextUtils;
@@ -43,16 +44,18 @@ public final class NativePages {
         public Segments(NativeUi ui, String[] keys, String[] labels, boolean primary, OnChoice onChoice) {
             if (keys.length == 0 || keys.length != labels.length) throw new IllegalArgumentException("Segment keys and labels must match");
             this.ui = ui; this.keys = keys.clone(); this.labels = labels.clone(); this.primary = primary;
-            root = new SegmentRow(); root.setPadding(ui.dp(primary ? 4 : 0), ui.dp(primary ? 4 : 0), ui.dp(primary ? 4 : 0), ui.dp(primary ? 4 : 0));
-            root.setBackground(primary ? ui.bordered(ui.dark ? 0xFF1B201F : 0xFFEAEEEB, 17) : null);
+            root = new SegmentRow();
             buttons = new TextView[keys.length];
             for (int i = 0; i < keys.length; i++) {
                 final String key = keys[i];
-                TextView button = ui.text(labels[i], 14, false); button.setGravity(Gravity.CENTER);
-                button.setMinHeight(ui.dp(48)); button.setPadding(ui.dp(4), ui.dp(8), ui.dp(4), ui.dp(8));
+                TextView button = new SegmentButton(); button.setText(labels[i]); button.setGravity(Gravity.CENTER);
+                button.setTextSize(primary ? 15 : 14); button.setTypeface(ui.regular);
+                button.setIncludeFontPadding(false); button.setLineSpacing(ui.dp(3), 1f);
+                button.setMinHeight(ui.dp(48)); button.setPadding(ui.dp(4), ui.dp(10), ui.dp(4), ui.dp(10));
                 button.setMaxLines(1); button.setHorizontallyScrolling(false); button.setEllipsize(TextUtils.TruncateAt.END);
-                button.setAutoSizeTextTypeUniformWithConfiguration(12, 14, 1, TypedValue.COMPLEX_UNIT_SP);
+                button.setAutoSizeTextTypeUniformWithConfiguration(12, primary ? 15 : 14, 1, TypedValue.COMPLEX_UNIT_SP);
                 button.setContentDescription(labels[i]); button.setFocusable(true); button.setClickable(true);
+                button.setBackground(ui.ripple(Color.TRANSPARENT, 10));
                 ui.pressFeedback(button, .985f);
                 button.setOnClickListener(v -> { if (!key.equals(selected)) { select(key); if (onChoice != null) onChoice.choose(key); } });
                 button.setAccessibilityDelegate(new View.AccessibilityDelegate() {
@@ -75,8 +78,7 @@ public final class NativePages {
                 boolean active = keys[i].equals(key); TextView button = buttons[i];
                 button.setSelected(active); button.setTextColor(active ? ui.text : ui.muted);
                 button.setTypeface(active ? ui.medium : ui.regular);
-                button.setBackground(active && primary ? ui.borderedRipple(ui.surface, 13)
-                        : ui.ripple(active ? ui.soft : Color.TRANSPARENT, 12));
+                button.invalidate();
             }
         }
         public void counts(int[] values) {
@@ -85,6 +87,28 @@ public final class NativePages {
             for (int i = 0; i < buttons.length; i++) {
                 String label = labels[i] + (counts != null && counts.length > i ? " " + counts[i] : "");
                 setText(buttons[i], label); buttons[i].setContentDescription(label);
+            }
+        }
+
+        /** The visual mark stays compact; the entire segment remains a 48 dp target. */
+        private final class SegmentButton extends TextView {
+            private final Paint mark = new Paint(Paint.ANTI_ALIAS_FLAG);
+            SegmentButton() { super(ui.activity); }
+            @Override protected void onDraw(Canvas canvas) {
+                if (isSelected()) {
+                    if (primary) {
+                        mark.setColor(ui.text);
+                        float half = ui.dp(12), bottom = getHeight() - ui.dp(1);
+                        canvas.drawRoundRect(getWidth() / 2f - half, bottom - ui.dp(2), getWidth() / 2f + half, bottom, ui.dp(1), ui.dp(1), mark);
+                    } else {
+                        mark.setColor(ui.soft);
+                        float width = Math.min(getWidth() - ui.dp(8), getPaint().measureText(getText().toString()) + ui.dp(20));
+                        float height = Math.min(getHeight() - ui.dp(12), getLineHeight() * getLineCount() + ui.dp(12));
+                        canvas.drawRoundRect((getWidth() - width) / 2f, (getHeight() - height) / 2f,
+                                (getWidth() + width) / 2f, (getHeight() + height) / 2f, ui.dp(8), ui.dp(8), mark);
+                    }
+                }
+                super.onDraw(canvas);
             }
         }
 
@@ -103,9 +127,9 @@ public final class NativePages {
                         if (sizing.measureText(button.getText().toString()) > slot - button.getPaddingLeft() - button.getPaddingRight()) { lines = 2; break; }
                     }
                     // SP honors the user's font scale. At large sizes, let every segment grow together.
-                    sizing.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 14, getResources().getDisplayMetrics()));
+                    sizing.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, primary ? 15 : 14, getResources().getDisplayMetrics()));
                     int height = Math.max(ui.dp(48), (int) Math.ceil(sizing.getFontSpacing() * lines)
-                            + ui.dp(16) + (lines - 1) * ui.dp(2));
+                            + ui.dp(20) + (lines - 1) * ui.dp(3));
                     for (TextView button : buttons) {
                         if (button.getMaxLines() != lines) button.setMaxLines(lines);
                         button.getLayoutParams().height = height;
@@ -119,7 +143,7 @@ public final class NativePages {
     public static ListView list(NativeUi ui, BaseAdapter adapter) {
         ListView result = new ListView(ui.activity); result.setDivider(null); result.setDividerHeight(0);
         result.setSelector(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)); result.setVerticalScrollBarEnabled(false);
-        result.setClipToPadding(false); result.setPadding(ui.dp(18), ui.dp(6), ui.dp(18), ui.dp(16));
+        result.setClipToPadding(false); result.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(16));
         result.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS); result.setAdapter(adapter);
         return result;
     }
@@ -152,46 +176,41 @@ public final class NativePages {
             holder.bind(getItem(position)); return recycled;
         }
         private final class TaskHolder {
-            final LinearLayout outer = ui.column(), card = ui.card();
-            final LinearLayout toolBadge = ui.toolBadge("");
-            final TextView title = ui.text("", 16, true), source = ui.text("", 13, false), status = ui.text("", 12, false), updated = ui.text("", 12, false);
-            final NativeUi.Icon archive;
+            final LinearLayout outer = ui.column(), card = ui.column();
+            final LinearLayout toolBadge = ui.taskIdentity("", "");
+            final TextView title = ui.text("", 17, false), status = ui.text("", 12, false), updated = ui.text("", 12, false);
             JSONObject current;
             TaskHolder() {
-                outer.setPadding(0, 0, 0, ui.dp(10)); outer.addView(card, matchWrap());
-                card.setPadding(ui.dp(16), ui.dp(14), ui.dp(10), ui.dp(8));
-                card.setBackground(ui.borderedRipple(ui.surface, 20)); card.setFocusable(true); card.setClickable(true);
+                outer.addView(card, matchWrap());
+                card.setPadding(0, ui.dp(20), 0, ui.dp(20));
+                card.setMinimumHeight(ui.dp(48));
+                card.setBackground(ui.ripple(Color.TRANSPARENT, 10)); card.setFocusable(true); card.setClickable(true);
                 ui.pressFeedback(card, .995f);
                 card.setOnClickListener(v -> { JSONObject latest = latest(); if (latest != null && callbacks != null) callbacks.open(latest); });
                 card.setAccessibilityDelegate(NativeUi.buttonAccessibility());
-                LinearLayout provenance = ui.row(); provenance.addView(toolBadge);
-                View chevron = ui.icon("chevron", 20); LinearLayout.LayoutParams chevronParams = new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)); chevronParams.setMargins(ui.dp(4), 0, ui.dp(4), 0);
-                provenance.addView(new View(ui.activity), new LinearLayout.LayoutParams(0, 1, 1)); provenance.addView(chevron, chevronParams);
-                card.addView(provenance, matchWrap()); card.addView(ui.space(12));
-                LinearLayout top = ui.row(); top.setGravity(Gravity.TOP);
-                LinearLayout words = ui.column(); LinearLayout.LayoutParams wordParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); wordParams.setMargins(0, 0, ui.dp(6), 0);
-                top.addView(words, wordParams); title.setMaxLines(2); title.setEllipsize(TextUtils.TruncateAt.END); title.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
-                source.setTextColor(ui.muted); source.setMaxLines(1); source.setEllipsize(TextUtils.TruncateAt.END);
-                words.addView(title, matchWrap()); words.addView(ui.space(6)); words.addView(source, matchWrap());
-                card.addView(top, matchWrap()); card.addView(ui.space(8));
+                card.addView(toolBadge, matchWrap()); card.addView(ui.space(10));
+                title.setTypeface(ui.medium);
+                title.setMaxLines(2); title.setEllipsize(TextUtils.TruncateAt.END); title.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+                card.addView(title, matchWrap()); card.addView(ui.space(12));
                 LinearLayout bottom = ui.row();
-                status.setPadding(ui.dp(8), ui.dp(4), ui.dp(8), ui.dp(4)); status.setMaxLines(1);
+                status.setPadding(0, ui.dp(4), 0, ui.dp(4)); status.setMaxLines(1);
                 bottom.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                 updated.setTextColor(ui.muted); updated.setGravity(Gravity.END); updated.setMaxLines(1); updated.setEllipsize(TextUtils.TruncateAt.END);
                 LinearLayout.LayoutParams updatedParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); updatedParams.setMargins(ui.dp(8), 0, 0, 0); bottom.addView(updated, updatedParams);
-                archive = (NativeUi.Icon) ui.iconButton("archive", "归档任务", () -> { JSONObject latest = latest(); if (latest != null && callbacks != null) callbacks.archive(latest); });
-                archive.setInk(ui.muted); bottom.addView(archive); card.addView(bottom, matchWrap());
-                for (View info : new View[]{title, source, status, updated}) info.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                card.addView(bottom, matchWrap());
+                View divider = new View(ui.activity); divider.setBackgroundColor(ui.line);
+                divider.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                outer.addView(divider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
+                for (View info : new View[]{toolBadge, title, status, updated}) info.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             }
             JSONObject latest() { return current == null ? null : latestTasks.get(current.optString("id")); }
             void bind(JSONObject task) {
                 current = task; JSONObject computer = devices.get(task.optString("device_id"));
                 String titleValue = value(task, "title", "未命名任务"), deviceName = value(computer, "name", "未知电脑");
-                String state = status(task, computer, stale); setText(title, titleValue); setText(source, deviceName);
-                ui.bindToolBadge(toolBadge, task.optString("tool")); bindStatus(ui, status, state);
+                String state = status(task, computer, stale); setText(title, titleValue);
+                ui.bindTaskIdentity(toolBadge, task.optString("tool"), deviceName);
+                bindStatus(ui, status, state);
                 setText(updated, relative(task.optString("updated_at")));
-                boolean archived = task.optBoolean("archived"); archive.setName(archived ? "restore" : "archive");
-                archive.setContentDescription((archived ? "恢复：" : "归档：") + titleValue);
                 card.setContentDescription(titleValue + "，" + toolName(task.optString("tool")) + "，" + deviceName + "，" + statusLabel(state));
             }
         }
@@ -250,46 +269,60 @@ public final class NativePages {
         public final LinearLayout view;
         private final NativeUi ui;
         private final TextView note, state, time, project;
-        private final LinearLayout projectRow;
-        private final LinearLayout errorSection, errorCard;
-        private final TextView errorUnavailable, errorSummary, errorLocation, errorSuggestion;
+        final LinearLayout projectRow, errorSection, noteSection;
+        private final LinearLayout errorCard;
+        private final TextView errorUnavailable, errorSummary, errorLocation, errorSuggestion, errorEvidence;
         public TaskDetail(NativeUi ui) {
             this.ui = ui; view = ui.column();
-            note = ui.text("", 13, false); note.setTextColor(ui.warning); note.setPadding(0, 0, 0, ui.dp(12)); view.addView(note, matchWrap());
-            LinearLayout facts = ui.card(); state = ui.text("", 15, true); time = ui.text("", 13, false); project = ui.text("", 13, false);
-            facts.addView(fact("状态", state), matchWrap()); facts.addView(ui.space(14)); facts.addView(fact("更新", time), matchWrap());
-            projectRow = fact("项目", project); projectRow.setPadding(0, ui.dp(14), 0, 0); facts.addView(projectRow, matchWrap());
-            view.addView(facts, matchWrap());
+            LinearLayout statusLine = ui.row();
+            state = ui.text("", 13, false); state.setPadding(0, ui.dp(4), 0, ui.dp(4));
+            statusLine.addView(state, new LinearLayout.LayoutParams(-2, -2));
+            time = ui.text("", 12); time.setTextColor(ui.muted); time.setGravity(Gravity.END);
+            LinearLayout.LayoutParams stamp = new LinearLayout.LayoutParams(0, -2, 1);
+            stamp.setMarginStart(ui.dp(10)); statusLine.addView(time, stamp);
+            view.addView(statusLine, matchWrap());
+            noteSection = ui.column(); noteSection.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
+            noteSection.setBackground(ui.rounded(ui.soft, 16));
+            TextView noteHeading = ui.heading("状态备注", 14); noteHeading.setTextColor(ui.muted);
+            noteSection.addView(noteHeading, matchWrap()); noteSection.addView(ui.space(8));
+            note = ui.text("", 14); note.setTextColor(ui.warning);
+            noteSection.addView(note, matchWrap()); noteSection.setVisibility(View.GONE);
+            project = ui.text("", 15);
+            projectRow = fact("所属项目", project); projectRow.setPadding(0, 0, 0, ui.dp(14));
             errorSection = ui.column(); errorSection.addView(ui.space(16));
             errorUnavailable = ui.text("", 13, false); errorUnavailable.setTextColor(ui.muted);
             errorUnavailable.setPadding(ui.dp(4), 0, ui.dp(4), 0); errorSection.addView(errorUnavailable, matchWrap());
             errorCard = ui.card(); LinearLayout errorHeading = ui.row();
             NativeUi.Icon errorIcon = (NativeUi.Icon) ui.icon("error", 20); errorIcon.setInk(ui.danger); errorHeading.addView(errorIcon);
-            TextView errorTitle = ui.text("错误分析", 15, true); LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); headingParams.setMarginStart(ui.dp(8)); errorHeading.addView(errorTitle, headingParams);
+            TextView errorTitle = ui.heading("错误分析", 18); LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); headingParams.setMarginStart(ui.dp(8)); errorHeading.addView(errorTitle, headingParams);
             errorCard.addView(errorHeading, matchWrap()); errorCard.addView(ui.space(12));
-            errorSummary = ui.text("", 14, false); errorCard.addView(errorSummary, matchWrap());
-            errorCard.addView(ui.space(16)); errorLocation = ui.text("", 13, false); errorCard.addView(fact("位置", errorLocation), matchWrap());
-            errorCard.addView(ui.space(14)); errorSuggestion = ui.text("", 13, false); errorCard.addView(fact("建议", errorSuggestion), matchWrap());
-            errorCard.addView(ui.space(14)); TextView evidence = ui.text("依据已收到的输出，具体原因仍需核实。", 12, false); evidence.setTextColor(ui.muted); errorCard.addView(evidence, matchWrap());
-            errorSection.addView(errorCard, matchWrap()); errorSection.setVisibility(View.GONE); view.addView(errorSection, matchWrap());
+            errorSummary = ui.text("", 16, true); errorCard.addView(errorSummary, matchWrap());
+            errorCard.addView(ui.space(16)); errorLocation = ui.text("", 14); errorCard.addView(fact("出错位置", errorLocation), matchWrap());
+            errorCard.addView(ui.space(14)); errorSuggestion = ui.text("", 14); errorCard.addView(fact("处理建议", errorSuggestion), matchWrap());
+            errorCard.addView(ui.space(14)); errorEvidence = ui.text("", 12, false); errorEvidence.setTextColor(ui.muted); errorCard.addView(errorEvidence, matchWrap());
+            errorSection.addView(errorCard, matchWrap()); errorSection.setVisibility(View.GONE);
         }
         public LinearLayout view() { return view; }
         private LinearLayout fact(String label, TextView value) {
-            LinearLayout result = ui.row(); result.setGravity(Gravity.TOP); TextView key = ui.text(label, 13, false); key.setTextColor(ui.muted);
-            result.addView(key, new LinearLayout.LayoutParams(ui.dp(56), ViewGroup.LayoutParams.WRAP_CONTENT)); result.addView(value, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1)); return result;
+            LinearLayout result = ui.column();
+            TextView key = ui.text(label, 13); key.setTextColor(ui.muted);
+            result.addView(key, matchWrap()); result.addView(ui.space(8));
+            result.addView(value, matchWrap()); return result;
         }
         public void update(JSONObject task, JSONObject device, boolean stale) { update(task, device, stale, true); }
         public void update(JSONObject task, JSONObject device, boolean stale, boolean syncOutput) {
-            String code = status(task, device, stale); setText(state, statusLabel(code)); state.setTextColor(statusColor(ui, code));
-            String noteText = "unknown".equals(code) ? "状态已过期，显示最后收到的记录。" : "waiting".equals(code) ? "请到电脑处理批准请求。" : "";
-            setText(note, noteText); note.setVisibility(noteText.isEmpty() ? View.GONE : View.VISIBLE);
-            setText(time, absolute(value(task, "updated_at", ""))); String projectValue = value(task, "project", ""); setText(project, projectValue); projectRow.setVisibility(projectValue.isEmpty() ? View.GONE : View.VISIBLE);
+            String code = status(task, device, stale); bindStatus(ui, state, code);
+            String noteText = "unknown".equals(code) ? "当前状态未知，显示最后收到的记录" : "waiting".equals(code) ? "任务正在等待回答或批准" : "";
+            setText(note, noteText); noteSection.setVisibility(noteText.isEmpty() ? View.GONE : View.VISIBLE);
+            String updated = absolute(value(task, "updated_at", ""));
+            setText(time, "尚未更新".equals(updated) ? updated : "更新于 " + updated);
+            String projectValue = value(task, "project", ""); setText(project, projectValue); projectRow.setVisibility(projectValue.isEmpty() ? View.GONE : View.VISIBLE);
             NativeErrorPresentation.Detail error = NativeErrorPresentation.from(task, syncOutput, code);
             errorSection.setVisibility(error.visible ? View.VISIBLE : View.GONE);
             errorUnavailable.setVisibility(error.hasAnalysis ? View.GONE : View.VISIBLE);
             errorCard.setVisibility(error.hasAnalysis ? View.VISIBLE : View.GONE);
             setText(errorUnavailable, error.hasAnalysis ? "" : error.summary);
-            setText(errorSummary, error.summary); setText(errorLocation, error.location); setText(errorSuggestion, error.suggestion);
+            setText(errorSummary, error.summary); setText(errorLocation, error.location); setText(errorSuggestion, error.suggestion); setText(errorEvidence, error.sourceLabel);
         }
     }
 
@@ -308,9 +341,14 @@ public final class NativePages {
     public static String toolName(String tool) { return NativeListPresentation.toolLabel(tool); }
     private static int statusColor(NativeUi ui, String state) { return "waiting".equals(state) ? ui.warning : "error".equals(state) ? ui.danger : "running".equals(state) || "online".equals(state) ? ui.accent : ui.muted; }
     private static void bindStatus(NativeUi ui, TextView label, String state) {
-        setText(label, statusLabel(state)); label.setTextColor(statusColor(ui, state));
-        int fill = "waiting".equals(state) ? (ui.dark ? 0xFF423B2C : 0xFFF3EBDC) : "error".equals(state) ? (ui.dark ? 0xFF443237 : 0xFFF5E4E4) : "running".equals(state) || "online".equals(state) ? ui.soft : (ui.dark ? 0xFF333D42 : 0xFFEAF0F1);
-        if (!state.equals(label.getTag())) { label.setBackground(ui.rounded(fill, 10)); label.setTag(state); }
+        boolean attention = "waiting".equals(state) || "error".equals(state);
+        setText(label, statusLabel(state)); label.setTextColor(attention ? statusColor(ui, state) : ui.muted);
+        label.setTypeface(attention ? ui.medium : ui.regular);
+        if (!state.equals(label.getTag())) {
+            int fill = "waiting".equals(state) ? (ui.dark ? 0xFF423B2C : 0xFFF3EBDC) : (ui.dark ? 0xFF443237 : 0xFFF5E4E4);
+            label.setPadding(attention ? ui.dp(8) : 0, ui.dp(4), attention ? ui.dp(8) : 0, ui.dp(4));
+            label.setBackground(attention ? ui.rounded(fill, 8) : null); label.setTag(state);
+        }
     }
     private static void setText(TextView view, String value) { if (!TextUtils.equals(view.getText(), value)) view.setText(value); }
     private static String rawValue(JSONObject object, String name) { return object == null || object.isNull(name) ? "" : object.optString(name, ""); }

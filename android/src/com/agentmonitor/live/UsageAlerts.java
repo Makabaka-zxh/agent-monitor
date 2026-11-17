@@ -193,7 +193,7 @@ public final class UsageAlerts {
         choices(ui, column, p, "low", new int[]{0, 5, 10, 20}, new String[]{"关闭", "5%", "10%", "20%"}, 10);
         column.addView(ui.space(16)); column.addView(ui.text("重置前", 14));
         choices(ui, column, p, "reset", new int[]{0, 5, 15, 30}, new String[]{"关闭", "5 分钟", "15 分钟", "30 分钟"}, 15);
-        column.addView(ui.space(16)); TextView note = ui.text("按最近获取的真实额度提醒。后台检查由系统安排，省电状态下可能延后。锁屏隐藏额度提醒。", 13); note.setTextColor(ui.muted); column.addView(note);
+        column.addView(ui.space(16)); TextView note = ui.text("按最近获取的真实额度提醒\n后台检查由系统安排，省电状态下可能延后\n锁屏隐藏额度提醒", 13); note.setTextColor(ui.muted); column.addView(note);
         if (!permitted(activity)) { column.addView(ui.space(8)); column.addView(ui.button("系统通知设置", false, () -> openNotificationSettings(activity))); }
         column.addView(ui.space(10)); column.addView(ui.button("发送测试提醒", false, () -> sendTest(activity)));
         column.addView(ui.space(16)); column.addView(ui.button("完成", () -> { sync(activity); dialog.dismiss(); }));

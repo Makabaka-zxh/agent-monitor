@@ -46,6 +46,13 @@ public final class NativePresentationTest {
         device.put("platform", "Updated synthetic OS"); check(!deviceKey.equals(NativeListPresentation.devicesKey(new JSONArray().put(device), false, 1)), "platform text invalidates");
         check("Codex".equals(NativeListPresentation.toolLabel("codex")), "Codex source has explicit text");
         check("Claude Code".equals(NativeListPresentation.toolLabel("claude")), "Claude source has explicit text");
+        check("Antigravity".equals(NativeListPresentation.toolLabel("antigravity")), "Antigravity source has explicit text");
+        JSONArray sources = new JSONArray().put(new JSONObject().put("tool", "antigravity").put("available", true))
+                .put(new JSONObject().put("tool", "codex").put("available", true))
+                .put(new JSONObject().put("tool", "antigravity").put("available", true))
+                .put(new JSONObject().put("tool", "claude").put("available", false))
+                .put(new JSONObject().put("tool", "unrecognized").put("available", true));
+        check("Codex · Antigravity".equals(NativeListPresentation.availableSources(sources)), "device lists only available, recognized sources once");
         check("任务".equals(NativeListPresentation.toolLabel("unexpected")), "unknown source does not impersonate known tools");
     }
     private static void errors() {
@@ -68,9 +75,17 @@ public final class NativePresentationTest {
         analysis.put("location", new JSONObject().put("file", "C:\\synthetic\\example.java").put("line", -1).put("column", 5));
         known = NativeErrorPresentation.from(task); check("example.java".equals(known.location), "Windows basename and invalid line handled without fabricated column");
         analysis.put("location", null); known = NativeErrorPresentation.from(task);
-        check(known.location.contains("未定位"), "missing location explicitly unknown");
+        analysis.put("source", "runtime_event"); known = NativeErrorPresentation.from(task);
+        check(known.sourceLabel.contains("工具报告") && known.sourceLabel.contains("未独立核实"), "runtime event evidence is not promoted to verified root cause");
+        analysis.put("source", "final_output"); known = NativeErrorPresentation.from(task);
+        check(known.sourceLabel.contains("已收到的输出"), "output inference remains distinguished from runtime evidence");
+        check(known.location.contains("未提供"), "missing location explicitly unknown");
         analysis.put("summary", "\u0000").put("suggestion", ""); known = NativeErrorPresentation.from(task);
         check(known.summary.contains("尚不能确认") && !known.suggestion.isEmpty(), "empty malformed summary stays conservative");
+        check(!known.summary.endsWith("。") && !known.suggestion.endsWith("。")
+                && !known.location.endsWith("。") && !known.sourceLabel.endsWith("。"), "short app notes omit terminal punctuation");
+        analysis.put("summary", "Python 3.12.1 运行失败。");
+        check(NativeErrorPresentation.from(task).summary.equals("Python 3.12.1 运行失败。"), "reported error text keeps its spelling and punctuation");
         task.put("status", "completed"); check(!NativeErrorPresentation.from(task).visible, "recovered task hides prior error analysis");
         StringBuilder longText = new StringBuilder(); for (int i = 0; i < 2000; i++) longText.append('x');
         task.put("status", "error"); analysis.put("summary", longText.toString());

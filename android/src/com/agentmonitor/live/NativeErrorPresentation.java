@@ -6,10 +6,10 @@ import org.json.JSONObject;
 public final class NativeErrorPresentation {
     public static final class Detail {
         public final boolean visible, hasAnalysis;
-        public final String summary, location, suggestion;
-        private Detail(boolean visible, boolean hasAnalysis, String summary, String location, String suggestion) {
+        public final String summary, location, suggestion, sourceLabel;
+        private Detail(boolean visible, boolean hasAnalysis, String summary, String location, String suggestion, String sourceLabel) {
             this.visible = visible; this.hasAnalysis = hasAnalysis; this.summary = summary;
-            this.location = location; this.suggestion = suggestion;
+            this.location = location; this.suggestion = suggestion; this.sourceLabel = sourceLabel;
         }
     }
 
@@ -22,16 +22,18 @@ public final class NativeErrorPresentation {
     public static Detail from(JSONObject task, boolean syncOutput, String currentStatus) {
         boolean error = task != null && "error".equals(currentStatus) && "error".equals(task.optString("status"));
         JSONObject analysis = error && syncOutput ? task.optJSONObject("error_analysis") : null;
-        if (analysis == null) return new Detail(error, false, "当前只有失败状态，尚无可分析的错误详情", "", "");
+        if (analysis == null) return new Detail(error, false, "当前只有失败状态，尚无可分析的错误详情", "", "", "");
         String summary = clean(analysis.optString("summary", ""), 600);
-        if (summary.isEmpty()) summary = "已收到失败信息，尚不能确认具体原因。";
+        if (summary.isEmpty()) summary = "已收到失败信息，尚不能确认具体原因";
         String suggestion = clean(analysis.optString("suggestion", ""), 600);
-        if (suggestion.isEmpty()) suggestion = "请在电脑端查看本次执行的完整错误信息。";
-        return new Detail(true, true, summary, location(analysis.optJSONObject("location")), suggestion);
+        if (suggestion.isEmpty()) suggestion = "请在电脑端查看本次执行的完整错误信息";
+        String source = analysis.optString("source");
+        String evidence = "runtime_event".equals(source) ? "依据工具报告的错误类型，未独立核实根因" : "final_output".equals(source) ? "依据已收到的输出，具体原因仍需核实" : "错误来源未确认，具体原因仍需核实";
+        return new Detail(true, true, summary, location(analysis.optJSONObject("location")), suggestion, evidence);
     }
 
     private static String location(JSONObject location) {
-        if (location == null) return "已收到的输出未定位到具体文件或步骤。";
+        if (location == null) return "已收到的信息未提供具体文件或步骤";
         String file = location.optString("file", "").replace('\\', '/');
         int slash = file.lastIndexOf('/'); if (slash >= 0) file = file.substring(slash + 1);
         file = clean(file, 240);
@@ -46,7 +48,7 @@ public final class NativeErrorPresentation {
             }
         }
         if (!step.isEmpty()) { if (result.length() > 0) result.append("\n"); result.append("步骤：").append(step); }
-        return result.length() == 0 ? "已收到的输出未定位到具体文件或步骤。" : result.toString();
+        return result.length() == 0 ? "已收到的信息未提供具体文件或步骤" : result.toString();
     }
 
     private static String clean(String value, int limit) {

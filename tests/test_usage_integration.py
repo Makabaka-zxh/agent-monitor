@@ -115,7 +115,7 @@ class UsageIntegrationTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def worker_once(self, result=None, error=None, quotas=None, responses=None):
+    def worker_once(self, result=None, error=None, quotas=None, responses=None, snapshots=None, fifo=None):
         client = MagicMock()
         client.post.return_value = result
         if error:
@@ -125,21 +125,23 @@ class UsageIntegrationTests(unittest.TestCase):
         worker = RemoteUsageWorker(client, SimpleNamespace(token="synthetic-test-token"), self.home)
         worker.stop = OneCycleStop()
         ledger = MagicMock()
-        ledger.export_quota_batch.return_value = {"version": 1, "events": [], "quotas": quotas or []}
-        ledger.export_batch.return_value = {"version": 1, "events": [{"event_key": "opaque"}], "quotas": [], "cursor": 19}
+        ledger.export_quota_batch.return_value = {"version": 2, "events": [], "quotas": quotas or [], "quota_snapshots": snapshots or []}
+        ledger.export_batch.return_value = fifo if fifo is not None else {"version": 2, "events": [{"event_key": "opaque"}], "quotas": [], "quota_snapshots": [], "cursor": 19}
         with patch("agent_monitor.usage_remote.UsageLedger", return_value=ledger), patch("agent_monitor.usage_remote.Path.home", return_value=self.home):
             worker.run()
         return worker, ledger, client
 
     def test_remote_ack_only_after_explicit_success(self):
-        worker, ledger, client = self.worker_once({"accepted": 1, "rejected": 0})
+        worker, ledger, client = self.worker_once({"version": 2, "accepted": 1, "rejected": 0})
         ledger.ack_export.assert_called_once_with(19)
         ledger.close.assert_called_once()
         client.post.assert_called_once()
         self.assertEqual(client.post.call_args.args[0], "/api/agent/usage")
 
     def test_remote_failure_and_partial_rejection_preserve_outbox(self):
-        for response in ({"accepted": 0, "rejected": 1}, {"accepted": 0, "rejected": 0}, {}, {"accepted": True, "rejected": 0}):
+        for response in ({"version": 2, "accepted": 0, "rejected": 1}, {"version": 2, "accepted": 0, "rejected": 0}, {},
+                         {"version": 2, "accepted": True, "rejected": 0}, {"accepted": 1, "rejected": 0},
+                         {"version": 1, "accepted": 1, "rejected": 0}, {"version": 2.0, "accepted": 1, "rejected": 0}):
             with self.subTest(response=response):
                 worker, ledger, client = self.worker_once(response)
                 ledger.ack_export.assert_not_called()
@@ -151,7 +153,7 @@ class UsageIntegrationTests(unittest.TestCase):
     def test_remote_quota_sent_before_backfill_without_acking_its_cursor(self):
         quotas = [{"tool": "codex", "used_percent": 75, "observed_at": "2026-09-25T14:30:00.000Z"}]
         worker, ledger, client = self.worker_once(quotas=quotas, responses=[
-            {"accepted": 1, "rejected": 0}, {"accepted": 1, "rejected": 0}])
+            {"version": 2, "accepted": 1, "rejected": 0}, {"version": 2, "accepted": 1, "rejected": 0}])
         self.assertEqual(client.post.call_count, 2)
         self.assertEqual(client.post.call_args_list[0].args[1]["quotas"], quotas)
         self.assertEqual(client.post.call_args_list[0].args[1]["events"], [])
@@ -161,15 +163,42 @@ class UsageIntegrationTests(unittest.TestCase):
 
     def test_failed_quota_fast_path_still_sends_and_acknowledges_token_batch(self):
         worker, ledger, client = self.worker_once(quotas=[{"tool": "codex"}], responses=[
-            OSError("synthetic quota transport failure"), {"accepted": 1, "rejected": 0}])
+            OSError("synthetic quota transport failure"), {"version": 2, "accepted": 1, "rejected": 0}])
         self.assertEqual(client.post.call_count, 2)
         ledger.ack_export.assert_called_once_with(19)
         ledger.close.assert_called_once()
 
     def test_successful_fast_quota_never_acks_failed_accounting_batch(self):
         worker, ledger, client = self.worker_once(quotas=[{"tool": "codex"}], responses=[
-            {"accepted": 1, "rejected": 0}, OSError("synthetic accounting failure")])
+            {"version": 2, "accepted": 1, "rejected": 0}, OSError("synthetic accounting failure")])
         self.assertEqual(client.post.call_count, 2)
+        ledger.ack_export.assert_not_called()
+
+    def test_complete_empty_snapshot_is_sent_and_counted_in_ack(self):
+        snapshots = [{"tool": "claude", "bucket_id": "*", "active_keys": [], "known_keys": [],
+                      "complete": True, "observed_at": "2026-10-27T00:00:00Z"}]
+        fifo = {"version": 2, "events": [], "quotas": [], "quota_snapshots": snapshots, "cursor": 19}
+        worker, ledger, client = self.worker_once(snapshots=snapshots, fifo=fifo, responses=[
+            {"version": 2, "accepted": 1, "rejected": 0}, {"version": 2, "accepted": 1, "rejected": 0}])
+        self.assertEqual(client.post.call_count, 2)
+        self.assertEqual(client.post.call_args_list[0].args[1]["quota_snapshots"], snapshots)
+        ledger.ack_export.assert_called_once_with(19)
+        worker, ledger, client = self.worker_once(fifo=fifo, result={"version": 2, "accepted": 0, "rejected": 0})
+        ledger.ack_export.assert_not_called()
+
+    def test_sparse_outbox_advances_only_with_explicit_v2_empty_ack(self):
+        fifo = {"version": 2, "events": [], "quotas": [], "quota_snapshots": [], "cursor": 19}
+        worker, ledger, client = self.worker_once(fifo=fifo, result={"version": 2, "accepted": 0, "rejected": 0})
+        ledger.ack_export.assert_called_once_with(19)
+        worker, ledger, client = self.worker_once(fifo=fifo, result={"accepted": 0, "rejected": 0})
+        ledger.ack_export.assert_not_called()
+
+    def test_missing_v2_ack_never_retries_by_stripping_model_fields(self):
+        event = {"event_key": "opaque", "model": "claude-sonnet-4-6"}
+        fifo = {"version": 2, "events": [event], "quotas": [], "quota_snapshots": [], "cursor": 19}
+        worker, ledger, client = self.worker_once(fifo=fifo, result={"accepted": 1, "rejected": 0})
+        client.post.assert_called_once()
+        self.assertEqual(client.post.call_args.args[1], fifo)
         ledger.ack_export.assert_not_called()
 
 

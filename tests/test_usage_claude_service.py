@@ -122,6 +122,33 @@ def test_failure_logs_only_exception_type(tmp_path, monkeypatch, caplog):
         service.close()
 
 
+def test_model_windows_and_explicit_absence_refresh_without_synthetic_zero(tmp_path, monkeypatch):
+    from agent_monitor.usage_claude_cli import parse_usage_output
+    reader = MagicMock()
+    monkeypatch.setattr(usage_service, "_claude_quota_reader", lambda *args: reader)
+    service = UsageService(tmp_path, store(), True)
+    now = datetime.now(timezone.utc)
+    def report(rows):
+        return parse_usage_output((json.dumps({"type": "assistant", "usage_report": {
+            "rate_limits": {"limits": rows}}}) + "\n" + json.dumps({
+            "type": "result", "subtype": "success", "local_command": "usage", "num_turns": 0,
+            "duration_api_ms": 0})).encode(), datetime.now(timezone.utc))
+    try:
+        rows = [{"kind": "weekly_scoped", "scope": {"model": {"display_name": name}},
+                 "percent": percent, "resets_at": None} for name, percent in [("Sonnet", 0), ("Opus", 20), ("Haiku", 30)]]
+        reader.poll.return_value = report(rows)
+        service._collect_claude_quota()
+        assert len(service.summary()["providers"][1]["quotas"]) == 3
+        assert service.detail_summary()["quota_checks"][0]["state"] == "updated"
+        assert json.loads((tmp_path / "claude-quota-status.json").read_text())["accepted"] == 3
+        reader.poll.return_value = report([])
+        service._collect_claude_quota()
+        assert service.summary()["providers"][1]["quotas"] == []
+        assert service.detail_summary()["quota_checks"][0]["state"] == "no_live_data"
+    finally:
+        service.close()
+
+
 @pytest.mark.parametrize("status,expected", [("not_logged_in", "not_logged_in"), ("timeout", "timeout"),
     ("containment_failed", "containment_failed"), ("invalid_report", "invalid_report"),
     ("PRIVATE account@example.test /path token", "reader_failed"), ({"secret": "PRIVATE"}, "reader_failed")])

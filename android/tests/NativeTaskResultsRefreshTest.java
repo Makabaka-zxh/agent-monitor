@@ -1,6 +1,6 @@
 package com.agentmonitor.live;
 
-/** Deterministic timing and result-identity races; no Android runtime or network. */
+/** Deterministic result races and reply status checks, without an Android runtime or network. */
 public final class NativeTaskResultsRefreshTest {
     private static int checks;
     private static void check(boolean value, String message) {
@@ -30,7 +30,29 @@ public final class NativeTaskResultsRefreshTest {
         historicalSuccessDoesNotExpectAnotherResult();
         successWithoutKnownBaselineUsesSnapshot();
         newReplyGetsItsOwnBaseline();
+        previousOutcomeAndCurrentAvailabilityAreIndependent();
+        unresolvedReplyKeepsItsRecoveryPath();
         System.out.println("NativeTaskResultsRefreshTest: " + checks + " checks passed");
+    }
+    private static void previousOutcomeAndCurrentAvailabilityAreIndependent() {
+        String offline = "电脑当前离线";
+        String rejected = "电脑拒绝上次回复";
+        check("上一条回复已完成".equals(NativeReplyPresentationPolicy.commandStatus(false, false, "succeeded", false, "")), "last success remains visible");
+        check(offline.equals(NativeReplyPresentationPolicy.capabilityStatus(false, false, true, false, true, offline)), "current offline reason remains visible after a terminal reply");
+        String commandReason = NativeReplyPresentationPolicy.commandReason(rejected, false, "");
+        check(("上一条回复未完成：" + rejected).equals(NativeReplyPresentationPolicy.commandStatus(false, false, "failed", false, commandReason)), "capability poll cannot steal the last send failure reason");
+        check("新的失败说明".equals(NativeReplyPresentationPolicy.commandReason(rejected, false, "新的失败说明")), "same reply may gain a clearer reason");
+        check(NativeReplyPresentationPolicy.commandReason(rejected, true, "").isEmpty(), "reason from previous state cannot leak into a different outcome");
+        check("正在确认是否可回复".equals(NativeReplyPresentationPolicy.capabilityStatus(false, false, false, true, true, "")), "unknown capability takes precedence over previously advertised availability");
+        check(NativeReplyPresentationPolicy.capabilityStatus(false, false, true, true, true, "").isEmpty(), "eligible fresh capability clears the availability warning");
+        check(NativeReplyPresentationPolicy.capabilityStatus(false, false, true, true, false, "").contains("暂时无法确认模型选项"), "unverified model selection explains disabled send without claiming it changed");
+    }
+    private static void unresolvedReplyKeepsItsRecoveryPath() {
+        check(NativeReplyPresentationPolicy.capabilityStatus(false, true, true, false, true, "离线").isEmpty(), "pending command does not mix with new-send availability");
+        check(NativeReplyPresentationPolicy.capabilityStatus(true, false, false, false, true, "").isEmpty(), "sending hides the new-send availability check");
+        check("正在发送…".equals(NativeReplyPresentationPolicy.commandStatus(true, true, "failed", false, "上次错误")), "new send supersedes the old error while starting");
+        check("电脑还没有接收这条回复".equals(NativeReplyPresentationPolicy.commandStatus(false, true, "not_found", true, "")), "eligible retry keeps its original request explanation");
+        check("这条回复无法确认，请到电脑查看".equals(NativeReplyPresentationPolicy.commandStatus(false, true, "not_found", false, "")), "unconfirmed requests outside retry window remain distinct");
     }
     private static void statusBeforeBody() {
         NativeTaskResults.ResultRefresh refresh = waiting("B");

@@ -19,6 +19,7 @@ final class TaskDetailModel: ObservableObject {
     private let store: MonitorStore
     private let token: String
     private let ledgerKey: String
+    private let supportsReply: Bool
     private var refreshingReply = false
     private var resultMarker: String?
     private var initialResult = false
@@ -30,15 +31,19 @@ final class TaskDetailModel: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
     @Published private var rateLimitUntil = Date.distantPast
 
-    init(taskId: String, store: MonitorStore) {
+    init(task: MonitorTask, store: MonitorStore) {
+        let taskId = task.id
         self.taskId = taskId
+        supportsReply = task.supportsReply
         self.store = store
         token = store.credential?.token ?? ""
         ledgerKey = "reply:" + MonitorSecurity.hash(Data((store.tokenFingerprint + ":" + taskId).utf8))
-        do {
-            pending = try Keychain.read(PendingReply.self, key: ledgerKey)
-            if let pending, pending.unresolved { draft = pending.text }
-        } catch { store.notice = error.localizedDescription }
+        if supportsReply {
+            do {
+                pending = try Keychain.read(PendingReply.self, key: ledgerKey)
+                if let pending, pending.unresolved { draft = pending.text }
+            } catch { store.notice = error.localizedDescription }
+        }
         store.$syncOutput.removeDuplicates().sink { [weak self] enabled in
             self?.resultPermissionChanged(enabled)
         }.store(in: &subscriptions)
@@ -54,7 +59,7 @@ final class TaskDetailModel: ObservableObject {
             && MonitorSecurity.matches(hash, "[0-9a-f]{64}")
     }
     var unresolved: Bool { pending?.unresolved == true }
-    var canSend: Bool { current && Date() >= rateLimitUntil && !sending && !refreshingReply && (unresolved || (replyAvailable && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.count <= 8000)) }
+    var canSend: Bool { supportsReply && current && Date() >= rateLimitUntil && !sending && !refreshingReply && (unresolved || (replyAvailable && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.count <= 8000)) }
     var sendTitle: String { unresolved ? pending?.mayRetry == true ? "重试原回复" : "查询发送结果" : "发送回复" }
 
     func run() async {
@@ -69,7 +74,7 @@ final class TaskDetailModel: ObservableObject {
                 }
             } else { result = nil; initialResult = false; resultError = "最终结果同步未开启" }
             guard !Task.isCancelled && current else { return }
-            await refreshReply()
+            if supportsReply { await refreshReply() }
             do { try await Task.sleep(for: .seconds(retryResultSoon ? 1 : unresolved ? 3 : 8)) } catch { return }
         }
     }
@@ -131,7 +136,7 @@ final class TaskDetailModel: ObservableObject {
         }
     }
     func refreshReply() async {
-        guard !Task.isCancelled, current, !refreshingReply, !sending, Date() >= replyRetryAt, Date() >= rateLimitUntil else { return }
+        guard supportsReply, !Task.isCancelled, current, !refreshingReply, !sending, Date() >= replyRetryAt, Date() >= rateLimitUntil else { return }
         refreshingReply = true
         defer { refreshingReply = false }
         do {

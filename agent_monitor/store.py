@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .error_analysis import sanitize_task_analysis
+from .failure_reasons import normalize_failure_code
 
 SESSION_SECONDS = 30 * 24 * 60 * 60
 ONLINE_SECONDS = 25
@@ -214,6 +215,7 @@ class Store:
                     task = json.loads(row["payload"])
                     task["output"] = ""
                     task["error_analysis"] = None
+                    task["failure_code"] = ""
                     task["final_result_id"] = ""
                     task["final_result_at"] = ""
                     task["preview"] = STATUS_PREVIEWS.get(task["status"], STATUS_PREVIEWS["unknown"])
@@ -324,6 +326,7 @@ class Store:
             self.db.execute("DELETE FROM tasks WHERE device_id=?", (device_id,))
             for item in tasks[:100]:
                 task = dict(item)
+                task["failure_code"] = normalize_failure_code(task.get("failure_code")) if sync_output and task.get("status") == "error" else ""
                 task["error_analysis"] = sanitize_task_analysis(task, enabled=sync_output)
                 if not sync_output:
                     task["output"] = ""
@@ -369,6 +372,7 @@ class Store:
                     item["status"] = "unknown"
                     item["preview"] = "电脑已断开，以下为最后一次记录"
                     item["error_analysis"] = None
+                    item["failure_code"] = ""
                 tasks.append(item)
         tasks.sort(key=lambda item: item["updated_at"], reverse=True)
         return {"devices": devices, "tasks": tasks, "server_time": iso(now)}

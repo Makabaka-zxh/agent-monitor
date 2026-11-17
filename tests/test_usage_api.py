@@ -1,10 +1,12 @@
 """Public and status-only readers cannot obtain account usage data."""
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 from agent_monitor.native_access import challenge_for
 from agent_monitor.server import create_app
+from agent_monitor.usage_ledger import UsageLedger, _iso
 
 
 def claim(browser, native, csrf, mode):
@@ -108,3 +110,75 @@ def test_check_details_require_full_native_authority_and_never_enter_compact_sna
             details.assert_called_once_with()
     finally:
         native.close()
+
+
+def test_v2_paired_usage_preserves_models_and_retracts_only_authenticated_source(tmp_path):
+    """Two synthetic paired sources; no real credentials, logs or transport."""
+    now = datetime.now(timezone.utc)
+    source = UsageLedger(tmp_path / 'synthetic-source.sqlite3')
+    try:
+        with source.lock, source.db:
+            source._record({'type': 'assistant', 'sessionId': 'synthetic-session', 'timestamp': _iso(now),
+                            'message': {'id': 'synthetic-response', 'model': 'claude-sonnet-4-6',
+                                        'stop_reason': 'end_turn',
+                                        'usage': {'input_tokens': 10, 'output_tokens': 20,
+                                                  'cache_read_input_tokens': 30,
+                                                  'cache_creation_input_tokens': 40}}},
+                           'claude', {}, tmp_path / 'synthetic.jsonl', now)
+        source.ingest_claude_quota({'observed_at': _iso(now - timedelta(seconds=30)),
+            'snapshot_complete': True, 'quota_windows': [{'kind': 'weekly_scoped',
+            'bucket_id': 'claude-sonnet-4-6', 'bucket_label': 'Sonnet 4.6', 'model': 'claude-sonnet-4-6',
+            'window_minutes': 10080, 'used_percentage': 0, 'resets_at': None}]}, now)
+        batch = source.export_batch()
+        expected = sum(len(batch[key]) for key in ('events', 'quotas', 'quota_snapshots'))
+        assert batch['version'] == 2 and expected > 0
+        app = create_app(tmp_path / 'hub', collect_local=False)
+        with TestClient(app) as client:
+            store = app.state.store
+            a = store.register(store.create_pairing()['code'], 'Synthetic A', 'test')
+            b = store.register(store.create_pairing()['code'], 'Synthetic B', 'test')
+            headers_a = {'Authorization': 'Bearer ' + a['token']}
+            headers_b = {'Authorization': 'Bearer ' + b['token']}
+            # A body-supplied identity is never the authority for source scope.
+            batch['device_id'] = b['device_id']
+            for headers in (headers_a, headers_a, headers_b):
+                response = client.post('/api/agent/usage', headers=headers, json=batch)
+                assert response.status_code == 200
+                assert response.json() == {'version': 2, 'accepted': expected, 'rejected': 0}
+            def provider(identity):
+                return next(p for p in app.state.usage.ledger.summary(now, [identity])['providers']
+                            if p['tool'] == 'claude')
+            for registered in (a, b):
+                data = provider(registered['device_id'])
+                assert data['today_tokens'] == 100
+                day = data['history']['days'][-1]
+                assert day['models'] == [{'model': 'claude-sonnet-4-6', 'tokens': 100}]
+                assert day['unknown_model_tokens'] == 0
+                assert data['quotas'][0]['used_percent'] == 0
+                assert data['quotas'][0]['model'] == 'claude-sonnet-4-6'
+            combined = next(p for p in app.state.usage.ledger.summary(now, [a['device_id'], b['device_id']])['providers']
+                            if p['tool'] == 'claude')
+            assert combined['today_tokens'] == 100
+            source.ingest_claude_quota({'observed_at': _iso(now), 'snapshot_complete': True,
+                                       'quota_windows': []}, now)
+            absent = source.export_quota_batch()
+            absent['device_id'] = b['device_id']
+            result = client.post('/api/agent/usage', headers=headers_a, json=absent).json()
+            assert result == {'version': 2,
+                              'accepted': len(absent['quotas']) + len(absent['quota_snapshots']), 'rejected': 0}
+            assert provider(a['device_id'])['quotas'] == []
+            assert len(provider(b['device_id'])['quotas']) == 1
+            # Replaying the older positive snapshot must not restore A's meter.
+            assert client.post('/api/agent/usage', headers=headers_a, json=batch).json()['rejected'] == 0
+            assert provider(a['device_id'])['quotas'] == []
+            assert provider(a['device_id'])['today_tokens'] == 100
+            malformed = {'version': 2, 'events': [{'tool': []}], 'quotas': [{'tool': {}}],
+                         'quota_snapshots': [{'tool': [], 'complete': True}]}
+            response = client.post('/api/agent/usage', headers=headers_a, json=malformed)
+            assert response.status_code == 200
+            assert response.json() == {'version': 2, 'accepted': 0, 'rejected': 3}
+            assert provider(a['device_id'])['today_tokens'] == 100
+            store.remove_device(a['device_id'])
+            assert client.post('/api/agent/usage', headers=headers_a, json=absent).status_code == 401
+    finally:
+        source.close()

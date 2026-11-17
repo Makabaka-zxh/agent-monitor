@@ -16,7 +16,7 @@ final class UsageAlertNotification {
         return builder(context, channel, tool, text, detail, locked).build();
     }
     static Notification test(Context context, String channel, boolean locked) {
-        return builder(context, channel, "codex", "测试提醒", "用于检查通知显示，不代表真实额度。", locked)
+        return builder(context, channel, "codex", "测试提醒", "用于检查通知显示，不代表真实额度", locked)
                 .setOnlyAlertOnce(true).setTimeoutAfter(120000).build();
     }
     private static Notification.Builder builder(Context context, String channel, String tool,

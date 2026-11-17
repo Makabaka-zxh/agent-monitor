@@ -91,11 +91,14 @@ def test_collection_failure_preserves_last_snapshot_and_next_round_recovers(tmp_
         loop = asyncio.get_running_loop()
         failed, recovered = asyncio.Event(), asyncio.Event()
         calls = 0
+        growth_trackers = []
         warning = server.logger.warning
         ingest = store.ingest
 
-        def collect(**kwargs):
+        def collect(*, include_output, codex_growth, codex_primary_backfill):
             nonlocal calls
+            assert codex_primary_backfill is True
+            growth_trackers.append(codex_growth)
             calls += 1
             if calls == 1:
                 if failure == "scan":
@@ -120,6 +123,8 @@ def test_collection_failure_preserves_last_snapshot_and_next_round_recovers(tmp_
             await asyncio.wait_for(recovered.wait(), 7)
             assert store.snapshot()["tasks"][0]["status"] == "running"
             assert calls == 2
+            assert isinstance(growth_trackers[0], collector.CodexGrowthTracker)
+            assert growth_trackers[0] is growth_trackers[1]
         assert "SYNTHETIC_PRIVATE_PATH" not in caplog.text
         expected_error = "OSError" if failure == "scan" else "ValidationError"
         assert expected_error in caplog.text
@@ -138,7 +143,7 @@ def test_output_sync_revocation_during_collection_is_rechecked_at_ingest(tmp_pat
         release, watchdog = threading.Event(), threading.Event()
         ingest = store.ingest
 
-        def collect(*, include_output):
+        def collect(*, include_output, codex_growth, codex_primary_backfill):
             assert include_output is True
             loop.call_soon_threadsafe(scanning.set)
             if not release.wait(3):

@@ -82,6 +82,39 @@ def test_idempotency_conflict_and_no_text_in_status(hub):
     assert status['state'] == 'succeeded'
 
 
+@pytest.mark.parametrize(('code', 'expected'), [
+    ('permissions', '无法保留这个会话的权限设置，请在电脑上继续'),
+    ('changed', '任务状态或设置已变化，请刷新后重新发送'),
+    ('cli', '电脑端未找到所需的命令程序，请检查安装后重试'),
+    ('approval', '这一步需要在电脑端确认权限或补充信息'),
+    ('unrecognized_executor_code', '需要在电脑端确认后继续'),
+    ('synthetic raw error with private detail', '需要在电脑端确认后继续'),
+])
+def test_blocked_executor_replies_publish_only_fixed_reasons(hub, code, expected):
+    app, client, headers, task_id, *_ = hub
+    data, reply = send(hub)
+    assert reply.status_code == 200
+    command = data['request_id']
+    service = app.state.task_replies
+    service._tick()
+    service.executor.emit({'command_id': command, 'state': 'blocked',
+                           'error_code': code, 'reason': 'synthetic raw executor text'})
+
+    result = client.get('/api/native/tasks/reply', headers=headers,
+                        params={'task_id': task_id, 'request_id': command})
+    assert result.status_code == 200
+    status = result.json()
+    assert status['state'] == 'blocked'
+    assert status['reason'] == expected
+    assert {'prompt', 'text', 'error_code'}.isdisjoint(status)
+    assert 'synthetic raw' not in result.text
+
+    row = app.state.store.db.execute(
+        'SELECT reason_code, prompt FROM task_replies WHERE id=?', (command,),
+    ).fetchone()
+    assert tuple(row) == (code if code in {'permissions', 'changed', 'cli', 'approval'} else '', '')
+
+
 @pytest.mark.parametrize('mode', ['missing','cookie','read_only','foreign_origin'])
 def test_reply_authentication_boundaries(hub, mode):
     _, client, headers, task_id, _, starts, reader = hub
@@ -143,7 +176,11 @@ def test_expired_queue_and_single_inflight(hub):
     assert app.state.store.db.execute('SELECT reason_code FROM task_replies').fetchone()[0] == 'expired'
 
 
-def test_remote_device_cannot_claim_or_update_another_computer(hub):
+@pytest.mark.parametrize(('state', 'code', 'reason'), [
+    ('succeeded', '', '回复完成'),
+    ('failed', 'declined', '已拒绝本次操作，本轮已停止'),
+])
+def test_remote_device_cannot_claim_or_update_another_computer(hub, state, code, reason):
     app, client, headers, _, task, _, _ = hub
     store = app.state.store
     one = store.register(store.create_pairing()['code'], 'Remote one', 'Windows')
@@ -159,9 +196,13 @@ def test_remote_device_cannot_claim_or_update_another_computer(hub):
     claim = client.post('/api/agent/replies/poll',headers=a,json={'supported_tools':['codex']}).json()['command']
     assert claim['id'] == data['request_id'] and claim['text'] == data['text']
     assert client.post('/api/agent/replies/poll',headers=a,json={'supported_tools':['codex']}).json()['command'] is None
-    update = {'id':data['request_id'],'state':'succeeded'}
+    update = {'id':data['request_id'],'state':state,'error_code':code}
     assert client.post('/api/agent/replies/update',headers=b,json=update).status_code == 404
-    assert client.post('/api/agent/replies/update',headers=a,json=update).json()['state'] == 'succeeded'
+    assert client.post('/api/agent/replies/update',headers=a,json=update).json()['state'] == state
+    status = client.get('/api/native/tasks/reply', headers=headers,
+                        params={'task_id': remote_task, 'request_id': data['request_id']}).json()
+    assert status['state'] == state and status['reason'] == reason
+    assert {'prompt', 'text', 'error_code'}.isdisjoint(status)
 
 
 @pytest.mark.parametrize('tool,label', [('codex', 'Codex'), ('claude', 'Claude Code')])
@@ -227,3 +268,15 @@ def test_local_reply_disabled_does_not_request_connector_upgrade(hub):
 def test_invalid_inputs(hub,field,value):
     _, result = send(hub,**{field:value})
     assert result.status_code == 422
+
+
+def test_antigravity_metadata_is_read_only_even_on_a_reply_enabled_computer(hub):
+    app, client, headers, task_id, task, starts, _ = hub
+    device_id = task_id.partition(':')[0]
+    source_id = 'antigravity:' + SESSION
+    app.state.store.ingest(device_id, [dict(task, id=source_id, tool='antigravity')], [])
+    new_id = device_id + ':' + source_id
+    status = client.get('/api/native/tasks/reply', headers=headers, params={'task_id':new_id})
+    assert status.status_code == 200 and status.json()['available'] is False
+    _, post = send(hub, task_id=new_id)
+    assert post.status_code == 409 and not starts

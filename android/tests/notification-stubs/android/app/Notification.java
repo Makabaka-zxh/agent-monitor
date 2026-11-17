@@ -19,7 +19,7 @@ public final class Notification {
     public android.os.Bundle extras = new android.os.Bundle();
     public long timeoutAfter;
     public boolean requestPromotedOngoing;
-    public CharSequence contentTitle, contentText, shortCriticalText, bigText;
+    public CharSequence contentTitle, contentText, subText, shortCriticalText, bigText;
     public PendingIntent contentIntent, deleteIntent;
     public Action[] actions;
 
@@ -32,6 +32,7 @@ public final class Notification {
         public Builder setLargeIcon(android.graphics.drawable.Icon icon) { value.largeIcon = icon; return this; }
         public Builder setContentTitle(CharSequence text) { value.contentTitle = text; return this; }
         public Builder setContentText(CharSequence text) { value.contentText = text; return this; }
+        public Builder setSubText(CharSequence text) { value.subText = text; return this; }
         public Builder setStyle(BigTextStyle style) { value.bigText = style.text; return this; }
         public Builder setColor(int color) { return this; }
         public Builder setColorized(boolean enabled) { return this; }

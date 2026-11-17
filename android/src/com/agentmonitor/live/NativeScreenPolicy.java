@@ -5,7 +5,20 @@ import java.net.URI;
 /** Native navigation/filter rules; server refreshes never own the selected filter. */
 public final class NativeScreenPolicy {
     private NativeScreenPolicy() {}
-    public static String tool(String value) { return "claude".equals(value) || "codex".equals(value) ? value : "all"; }
+    private static final String[] TOOL_FILTERS = {"all", "claude", "codex", "antigravity"};
+    public static String[] toolFilters() { return TOOL_FILTERS.clone(); }
+    public static int toolFilterCount() { return TOOL_FILTERS.length; }
+    public static int toolIndex(String value) {
+        for (int i = 1; i < TOOL_FILTERS.length; i++) if (TOOL_FILTERS[i].equals(value)) return i;
+        return 0;
+    }
+    public static String tool(String value) { return TOOL_FILTERS[toolIndex(value)]; }
+    public static String toolLabel(String value) {
+        if ("antigravity".equals(value)) return "Antigravity";
+        if ("claude".equals(value)) return "Claude Code";
+        if ("codex".equals(value)) return "Codex";
+        return "all".equals(value) ? "全部" : "任务";
+    }
     public static String scope(String value) { return "all".equals(value) || "archived".equals(value) ? value : "active"; }
     public static boolean includes(String selectedTool, String selectedScope, String actualTool, String status, boolean archived, boolean stale) {
         if (!"all".equals(tool(selectedTool)) && !tool(selectedTool).equals(actualTool)) return false;

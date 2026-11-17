@@ -63,6 +63,82 @@ class RecentFilesTests(unittest.TestCase):
         first.unlink()
         self.assertEqual(collector._recent_files(self.base, 50), ([], 0, False))
 
+    def test_codex_growth_keeps_open_writer_visible_until_newer_files_displace_it(self):
+        old = [self.file(f"old-{i}.jsonl", 1000 + i) for i in range(7)]
+        newest = [self.file(f"new-{i}.jsonl", 2000 + i) for i in range(6)]
+        tracker = collector.CodexGrowthTracker()
+        def scan(at, **kwargs):
+            with patch.object(collector.time, "time", return_value=at):
+                return collector._recent_files(self.base, 6, codex_growth=tracker, **kwargs)
+        ordinary = list(reversed(newest))
+        self.assertEqual(scan(2010), (ordinary, 13, False))
+        for path in old:
+            with path.open("ab") as handle:
+                handle.write(b"{}\n")
+            os.utime(path, (1000, 1000))
+        self.assertEqual(scan(2015), (list(reversed(old[-4:])) + ordinary[:2], 13, False))
+        self.assertEqual(scan(2020, claude=True), (ordinary, 13, False))
+        self.assertEqual(scan(2050)[0][:4], list(reversed(old[-4:])))
+        for path in newest:
+            os.utime(path, (2025, 2025))
+        self.assertEqual(scan(2060), (ordinary, 13, False))
+
+    def test_codex_growth_drops_a_truncation_and_prefers_plain_sibling(self):
+        old = self.file("old.jsonl", 1000)
+        sibling = self.file("old.jsonl.zst", 3000)
+        newest = self.file("new.jsonl", 2000)
+        tracker = collector.CodexGrowthTracker()
+        def scan():
+            return collector._recent_files(self.base, 1, codex_growth=tracker)[0]
+        self.assertEqual(scan(), [newest])
+        sibling.write_bytes(b"{}\nmore compressed")
+        self.assertEqual(scan(), [newest])
+        with old.open("ab") as handle:
+            handle.write(b"{}\n")
+        os.utime(old, (1000, 1000))
+        self.assertEqual(scan(), [old])
+        old.write_bytes(b"")
+        os.utime(old, (1000, 1000))
+        self.assertEqual(scan(), [newest])
+
+    def test_codex_growth_ranks_a_growing_normal_candidate_ahead_of_older_promotions(self):
+        paths = [self.file(f"task-{i}.jsonl", 1000 + i) for i in range(4)]
+        tracker = collector.CodexGrowthTracker()
+        def scan(at):
+            with patch.object(collector.time, "time", return_value=at):
+                return collector._recent_files(self.base, 2, codex_growth=tracker)[0]
+        def grow(i):
+            with paths[i].open("ab") as handle:
+                handle.write(b"{}\n")
+            os.utime(paths[i], (1000 + i, 1000 + i))
+        self.assertEqual(scan(1010), [paths[3], paths[2]])
+        grow(0)
+        grow(1)
+        self.assertEqual(scan(1020), [paths[1], paths[0]])
+        grow(2)
+        self.assertEqual(scan(1030), [paths[2], paths[1]])
+
+    def test_codex_growth_selects_fresh_lifecycle_evidence_without_changing_its_timestamp(self):
+        codex = self.base / "codex"
+        active = self.file("codex/sessions/old.jsonl", 1000)
+        self.file("codex/sessions/new.jsonl", 2000)
+        other_tool = self.base / "unused-claude"
+        tracker = collector.CodexGrowthTracker()
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=10)).replace(microsecond=0).isoformat()
+        def snapshot():
+            return collector.collect_snapshot(codex, other_tool, limit=1, codex_growth=tracker)["tasks"]
+        self.assertNotEqual(snapshot()[0]["id"], "codex:synthetic-active")
+        with active.open("a", encoding="utf-8") as handle:
+            for row in (
+                {"type": "session_meta", "payload": {"id": "synthetic-active"}},
+                {"type": "event_msg", "timestamp": stamp, "payload": {"type": "task_complete"}},
+            ):
+                handle.write(json.dumps(row) + "\n")
+        os.utime(active, (1000, 1000))
+        [task] = snapshot()
+        self.assertEqual((task["id"], task["status"]), ("codex:synthetic-active", "completed"))
+        self.assertEqual(collector._timestamp(task["updated_at"]), collector._timestamp(stamp))
+
     def entry(self, name, *, directory=False, link=False, reparse=False, broken=False, modified=1000):
         result = SimpleNamespace(name=name, path=str(self.base / name), stat_calls=0)
         result.is_symlink = lambda: link

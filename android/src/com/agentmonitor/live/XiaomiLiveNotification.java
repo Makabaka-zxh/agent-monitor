@@ -16,7 +16,8 @@ import android.os.Bundle;
  * A positive capability query is not proof of Xiaomi developer onboarding or scene approval.
  * The business string identifies our own scene for statistics; it is not a permission or an
  * approved taxi/media scene. Xiaomi still controls acceptance and rendering (pId=2132).
- * No task title, state, result, account data, action, or arbitrary icon enters this OEM payload.
+ * Only a confirmed running state and an optional bounded tracking duration accompany the
+ * bundled provider branding. Task titles, results, account data and actions remain excluded.
  */
 final class XiaomiLiveNotification {
     static final String PARAM = "miui.focus.param";
@@ -29,7 +30,13 @@ final class XiaomiLiveNotification {
     /** True means extras were attached, never that the OS displayed an island or rear-screen card. */
     static boolean apply(Context context, Notification notification, DeviceBrand brand,
                          XiaomiLiveCapabilities capabilities, String tool, boolean ongoing) {
-        String payload = payload(brand, capabilities, tool, ongoing);
+        return apply(context, notification, brand, capabilities, tool, ongoing, "执行中");
+    }
+
+    static boolean apply(Context context, Notification notification, DeviceBrand brand,
+                         XiaomiLiveCapabilities capabilities, String tool, boolean ongoing,
+                         String publicSummary) {
+        String payload = payload(brand, capabilities, tool, ongoing, publicSummary);
         if (payload == null || context == null || notification == null) return false;
         try {
             // Only bundled provider artwork is accepted; caller-supplied bitmaps could contain data.
@@ -57,6 +64,11 @@ final class XiaomiLiveNotification {
     /** Pure, fail-closed policy. Unknown future protocols need verification before enabling. */
     static String payload(DeviceBrand brand, XiaomiLiveCapabilities capabilities, String tool,
                           boolean ongoing) {
+        return payload(brand, capabilities, tool, ongoing, "执行中");
+    }
+
+    static String payload(DeviceBrand brand, XiaomiLiveCapabilities capabilities, String tool,
+                          boolean ongoing, String publicSummary) {
         if (brand != DeviceBrand.XIAOMI || !ongoing || capabilities == null
                 || capabilities.protocolVersion != 3
                 || capabilities.island != XiaomiLiveCapabilities.State.ENABLED
@@ -64,21 +76,26 @@ final class XiaomiLiveNotification {
         // Deliberately use an exact allowlist instead of accepting arbitrary display strings.
         final String label;
         if ("codex".equals(tool)) label = "Codex";
-        else if ("claude".equals(tool)) label = "Claude";
+        else if ("claude".equals(tool)) label = "Claude Code";
         else return null;
+        // Do not let a task title or arbitrary runtime message enter public OEM surfaces.
+        // This adapter is only attached while the caller has confirmed running, never
+        // for waiting, reconnection or completion. Missing support keeps native content.
+        if (publicSummary == null || publicSummary.length() > 48
+                || !("执行中".equals(publicSummary)
+                || publicSummary.matches("执行中 · 已跟踪 (?:不足1分|[0-9]{1,2}分|[0-9]{1,2}时(?:[0-9]{1,2}分)?|[0-9]{1,9}天(?:[0-9]{1,2}时)?)"))) return null;
 
-        // Every interpolated value is a constant or an allowlisted provider label. All OEM
-        // surfaces, including an unlocked island, receive the same minimal public content.
-        // Required secondary text identifies this app; it never describes the monitored task.
+        // Every interpolated value is a constant, allowlisted label or the fixed summary
+        // grammar above. The small surfaces stay brief; the expanded card carries duration.
         return "{\"param_v2\":{\"protocol\":1,\"business\":\"" + BUSINESS
                 + "\",\"updatable\":true,\"islandFirstFloat\":false,\"enableFloat\":false,"
-                + "\"filterWhenNoPermission\":false,\"aodTitle\":\"" + label
+                + "\"filterWhenNoPermission\":false,\"aodTitle\":\"" + label + " · 执行中"
                 + "\",\"aodPic\":\"" + TOOL_ICON + "\","
-                + "\"baseInfo\":{\"type\":2,\"title\":\"" + label + "\",\"content\":\"Monitor\"},"
+                + "\"baseInfo\":{\"type\":2,\"title\":\"" + label + "\",\"content\":\"" + publicSummary + "\"},"
                 + "\"picInfo\":{\"type\":1,\"pic\":\"" + TOOL_ICON
                 + "\",\"picDark\":\"" + TOOL_ICON + "\"},"
                 + "\"param_island\":{\"islandProperty\":1,\"bigIslandArea\":{"
-                + "\"imageTextInfoLeft\":{\"type\":1,\"textInfo\":{\"title\":\"" + label + "\"}}},"
+                + "\"imageTextInfoLeft\":{\"type\":1,\"textInfo\":{\"title\":\"" + label + "\",\"content\":\"执行中\"}}},"
                 + "\"smallIslandArea\":{\"picInfo\":{\"type\":1,\"pic\":\"" + TOOL_ICON + "\"}}}}}";
     }
 }

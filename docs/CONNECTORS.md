@@ -23,6 +23,14 @@ python -m agent_monitor.remote_agent pair --server https://monitor.example.com -
 - Token 与套餐窗口只展示可读取的数据，来源缺失时显示未知。它们不是供应商账单。
 - 断网会使状态滞后，过期信息不应视为任务完成证据。
 
+### Antigravity 桌面会话
+
+新版连接器自动查找当前系统用户的 `~/.gemini/antigravity` 会话索引。索引可读时，桌面主会话会以「Antigravity」为来源出现在工作台，可按工具和电脑筛选。超过状态有效期的运行会话、正在取消或尚未完全空闲的会话，不能以这份数据认定为已完成。当前在 Windows 桌面版 2.32.1 上核对了真实会话；索引缺失或格式不兼容时会跳过这个来源。
+
+开启结果同步后，Monitor 只读取能与最新一轮确认对应的最终答复文本。远程连接器每次检查最近 8 条已空闲的 Antigravity 会话；本机服务可在打开详情时读取其他已收录会话的结果。关闭结果同步或使用 `--status-only` 时不读取正文。当前不支持附件、用量、手机回复、审批或模型设置。Google 的 [Antigravity CLI ACP 接口](https://antigravity.google/docs/ide/extensions/acp/) 是独立的会话入口，现有桌面会话不会因此自动变成可远程操作。
+
+需要同时更新 Monitor 服务和电脑连接器。连接器遇到仍不识别 Antigravity 的旧服务时，照常同步已有的 Codex 和 Claude Code 任务。
+
 ### Codex 压缩日志（源码新增，尚未发布）
 
 任务采集支持 `sessions` 下的 `.jsonl` 和 `.jsonl.zst`。同目录同名文件同时存在时优先普通 `.jsonl`，两份只占一个候选名额；压缩前后的任务身份一致，不同文件中的相同会话 ID 仍合并成一项。需安装更新后的 Python 依赖，其中包含固定版本的 `zstandard`。

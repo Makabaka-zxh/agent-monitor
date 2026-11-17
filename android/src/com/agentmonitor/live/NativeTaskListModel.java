@@ -26,7 +26,7 @@ public final class NativeTaskListModel {
             if (device != null && !computers.containsKey(device.optString("id"))) computers.put(device.optString("id"), device);
         }
         NativeTaskSearchPolicy.Query search = NativeTaskSearchPolicy.compile(deviceId == null ? query : "");
-        JSONArray shown = new JSONArray(); int[] counts = {0, 0, 0}; int uncertain = 0;
+        JSONArray shown = new JSONArray(); int[] counts = new int[NativeScreenPolicy.toolFilterCount()]; int uncertain = 0;
         if (tasks != null) for (int index = 0; index < tasks.length(); index++) {
             JSONObject task = tasks.optJSONObject(index); if (task == null) continue;
             JSONObject device = computers.get(task.optString("device_id"));
@@ -39,7 +39,9 @@ public final class NativeTaskListModel {
                 if (deviceId.equals(task.optString("device_id")) && !archived) shown.put(task);
             } else {
                 if (NativeScreenPolicy.includes("all", scope, actualTool, status, archived, unknown)) {
-                    counts[0]++; if ("claude".equals(actualTool)) counts[1]++; if ("codex".equals(actualTool)) counts[2]++;
+                    counts[0]++;
+                    int indexInFilter = NativeScreenPolicy.toolIndex(actualTool);
+                    if (indexInFilter > 0) counts[indexInFilter]++;
                 }
                 if (NativeScreenPolicy.includes(tool, scope, actualTool, status, archived, unknown)) shown.put(task);
             }

@@ -14,7 +14,8 @@ public final class NativeNavigationPolicy {
         if (page == null) return "tasks";
         switch (page) {
             case "tasks": case "task": case "usage": case "account":
-            case "devices": case "device": case "profile": case "sync": case "sessions":
+            case "devices": case "device": case "profile": case "sync": case "sessions": case "settings":
+            case "settings-appearance": case "settings-background": case "settings-notifications": case "settings-support": case "settings-security":
             case "pairing": case "pairing-confirm": return page;
             default: return "tasks";
         }
@@ -25,6 +26,41 @@ public final class NativeNavigationPolicy {
 
     public static boolean rootPage(String page) {
         return "tasks".equals(page) || "usage".equals(page) || "account".equals(page);
+    }
+
+    /** Presentation only: follows the existing page tree without changing navigation state. */
+    public static int transitionDirection(String previous, String next) {
+        return transitionDirection(previous, next, "");
+    }
+
+    public static int transitionDirection(String previous, String next, String taskReturnDevice) {
+        if (previous == null || next == null || previous.equals(next)
+                || !previous.equals(safePage(previous)) || !next.equals(safePage(next))) return 0;
+        // Task details can belong to either the workbench or a computer's task list.
+        if ("device".equals(previous) && "task".equals(next)) return 1;
+        if ("task".equals(previous) && "device".equals(next)) return -1;
+        if (ancestor(next, previous, taskReturnDevice)) return -1;
+        if (ancestor(previous, next, taskReturnDevice)) return 1;
+        if (rootPage(previous) || rootPage(next)) {
+            return Integer.compare(rootOrder(next, taskReturnDevice), rootOrder(previous, taskReturnDevice));
+        }
+        // Sibling pages have no parent/child direction; keep them spatially stable.
+        return 0;
+    }
+
+    private static boolean ancestor(String candidate, String page, String taskReturnDevice) {
+        for (int depth = 0; depth < 5; depth++) {
+            BackTarget parent = backTarget(page, taskReturnDevice);
+            if (parent == null) return false;
+            if (candidate.equals(parent.page)) return true;
+            page = parent.page;
+        }
+        return false;
+    }
+
+    private static int rootOrder(String page, String taskReturnDevice) {
+        String root = tabForPage(page, taskReturnDevice);
+        return "tasks".equals(root) ? 0 : "usage".equals(root) ? 1 : 2;
     }
 
     /** A task reached from a computer stays in that computer's navigation branch. */
@@ -50,7 +86,54 @@ public final class NativeNavigationPolicy {
                     ? new BackTarget("device", taskReturnDevice) : new BackTarget("tasks", "");
             case "device": case "pairing": return new BackTarget("devices", "");
             case "pairing-confirm": return new BackTarget("pairing", "");
+            case "settings-background": return new BackTarget("settings-appearance", "");
+            case "settings-appearance": case "settings-notifications": case "settings-support": case "settings-security":
+                return new BackTarget("settings", "");
             default: return new BackTarget("account", "");
+        }
+    }
+
+    /** The third level uses the existing settings sheets, above a stable second-level page. */
+    public static String settingsSheetParent(String sheet) {
+        if (sheet == null) return "";
+        switch (sheet) {
+            case "display": case "privacy": return "settings-appearance";
+            case "notifications": case "background": case "alerts": return "settings-notifications";
+            case "system-help": return "settings-support";
+            default: return "";
+        }
+    }
+
+    /** Restore local UI only for the same connected account and the sheet's exact owner. */
+    public static String restorableSettingsSheet(String page, String sheet, String savedFingerprint, String currentFingerprint) {
+        if (currentFingerprint == null || currentFingerprint.isEmpty() || !currentFingerprint.equals(savedFingerprint)) return "";
+        String parent = settingsSheetParent(sheet);
+        return !parent.isEmpty() && parent.equals(page) ? sheet : "";
+    }
+
+    public static String settingsTitle(String page) {
+        if (page == null) return "";
+        switch (page) {
+            case "settings": return "设置";
+            case "settings-appearance": return "显示与隐私";
+            case "settings-background": return "应用背景";
+            case "settings-notifications": return "通知与提醒";
+            case "settings-support": return "连接与适配";
+            case "settings-security": return "账号与安全";
+            default: return "";
+        }
+    }
+
+    public static String settingsHelp(String page) {
+        if (page == null) return "";
+        switch (page) {
+            case "settings": return "按显示、通知、连接和账号分类管理\n选择分类后，再进入具体设置\n\n原有设置会保留，打开页面不会改变配置";
+            case "settings-appearance": return "应用背景管理纯色与每日壁纸\n显示内容管理实况预览与信息密度\n锁屏隐私单独管理是否公开任务详情";
+            case "settings-background": return "背景只影响 Monitor 内的显示\n\n选择 Bing 每日壁纸后，联网获取可用的当日图片\n离线时沿用缓存，图片署名可在此查看";
+            case "settings-notifications": return "分别管理通知权限、后台运行和用量提醒\n\n打开系统设置不会自动授予权限；提醒仍使用原有规则";
+            case "settings-support": return "查看当前设备的系统适配帮助，或管理服务器地址和应用更新\n\n切换服务器仍需确认，已有连接不会在浏览页面时改变";
+            case "settings-security": return "退出登录会断开当前手机并结束实况\n电脑上的任务不受影响\n\n退出前仍会要求确认";
+            default: return "";
         }
     }
 

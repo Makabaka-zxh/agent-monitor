@@ -116,6 +116,7 @@ Copy-Item -LiteralPath (Join-Path $buildDirectory 'base.apk') -Destination (Join
 Run-Checked (Join-Path $javaBin 'jar.exe') @('uf', (Join-Path $buildDirectory 'unsigned.apk'), '-C', (Join-Path $buildDirectory 'dex'), 'classes.dex')
 # Windows aapt2 may write backslashes in asset ZIP entry names. Android AssetManager
 # looks up slash-separated names, so normalize archive names before alignment/signing.
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [System.IO.Compression.ZipFile]::Open((Join-Path $buildDirectory 'unsigned.apk'), [System.IO.Compression.ZipArchiveMode]::Update)
 try {
@@ -180,7 +181,7 @@ Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 
 # Compile the real notification/receiver implementation against offline recording stubs.
 # These classes stay outside build/classes and therefore never enter the APK.
 $notificationTestSources = @(Get-ChildItem -LiteralPath (Join-Path $projectDirectory 'tests/notification-stubs') -Filter '*.java' -Recurse -File | ForEach-Object { $_.FullName })
-foreach ($source in @('TrackingService', 'TrackingRequestDiagnostics', 'TrackingRemovalListener', 'NotificationRecoveryPolicy', 'StopReceiver', 'DismissReceiver', 'TrackingPolicy', 'NativeNavigationPolicy', 'NativeWebPolicy', 'LivePresentation', 'LivePresentationPreferences', 'UsageAlertNotification', 'DeviceBrand', 'XiaomiLiveCapabilities', 'XiaomiLiveNotification')) {
+foreach ($source in @('TrackingService', 'TrackingRequestDiagnostics', 'TrackingRemovalListener', 'NotificationRecoveryPolicy', 'StopReceiver', 'DismissReceiver', 'TrackingPolicy', 'NativeNavigationPolicy', 'NativeWebPolicy', 'NativeScreenPolicy', 'NativeListPresentation', 'LivePresentation', 'LivePresentationPreferences', 'UsageAlertNotification', 'DeviceBrand', 'XiaomiLiveCapabilities', 'XiaomiLiveNotification')) {
     $notificationTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java"
 }
 $notificationTestSources += Join-Path $projectDirectory 'tests/TrackingNotificationTest.java'
@@ -204,7 +205,7 @@ Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release
 foreach ($test in @('NotificationDiagnosticsTest', 'XiaomiOnboardingTest')) {
     Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $diagnosticsTestsDirectory, "com.agentmonitor.live.$test")
 }
-foreach ($policy in @('NativeUsageFormat', 'UsageAlertPolicy', 'NativeUsagePresentation', 'NativeUsageSelectionPolicy')) {
+foreach ($policy in @('NativeUsageFormat', 'UsageAlertPolicy', 'NativeUsagePresentation', 'NativeUsageSelectionPolicy', 'LiveSettingsSections')) {
     Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-classpath', (Join-Path $buildDirectory 'policy-tests'), '-d', (Join-Path $buildDirectory 'policy-tests'), (Join-Path $projectDirectory "src/com/agentmonitor/live/$policy.java"), (Join-Path $projectDirectory "tests/$($policy)Test.java"))
     Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 'policy-tests'), "com.agentmonitor.live.$($policy)Test")
 }
@@ -227,6 +228,13 @@ New-Item -ItemType Directory -Force -Path $resultTestsDirectory | Out-Null
 $resultTestClasspath = "$(Join-Path $buildDirectory 'classes');$platformJar"
 Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-classpath', $resultTestClasspath, '-d', $resultTestsDirectory, (Join-Path $projectDirectory 'tests/NativeTaskResultsRefreshTest.java'))
 Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', "$resultTestsDirectory;$resultTestClasspath", 'com.agentmonitor.live.NativeTaskResultsRefreshTest')
+# Reply presentation and bounded result previews are pure policies (RC37 overlay tests).
+Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', (Join-Path $buildDirectory 'policy-tests'), (Join-Path $projectDirectory 'src/com/agentmonitor/live/NativeReplyPresentationPolicy.java'), (Join-Path $projectDirectory 'tests/NativeReplyPresentationPolicyTest.java'))
+Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 'policy-tests'), 'com.agentmonitor.live.NativeReplyPresentationPolicyTest')
+Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '--release', '8', '-d', (Join-Path $buildDirectory 'policy-tests'), (Join-Path $projectDirectory 'src/com/agentmonitor/live/NativeResultPreview.java'))
+# The test source uses String.repeat; production code above still compiles for Java 8.
+Run-Checked (Join-Path $javaBin 'javac.exe') @('-encoding', 'UTF-8', '-classpath', (Join-Path $buildDirectory 'policy-tests'), '-d', (Join-Path $buildDirectory 'policy-tests'), (Join-Path $projectDirectory 'tests/NativeResultPreviewTest.java'))
+Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 'policy-tests'), 'com.agentmonitor.live.NativeResultPreviewTest')
 # Isolated recording stubs exercise the production JSON transport without any network.
 $transportTestsDirectory = Join-Path $buildDirectory 'transport-tests'
 New-Item -ItemType Directory -Force -Path $transportTestsDirectory | Out-Null
@@ -246,10 +254,10 @@ $taskSearchTestsDirectory = Join-Path $buildDirectory 'task-search-tests'
 New-Item -ItemType Directory -Force -Path $taskSearchTestsDirectory | Out-Null
 $taskSearchSources = @()
 foreach ($jsonSource in @('JSONObject', 'JSONArray')) { $taskSearchSources += Join-Path $projectDirectory "tests/notification-stubs/org/json/$jsonSource.java" }
-foreach ($source in @('NativeWebPolicy', 'NativeScreenPolicy', 'NativeWorkbenchPolicy', 'NativeTaskSearchPolicy', 'NativeTaskListModel', 'NativeSearchPresentationPolicy', 'NativeListPresentation', 'NativeErrorPresentation')) { $taskSearchSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java" }
-foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest', 'NativeSearchPresentationPolicyTest', 'NativePresentationTest')) { $taskSearchSources += Join-Path $projectDirectory "tests/$test.java" }
+foreach ($source in @('NativeWebPolicy', 'NativeScreenPolicy', 'NativeWorkbenchPolicy', 'NativeTaskSearchPolicy', 'NativeTaskListModel', 'NativeSearchPresentationPolicy', 'NativeListPresentation', 'NativeErrorPresentation', 'NativeSessionControlPolicy')) { $taskSearchSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java" }
+foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest', 'NativeSearchPresentationPolicyTest', 'NativePresentationTest', 'NativeSessionControlPolicyTest')) { $taskSearchSources += Join-Path $projectDirectory "tests/$test.java" }
 Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release', '8', '-d', $taskSearchTestsDirectory) + $taskSearchSources)
-foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest', 'NativeSearchPresentationPolicyTest', 'NativePresentationTest')) { Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $taskSearchTestsDirectory, "com.agentmonitor.live.$test") }
+foreach ($test in @('NativeTaskSearchPolicyTest', 'NativeTaskListModelTest', 'NativeSearchPresentationPolicyTest', 'NativePresentationTest', 'NativeSessionControlPolicyTest')) { Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', $taskSearchTestsDirectory, "com.agentmonitor.live.$test") }
 $connectionTestSources = @(Get-ChildItem -LiteralPath (Join-Path $projectDirectory 'tests/connection-stubs') -Filter '*.java' -Recurse -File | ForEach-Object { $_.FullName })
 foreach ($source in @('PairingGate', 'NativeConnection')) { $connectionTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java" }
 $connectionTestSources += Join-Path $projectDirectory 'tests/NativeConnectionTest.java'

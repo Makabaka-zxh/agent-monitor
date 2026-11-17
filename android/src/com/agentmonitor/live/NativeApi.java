@@ -103,7 +103,7 @@ public final class NativeApi {
         if (method == null || path == null) return false;
         if ("GET".equals(method)) return path.matches("/api/native/(snapshot|session|workbench|usage|account|profile|computers/pairing/[A-Za-z0-9_-]{32})") || allowedTaskQuery(path);
         if ("PATCH".equals(method)) return path.matches("/api/native/(profile|preferences|tasks/archive)");
-        if ("POST".equals(method)) return path.matches("/api/native/(tasks/reply|web-session|pairing/start|pairing/[A-Za-z0-9_-]{32}/poll|computers/pairing|computers/pairing/[A-Za-z0-9_-]{32}/(approve|reject))");
+        if ("POST".equals(method)) return path.matches("/api/native/(tasks/reply|tasks/controls/decision|web-session|pairing/start|pairing/[A-Za-z0-9_-]{32}/poll|computers/pairing|computers/pairing/[A-Za-z0-9_-]{32}/(approve|reject))");
         if ("DELETE".equals(method)) return path.matches("/api/native/(session|connections/[A-Za-z0-9_-]{32}|(computers|sessions)/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})");
         return false;
     }
@@ -113,6 +113,7 @@ public final class NativeApi {
         String route = path.substring(0, question), query = path.substring(question + 1);
         String[] expected;
         if ("/api/native/tasks/result".equals(route)) expected = new String[]{"task_id"};
+        else if ("/api/native/tasks/controls".equals(route)) expected = new String[]{"task_id"};
         else if ("/api/native/tasks/result.txt".equals(route)) expected = new String[]{"task_id", "result_id"};
         else if ("/api/native/tasks/result/file".equals(route)) expected = new String[]{"task_id", "result_id", "file_id"};
         else if ("/api/native/tasks/reply".equals(route)) expected = query.contains("&") ? new String[]{"task_id", "request_id"} : new String[]{"task_id"};

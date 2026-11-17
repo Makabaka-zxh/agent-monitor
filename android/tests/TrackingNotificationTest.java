@@ -115,7 +115,7 @@ public final class TrackingNotificationTest {
         active(reconnecting, epoch, "reconnecting");
         check(!reconnecting.requestPromotedOngoing && reconnecting.shortCriticalText == null,
                 "reconnection removes running promotion request");
-        check("Codex · 正在重连".contentEquals(reconnecting.contentText), "reconnection exposes its current state");
+        check(reconnecting.contentText.toString().startsWith("正在重连") && "Codex".contentEquals(reconnecting.subText), "reconnection exposes state with a separate provider label");
 
         invoke(service, "finish", new Class<?>[]{String.class, boolean.class}, "本轮结束", true);
         Notification finished = service.notifications.lastNotification;
@@ -506,7 +506,7 @@ public final class TrackingNotificationTest {
             check(service.notifications.lastNotification.timeoutAfter == 60000
                     && lastEndedReason().contains(minutes + " 分钟"),
                     "duration end records selected value and normal terminal notice timeout");
-            brandOnly(service.notifications.lastNotification, "Codex", "duration terminal notice");
+            publicSummary(service.notifications.lastNotification, "Codex", "duration terminal notice");
         }
         TrackingService cancelledMode = start("until-then-timed", TrackingPolicy.UNTIL_TASK_END_MINUTES);
         long priorEpoch = TrackingService.generation;
@@ -690,14 +690,17 @@ public final class TrackingNotificationTest {
         List<String> reasons = NotificationDiagnostics.endedReasons;
         return reasons.isEmpty() ? "" : reasons.get(reasons.size() - 1);
     }
-    private static void brandOnly(Notification value, String brand, String label) {
+    private static void publicSummary(Notification value, String brand, String label) {
         check(value != null, label + ": notification exists");
         check(brand.contentEquals(value.contentTitle), label + ": title is only the tool name");
-        check(value.contentText == null || value.contentText.length() == 0, label + ": no task or status body");
+        check(value.contentText != null && value.contentText.length() > 0, label + ": public status is never blank");
+        check(value.subText == null, label + ": provider title is not repeated as a secondary label");
+        for (String privateValue : new String[]{"Private", "Offline test", "private-body", "Private PC", "本次", "今日", "重置"})
+            check(!value.contentText.toString().contains(privateValue), label + ": summary excludes private fields");
         check(value.bigText == null || value.bigText.length() == 0, label + ": no expanded private content");
         check(value.actions == null || value.actions.length == 0, label + ": no extra action text");
-        check(value.shortCriticalText == null || ("Claude Code".equals(brand) ? "Claude" : "Codex").contentEquals(value.shortCriticalText),
-                label + ": compact live text contains only the tool name");
+        check(value.shortCriticalText == null || "执行中".contentEquals(value.shortCriticalText),
+                label + ": compact live text uses the confirmed public state");
         check(value.smallIcon == R.drawable.ic_monitor,
                 label + ": Monitor status-bar identity accompanies the explicit tool name");
         contentBrandIcon(value, brand, label);
@@ -727,8 +730,8 @@ public final class TrackingNotificationTest {
             invoke(service, "publish", new Class<?>[]{Notification.class}, unlocked);
             active(unlocked, TrackingService.generation, "unlocked " + tool);
             check(("Private task detail " + tool).contentEquals(unlocked.contentTitle)
-                    && (brand + " · 执行中").contentEquals(unlocked.contentText), "unlocked task detail is retained");
-            brandOnly(unlocked.publicVersion, brand, "unlocked public replacement");
+                    && unlocked.contentText.toString().startsWith("执行中") && brand.contentEquals(unlocked.subText), "unlocked task detail is retained");
+            publicSummary(unlocked.publicVersion, brand, "unlocked public replacement");
             contentBrandIcon(unlocked, brand, "unlocked expanded content");
             check(unlocked.largeIcon == unlocked.publicVersion.largeIcon,
                     "private and public templates share the same full-color logo");
@@ -746,8 +749,8 @@ public final class TrackingNotificationTest {
             // SCREEN_OFF must redact even before the queried power/keyguard states catch up.
             screenEvent(service, Intent.ACTION_SCREEN_OFF);
             Notification locked = service.notifications.lastNotification;
-            brandOnly(locked, brand, "screen-off content");
-            brandOnly(locked.publicVersion, brand, "screen-off public replacement");
+            publicSummary(locked, brand, "screen-off content");
+            publicSummary(locked.publicVersion, brand, "screen-off public replacement");
             check(locked.deleteIntent == unlocked.deleteIntent && sessionNonce.equals(session(locked))
                     && presentationNonce.equals(presentation(locked)), "privacy update retains dismissal identity and nonces");
             check(locked.requestPromotedOngoing && (locked.flags & Notification.FLAG_NO_CLEAR) != 0
@@ -762,16 +765,16 @@ public final class TrackingNotificationTest {
 
             service.power.interactive = true; service.keyguard.locked = true;
             screenEvent(service, Intent.ACTION_SCREEN_ON);
-            brandOnly(service.notifications.lastNotification, brand, "awake but keyguard showing");
+            publicSummary(service.notifications.lastNotification, brand, "awake but keyguard showing");
             service.keyguard.locked = false;
             screenEvent(service, Intent.ACTION_USER_PRESENT);
             Notification restored = service.notifications.lastNotification;
             active(restored, epoch, "unlocked detail restored");
             check(("Private task detail " + tool).contentEquals(restored.contentTitle)
-                    && (brand + " · 执行中").contentEquals(restored.contentText), "unlock restores current title and state");
+                    && restored.contentText.toString().startsWith("执行中") && brand.contentEquals(restored.subText), "unlock restores current title and state");
             check(restored.actions[0].actionIntent == unlocked.actions[0].actionIntent && restored.deleteIntent == unlocked.deleteIntent,
                     "unlock retains existing stop and dismissal pending intents");
-            brandOnly(restored.publicVersion, brand, "restored private notification public fallback");
+            publicSummary(restored.publicVersion, brand, "restored private notification public fallback");
             contentBrandIcon(restored, brand, "expanded icon after unlocking");
             int unlockedPosts = service.notifications.notifyCalls;
             refreshPrivacy(service);
@@ -780,10 +783,10 @@ public final class TrackingNotificationTest {
             service.keyguard.locked = true;
             setField(service, "inFlight", true); // Pump the real ticker without making a network request.
             ((Runnable) field(service, "ticker")).run();
-            brandOnly(service.notifications.lastNotification, brand, "timer catches missing screen broadcast");
+            publicSummary(service.notifications.lastNotification, brand, "timer catches missing screen broadcast");
             service.keyguard.locked = false; refreshPrivacy(service);
             service.power.interactive = false; refreshPrivacy(service);
-            brandOnly(service.notifications.lastNotification, brand, "power off without keyguard");
+            publicSummary(service.notifications.lastNotification, brand, "power off without keyguard");
 
             int postsBeforeStop = service.notifications.notifyCalls;
             TrackingService.requestStop(service, epoch);
@@ -806,8 +809,8 @@ public final class TrackingNotificationTest {
             service.keyguard.fail = failure == 2;
             service.power.fail = failure == 3;
             check((Boolean) invoke(service, "shouldRedactLockscreen", new Class<?>[0]),
-                    "missing or failing platform lock query defaults to brand-only: " + failure);
-            brandOnly(notification(service, "执行中", true, true), "Codex", "failed privacy query");
+                    "missing or failing platform lock query defaults to public summary: " + failure);
+            publicSummary(notification(service, "执行中", true, true), "Codex", "failed privacy query");
         }
         service.missingKeyguard = service.missingPower = service.keyguard.fail = service.power.fail = false;
         check(!(Boolean) invoke(service, "shouldRedactLockscreen", new Class<?>[0]), "available unlocked state permits task details");
@@ -815,10 +818,10 @@ public final class TrackingNotificationTest {
             service.keyguard.locked = locked;
             for (String reason : new String[]{"本轮结束", "连接中断", "状态未能确认", "已结束 47 分钟跟踪", "系统已结束本次跟踪"}) {
                 Notification terminal = notification(service, reason, false, false);
-                brandOnly(terminal, "Codex", "terminal survives service shutdown safely");
-                brandOnly(terminal.publicVersion, "Codex", "terminal public fallback");
+                publicSummary(terminal, "Codex", "terminal survives service shutdown safely");
+                publicSummary(terminal.publicVersion, "Codex", "terminal public fallback");
                 check(!terminal.requestPromotedOngoing && terminal.deleteIntent == null && terminal.timeoutAfter == 60000,
-                        "brand-only terminal remains bounded and cannot control an ended session");
+                        "summary terminal remains bounded and cannot control an ended session");
             }
         }
         Build.VERSION.SDK_INT = 32;
@@ -827,8 +830,103 @@ public final class TrackingNotificationTest {
             check(legacy.registrations.size() == 1 && legacy.registrations.get(0).flags == 0,
                     "older Android uses the supported dynamic receiver overload");
             screenEvent(legacy, Intent.ACTION_SCREEN_OFF);
-            brandOnly(legacy.notifications.lastNotification, "Codex", "legacy screen-off notification");
+            publicSummary(legacy.notifications.lastNotification, "Codex", "legacy screen-off notification");
         } finally { Build.VERSION.SDK_INT = 36; }
+        TrackingService receiverFailure = start("screen-receiver-unavailable", 30, false,
+                current -> current.failScreenRegistration = true);
+        check(receiverFailure.registrations.isEmpty(), "failed screen receiver registers nothing");
+        publicSummary(receiverFailure.foregroundNotification, "Codex", "failed receiver still has useful public status");
+    }
+    private static void lockscreenDetailsChoice() throws Exception {
+        String originalManufacturer = Build.MANUFACTURER, originalBrand = Build.BRAND;
+        try {
+            for (String device : new String[]{"Samsung", "OPPO", "OnePlus", "realme", "test"}) {
+                Build.MANUFACTURER = device; Build.BRAND = device;
+                TrackingService service = runningSession("lock-choice-" + device);
+                check(!LivePresentationPreferences.lockscreenDetails(service), "all brands default to public summary: " + device);
+                setField(service, "title", "Private selected title");
+                setField(service, "started", SystemClock.elapsedRealtime() - 125000);
+                LivePresentation.Data data = new LivePresentation.Data();
+                data.computer = "Private PC"; data.session = 123L; data.today = 456L;
+                setField(service, "presentationData", data);
+                LivePresentationPreferences.save(service, LivePresentationPreferences.presetOptions(LivePresentationPreferences.Preset.RICH));
+                handler(service).runPosted();
+                service.keyguard.locked = true;
+                screenEvent(service, Intent.ACTION_SCREEN_ON);
+                Notification summary = service.notifications.lastNotification;
+                publicSummary(summary, "Codex", "default lock summary: " + device);
+                publicSummary(summary.publicVersion, "Codex", "default public replacement: " + device);
+                check("执行中 · 已跟踪 2分".contentEquals(summary.contentText), "lock summary retains selected elapsed time: " + device);
+                check(summary.visibility == Notification.VISIBILITY_PRIVATE
+                        && summary.publicVersion.visibility == Notification.VISIBILITY_PUBLIC
+                        && TrackingService.CHANNEL.equals(summary.getChannelId()), "existing channel and system visibility remain intact");
+                long epoch = TrackingService.generation, deadline = TrackingService.endsAt;
+                String originalSession = session(summary), originalPresentation = presentation(summary);
+                LivePresentationPreferences.setLockscreenDetails(service, true);
+                handler(service).runPosted();
+                Notification detailed = service.notifications.lastNotification;
+                for (Notification surface : new Notification[]{detailed, detailed.publicVersion}) {
+                    check("Private selected title".contentEquals(surface.contentTitle), "explicit lock choice includes selected title");
+                    check(surface.bigText != null && !surface.bigText.toString().contains("Private PC") && "Codex · Private PC".contentEquals(surface.subText)
+                            && surface.bigText.toString().contains("123"), "explicit lock choice includes selected available content");
+                    check(surface.actions == null || surface.actions.length == 0, "lock details never expose stop controls");
+                    check("Codex · Private PC".contentEquals(surface.subText), "details place tool and selected computer together above the title");
+                }
+                check(epoch == TrackingService.generation && deadline == TrackingService.endsAt && service.startForegroundCalls == 1
+                        && originalSession.equals(session(detailed)) && originalPresentation.equals(presentation(detailed)),
+                        "lock detail preference updates do not restart, extend or rotate the current session");
+                LivePresentationPreferences.save(service, LivePresentationPreferences.presetOptions(LivePresentationPreferences.Preset.SIMPLE));
+                handler(service).runPosted();
+                check(LivePresentationPreferences.lockscreenDetails(service), "six-field preset never overwrites the independent lock choice");
+                Notification minimal = service.notifications.lastNotification;
+                check("Codex".contentEquals(minimal.contentTitle) && "执行中".contentEquals(minimal.contentText),
+                        "explicit lock choice still honors hidden title and elapsed fields");
+                check(minimal.subText == null && minimal.publicVersion.subText == null,
+                        "title-only identity is not duplicated in either notification surface");
+                check(!minimal.bigText.toString().contains("Private") && !minimal.bigText.toString().contains("123"),
+                        "explicit lock choice still honors hidden computer and usage fields");
+                for (String[] state : new String[][]{
+                        {"执行中", "执行中"}, {"等待批准", "等待批准"}, {"更新暂停，正在重连", "正在重连"},
+                        {"正在更新任务状态", "正在确认"}, {"正在确认任务状态", "正在确认"}, {"private-body", "状态待确认"}}) {
+                    LivePresentationPreferences.setLockscreenDetails(service, false);
+                    handler(service).runPosted();
+                    Notification value = notification(service, state[0], true, "执行中".equals(state[0]));
+                    for (Notification surface : new Notification[]{value, value.publicVersion}) {
+                        publicSummary(surface, "Codex", "fixed public state");
+                        check(state[1].contentEquals(surface.contentText), "public state is accurate and allowlisted: " + state[1]);
+                    }
+                    if (!"执行中".equals(state[0])) check(!value.requestPromotedOngoing && value.shortCriticalText == null,
+                            "waiting/reconnect/confirmation cannot claim a running activity");
+                }
+                LivePresentationPreferences.setLockscreenDetails(service, true);
+                LivePresentationPreferences.save(service, LivePresentationPreferences.presetOptions(LivePresentationPreferences.Preset.RICH));
+                handler(service).runPosted();
+                for (String[] state : new String[][]{
+                        {"本轮结束", "本轮结束"}, {"执行出错，请打开工作台查看", "执行出错"},
+                        {"等待批准，请在电脑上处理", "等待批准"}, {"任务已归档，已停止跟踪", "任务已归档"},
+                        {"30 分钟跟踪已结束", "跟踪已结束"}}) {
+                    Notification terminal = notification(service, state[0], false, false);
+                    for (Notification surface : new Notification[]{terminal, terminal.publicVersion}) {
+                        publicSummary(surface, "Codex", "fixed terminal summary");
+                        check(state[1].contentEquals(surface.contentText), "terminal summary retains the reason without private content");
+                    }
+                    check(terminal.timeoutAfter == 60000 && terminal.deleteIntent == null && !terminal.requestPromotedOngoing,
+                            "terminal summary retains lifecycle boundaries even when lock details are selected");
+                }
+                LivePresentationPreferences.setLockscreenDetails(service, false);
+                handler(service).runPosted();
+                publicSummary(service.notifications.lastNotification, "Codex", "turning details off clears public data immediately");
+                check(LivePresentationPreferences.options(service).title && LivePresentationPreferences.options(service).computer
+                        && LivePresentationPreferences.options(service).session, "turning lock details off preserves the private content choices");
+                TrackingService.requestStop(service, epoch);
+                int posts = service.notifications.notifyCalls;
+                LivePresentationPreferences.setLockscreenDetails(service, true);
+                handler(service).runPosted();
+                check(service.notifications.notifyCalls == posts && TrackingService.trackedId.isEmpty(),
+                        "lock detail choice never revives a stopped session");
+                service.onDestroy();
+            }
+        } finally { Build.MANUFACTURER = originalManufacturer; Build.BRAND = originalBrand; }
     }
     private static void deferredPrivacyAndClearAll() throws Exception {
         TrackingService service = runningSession("deferred-lockscreen");
@@ -844,7 +942,7 @@ public final class TrackingNotificationTest {
         service.notifications.expose(TrackingService.NOTIFICATION_ID, initial);
         handler(service).runDelayed();
         Notification locked = service.notifications.lastNotification;
-        brandOnly(locked, "Codex", "deferred notification uses current privacy at delivery");
+        publicSummary(locked, "Codex", "deferred notification uses current privacy at delivery");
         check(session(initial).equals(session(locked)) && presentation(initial).equals(presentation(locked)),
                 "initial settle privacy refresh preserves the existing presentation");
 
@@ -857,7 +955,7 @@ public final class TrackingNotificationTest {
         check(service.notifications.notifyCalls == beforeRestore, "screen privacy does not bypass pending dismissal classification");
         remove(service, locked, android.service.notification.NotificationListenerService.REASON_CANCEL_ALL);
         Notification restored = service.notifications.lastNotification;
-        brandOnly(restored, "Codex", "clear all restores brand-only on lockscreen");
+        publicSummary(restored, "Codex", "clear all restores a public summary on lockscreen");
         check(TrackingService.clearAllRestores == 1 && epoch == TrackingService.generation && deadline == TrackingService.endsAt
                 && session(locked).equals(session(restored)) && !presentation(locked).equals(presentation(restored)),
                 "clear all rotates presentation only and keeps original tracking duration");
@@ -882,22 +980,22 @@ public final class TrackingNotificationTest {
             data.computer = "Private PC"; data.session = 123L; data.today = 456L;
             setField(service, "presentationData", data);
             Notification rich = notification(service, "执行中", true, true);
-            check(rich.bigText != null && rich.bigText.toString().contains("Private PC") && rich.bigText.toString().contains("123"),
+            check(rich.bigText != null && !rich.bigText.toString().contains("Private PC") && "Codex · Private PC".contentEquals(rich.subText) && rich.bigText.toString().contains("123"),
                     "unlocked rich notification contains selected available data");
-            brandOnly(rich.publicVersion, "Codex", "rich notification public fallback");
+            publicSummary(rich.publicVersion, "Codex", "rich notification public fallback");
             LivePresentationPreferences.set(service, LivePresentationPreferences.COMPUTER, false);
             handler(service).runPosted();
-            check(!service.notifications.lastNotification.bigText.toString().contains("Private PC"), "preference redraw immediately hides computer");
+            check(!service.notifications.lastNotification.bigText.toString().contains("Private PC") && "Codex".contentEquals(service.notifications.lastNotification.subText), "preference redraw immediately hides computer from body and identity");
             check(epoch == TrackingService.generation && deadline == TrackingService.endsAt && service.startForegroundCalls == 1
                     && sessionNonce.equals(recovery(service).sessionNonce()), "preference redraw never extends or restarts session");
             service.power.interactive = false;
             screenEvent(service, Intent.ACTION_SCREEN_OFF);
             LivePresentationPreferences.set(service, LivePresentationPreferences.COMPUTER, true);
             handler(service).runPosted();
-            brandOnly(service.notifications.lastNotification, "Codex", "setting changed while locked");
+            publicSummary(service.notifications.lastNotification, "Codex", "setting changed while locked");
             service.power.interactive = true; service.keyguard.locked = false;
             screenEvent(service, Intent.ACTION_USER_PRESENT);
-            check(service.notifications.lastNotification.bigText.toString().contains("Private PC"), "unlocked content restores new preference");
+            check("Codex · Private PC".contentEquals(service.notifications.lastNotification.subText) && !service.notifications.lastNotification.bigText.toString().contains("Private PC"), "unlock restores selected computer only in the top identity");
             TrackingService.requestStop(service, epoch);
             int posts = service.notifications.notifyCalls;
             LivePresentationPreferences.set(service, LivePresentationPreferences.COMPUTER, false);
@@ -961,7 +1059,7 @@ public final class TrackingNotificationTest {
                     "capability redraw retains session identity and deadline");
             service.keyguard.locked = true;
             Notification locked = notification(service, "执行中", true, true);
-            brandOnly(locked, "Codex", "Xiaomi locked content");
+            publicSummary(locked, "Codex", "Xiaomi locked content");
             check(payload.equals(locked.extras.getString(XiaomiLiveNotification.PARAM)), "locking never adds private OEM content");
             for (String message : new String[]{"等待批准", "更新暂停，正在重连", "正在更新任务状态"}) {
                 Notification ordinary = notification(service, message, true, false);
@@ -1029,6 +1127,7 @@ public final class TrackingNotificationTest {
             lockscreenContent();
             unknownToolKeepsAppIdentity();
             lockscreenFailureDefaults();
+            lockscreenDetailsChoice();
             deferredPrivacyAndClearAll();
             richPresentationChanges();
             snapshotEvidencePrecedesMainCallback();

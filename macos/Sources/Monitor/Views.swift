@@ -21,9 +21,10 @@ private struct BrandIcon: View {
     var size: CGFloat = 32
     var body: some View {
         Group {
-            if let image = MonitorResources.image(tool == "claude" ? "Claude" : tool == "codex" ? "Codex" : "AppIcon") { Image(nsImage: image).resizable().scaledToFit() }
+            if tool == "antigravity" { Image(systemName: "a.square.fill").resizable().scaledToFit().foregroundStyle(Color.accentColor) }
+            else if let image = MonitorResources.image(tool == "claude" ? "Claude" : tool == "codex" ? "Codex" : "AppIcon") { Image(nsImage: image).resizable().scaledToFit() }
             else { Image(systemName: "terminal").resizable().scaledToFit() }
-        }.frame(width: size, height: size).accessibilityLabel(tool == "claude" ? "Claude Code" : tool == "codex" ? "Codex" : "任务")
+        }.frame(width: size, height: size).accessibilityLabel(MonitorTask.brand(for: tool))
     }
 }
 private struct StatusBadge: View {
@@ -181,7 +182,7 @@ private struct TaskDetailView: View {
     init(task: MonitorTask, store: MonitorStore) {
         self.task = task
         self.store = store
-        _model = StateObject(wrappedValue: TaskDetailModel(taskId: task.id, store: store))
+        _model = StateObject(wrappedValue: TaskDetailModel(task: task, store: store))
     }
     var body: some View {
         ScrollView {
@@ -223,13 +224,15 @@ private struct TaskDetailView: View {
                         } else { Text(model.resultError.isEmpty ? model.result?.reason ?? (model.loading ? "正在读取…" : "还没有最终结果") : model.resultError).foregroundStyle(.secondary) }
                     }
                 }
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 15) {
-                        Text("继续任务").font(.custom("MiSans-Regular", size: 18)).fontWeight(.semibold)
-                        TextEditor(text: $model.draft).scrollContentBackground(.hidden).frame(minHeight: 90, maxHeight: 180).disabled(model.unresolved || model.sending)
-                            .overlay(alignment: .topLeading) { if model.draft.isEmpty { Text("告诉它下一步做什么…").foregroundStyle(.tertiary).padding(.top, 1).padding(.leading, 5).allowsHitTesting(false) } }
-                        if !model.replyMessage.isEmpty { Text(model.replyMessage).foregroundStyle(.secondary) }
-                        HStack { Spacer(); if model.sending { ProgressView().controlSize(.small) }; Button(model.sendTitle) { Task { await model.send() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSend) }
+                if task.supportsReply {
+                    GlassCard {
+                        VStack(alignment: .leading, spacing: 15) {
+                            Text("继续任务").font(.custom("MiSans-Regular", size: 18)).fontWeight(.semibold)
+                            TextEditor(text: $model.draft).scrollContentBackground(.hidden).frame(minHeight: 90, maxHeight: 180).disabled(model.unresolved || model.sending)
+                                .overlay(alignment: .topLeading) { if model.draft.isEmpty { Text("告诉它下一步做什么…").foregroundStyle(.tertiary).padding(.top, 1).padding(.leading, 5).allowsHitTesting(false) } }
+                            if !model.replyMessage.isEmpty { Text(model.replyMessage).foregroundStyle(.secondary) }
+                            HStack { Spacer(); if model.sending { ProgressView().controlSize(.small) }; Button(model.sendTitle) { Task { await model.send() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSend) }
+                        }
                     }
                 }
             }.padding(28).frame(maxWidth: 860)

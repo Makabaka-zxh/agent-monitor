@@ -304,3 +304,24 @@ def test_public_origin_works_behind_http_proxy_without_trusting_forwarded_header
             assert proxy.patch("/api/preferences", headers={**headers, **untrusted}, json={"tool_filter": "claude"}).status_code == 403
         assert proxy.get("/api/snapshot", headers={**headers, "Host": "untrusted.example"}).status_code == 400
         assert proxy.get("/api/me", headers=headers).json()["preferences"]["tool_filter"] == "codex"
+
+
+def test_antigravity_heartbeat_can_coexist_with_other_providers_and_use_filter(hub):
+    _, owner, csrf = hub
+    device = pair_device(owner, csrf)
+    antigravity_id = 'antigravity:00000000-0000-4000-8000-000000000021'
+    rows = [make_task(), {**make_task(source_id=antigravity_id, title='Synthetic Antigravity',
+                                    status='idle', output='opt-in example'), 'tool': 'antigravity'}]
+    auth = {'Authorization': 'Bearer ' + device['token']}
+    result = owner.post('/api/agent/heartbeat', headers=auth, json={
+        'tasks': rows, 'sources': SOURCES + [dict(SOURCES[0], tool='antigravity')],
+    })
+    assert result.status_code == 200
+    assert result.json()['antigravity_v1'] is True
+    assert owner.patch('/api/preferences', headers=csrf, json={'tool_filter': 'antigravity'}).status_code == 200
+    assert owner.get('/api/me').json()['preferences']['tool_filter'] == 'antigravity'
+    snapshot = owner.get('/api/snapshot').json()
+    assert {row['tool'] for row in snapshot['tasks']} == {'codex', 'antigravity'}
+    antigravity = next(row for row in snapshot['tasks'] if row['tool'] == 'antigravity')
+    assert antigravity['status'] == 'idle' and not antigravity.get('output')
+    assert 'opt-in example' not in json.dumps(snapshot)

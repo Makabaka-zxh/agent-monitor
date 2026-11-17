@@ -53,6 +53,13 @@ final class MonitorTests: XCTestCase {
         XCTAssertFalse(archived.matches(tool: .all, scope: .all, fresh: true))
         XCTAssertTrue(archived.matches(tool: .codex, scope: .archived, fresh: false))
     }
+    func testAntigravityTaskIsFilterableAndReadOnly() throws {
+        let task = try decode(MonitorTask.self, #"{"id":"device:antigravity:1","title":"Build","tool":"antigravity","status":"completed","device_id":"device","archived":false,"stale":false}"#)
+        XCTAssertEqual(task.brand, "Antigravity")
+        XCTAssertTrue(task.matches(tool: .antigravity, scope: .all, fresh: true))
+        XCTAssertFalse(task.matches(tool: .codex, scope: .all, fresh: true))
+        XCTAssertFalse(task.supportsReply)
+    }
     func testResultAndReplyProtocolNames() throws {
         let result = try decode(TaskResult.self, #"{"available":true,"text":"完成","result_id":"abc","txt_size":6,"txt_sha256":"hash","files":[{"id":"f","name":"报告.txt","size":6,"sha256":"hash","ready":false}]}"#)
         XCTAssertEqual(result.txtSize, 6)

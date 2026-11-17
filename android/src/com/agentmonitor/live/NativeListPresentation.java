@@ -10,7 +10,23 @@ public final class NativeListPresentation {
     private NativeListPresentation() { }
 
     public static String toolLabel(String tool) {
-        return "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "任务";
+        return NativeScreenPolicy.toolIndex(tool) == 0 ? "任务" : NativeScreenPolicy.toolLabel(tool);
+    }
+
+    public static String availableSources(JSONArray sources) {
+        boolean[] available = new boolean[NativeScreenPolicy.toolFilterCount()];
+        if (sources != null) for (int i = 0; i < sources.length(); i++) {
+            JSONObject entry = sources.optJSONObject(i);
+            if (entry == null || !entry.optBoolean("available")) continue;
+            int index = NativeScreenPolicy.toolIndex(entry.optString("tool"));
+            if (index > 0) available[index] = true;
+        }
+        StringBuilder label = new StringBuilder(); String[] filters = NativeScreenPolicy.toolFilters();
+        for (int i = 1; i < available.length; i++) if (available[i]) {
+            if (label.length() > 0) label.append(" · ");
+            label.append(NativeScreenPolicy.toolLabel(filters[i]));
+        }
+        return label.toString();
     }
 
     public static String tasksKey(JSONArray tasks, JSONArray computers, boolean stale, long minute) {

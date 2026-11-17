@@ -98,7 +98,7 @@ public final class TrackingDurationDialog {
             TextView title = ui.text("跟踪时长", 20, true);
             if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
             header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            header.addView(ui.iconButton("info", "跟踪时长说明", this::showHelp));
+            header.addView(ui.quietButton("时长规则", this::showHelp));
             content.addView(header);
             content.addView(ui.space(12));
 
@@ -336,7 +336,7 @@ public final class TrackingDurationDialog {
             AlertDialog help = new AlertDialog.Builder(new ContextThemeWrapper(activity,
                     ui.dark ? android.R.style.Theme_Material_Dialog_Alert : android.R.style.Theme_Material_Light_Dialog_Alert))
                     .setTitle("跟踪时长")
-                    .setMessage("定时：到时或任务停止运行时结束；状态无法确认超过 45 秒也会停止。\n\n直至任务结束：等待批准或在线任务状态待确认时继续关注，执行恢复后更新实况。任务完成、失败、空闲、归档或电脑离线时停止。\n\n连接中断、任务记录缺失或状态无效超过 45 秒会停止。Android 15 及以上可能限制持续后台运行时长；系统结束时会提示。")
+                    .setMessage("定时：到时或任务停止运行即结束。\n\n直至任务结束：等待批准或在线状态待确认时继续跟踪；任务完成、失败、空闲、归档或电脑离线时停止。\n\n两种模式下，状态超过 45 秒无法确认都会停止。Android 15 及以上可能限制后台运行时长，系统结束跟踪时会提示。")
                     .setPositiveButton("知道了", null)
                     .create();
             helpDialog = help;

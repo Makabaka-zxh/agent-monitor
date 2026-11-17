@@ -1,9 +1,13 @@
-"""Low-priority numeric usage sync. Never occupies the status heartbeat loop."""
+"""Low-priority anonymous usage sync. Never occupies the status heartbeat loop."""
 from __future__ import annotations
 
 import threading
 from pathlib import Path
 from .usage_ledger import UsageLedger, read_claude_quota_file
+
+
+def _record_count(batch):
+    return sum(len(batch.get(key, [])) for key in ("events", "quotas", "quota_snapshots"))
 
 
 class RemoteUsageWorker:
@@ -32,17 +36,21 @@ class RemoteUsageWorker:
                     # accounting cursor and is never acknowledged separately.
                     try:
                         quota_batch = ledger.export_quota_batch(limit=20)
-                        if not self.stop.is_set() and quota_batch.get("quotas"):
+                        if not self.stop.is_set() and _record_count(quota_batch):
                             self.client.post("/api/agent/usage", quota_batch, token=self.config.token)
                     except Exception:
                         # A failed optional fast snapshot must not prevent the
                         # normal FIFO batch (or the independent status loop).
                         pass
                     batch = ledger.export_batch(limit=200)
-                    if not self.stop.is_set() and (batch.get("events") or batch.get("quotas")):
+                    if not self.stop.is_set() and (_record_count(batch) or batch.get("cursor", 0) > 0):
                         result = self.client.post("/api/agent/usage", batch, token=self.config.token)
-                        expected = len(batch.get("events", [])) + len(batch.get("quotas", []))
-                        if (type(result.get("accepted")) is int and result["accepted"] == expected
+                        expected = _record_count(batch)
+                        # An old hub may accept numeric events while silently
+                        # dropping model/snapshot fields. Never downgrade or
+                        # acknowledge such a reply as successful v2 delivery.
+                        if (isinstance(result, dict) and type(result.get("version")) is int and result["version"] == 2
+                                and type(result.get("accepted")) is int and result["accepted"] == expected
                                 and type(result.get("rejected")) is int and result["rejected"] == 0):
                             ledger.ack_export(batch["cursor"])
                 except Exception:

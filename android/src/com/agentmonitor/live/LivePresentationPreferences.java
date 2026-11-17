@@ -9,6 +9,7 @@ public final class LivePresentationPreferences {
     private static final String FILE = "live_presentation_v1";
     public static final String TITLE = "task_title", COMPUTER = "computer", ELAPSED = "elapsed",
             SESSION_TOKENS = "session_tokens", TODAY_TOKENS = "today_tokens", QUOTA = "quota";
+    public static final String LOCKSCREEN_DETAILS = "lockscreen_details";
     public static final String[] KEYS = {TITLE, COMPUTER, ELAPSED, SESSION_TOKENS, TODAY_TOKENS, QUOTA};
     public enum Preset { SIMPLE, BALANCED, RICH, CUSTOM }
 
@@ -24,6 +25,14 @@ public final class LivePresentationPreferences {
     public static void set(Context context, String key, boolean enabled) {
         if (!known(key)) return;
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(key, enabled).apply();
+        TrackingService.refreshPresentation();
+    }
+    /** Independent from the six content choices: a preset must never opt into public details. */
+    public static boolean lockscreenDetails(Context context) {
+        return context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(LOCKSCREEN_DETAILS, false);
+    }
+    public static void setLockscreenDetails(Context context, boolean enabled) {
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(LOCKSCREEN_DETAILS, enabled).apply();
         TrackingService.refreshPresentation();
     }
     /** Presets map to the same six existing keys; no new preference or migration is needed. */

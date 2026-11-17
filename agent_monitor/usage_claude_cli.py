@@ -32,6 +32,7 @@ MAX_OUTPUT = 1024 * 1024
 MAX_LINE = 256 * 1024
 MAX_LIMITS = 64
 WINDOWS = {"session": "five_hour", "weekly_all": "seven_day"}
+WINDOW_MINUTES = {"session": 300, "weekly_all": 10080, "weekly_scoped": 10080}
 SESSION_SAFETY_ARGS = ["--safe-mode", "--settings", '{"disableAllHooks":true}']
 
 
@@ -309,6 +310,27 @@ def _numeric(value):
         return False
 
 
+def _model_scope(scope):
+    """Keep recognized public model labels, never arbitrary server/account text.
+
+    SDKUsageReport explicitly distinguishes model from surface scopes. A model
+    family label stays a family: it does not establish a particular version.
+    """
+    if not isinstance(scope, dict) or set(scope) - {"model", "surface"} or scope.get("surface") is not None:
+        return None
+    model = scope.get("model")
+    label = model.get("display_name") if isinstance(model, dict) else None
+    if not isinstance(label, str) or len(label) > 64:
+        return None
+    match = re.fullmatch(r"(?:Claude )?(Sonnet|Opus|Haiku|Fable|Mythos)(?: ([0-9]{1,2}(?:\.[0-9]{1,2})?))?", label, re.I)
+    if not match:
+        return None
+    family, version = match.groups()
+    name = family.title() + (" " + version if version else "")
+    identifier = "claude-" + family.lower() + ("-" + version.replace(".", "-") if version else "")
+    return identifier, name
+
+
 def _report_windows(report: dict) -> tuple[str, dict | None]:
     rate_limits = report.get("rate_limits")
     rows = rate_limits.get("limits") if isinstance(rate_limits, dict) else None
@@ -316,20 +338,27 @@ def _report_windows(report: dict) -> tuple[str, dict | None]:
         return "no_live_limits", None
     if not isinstance(rows, list) or len(rows) > MAX_LIMITS:
         return "invalid_report", None
-    windows = {}
+    windows, normalized, seen = {}, [], set()
+    complete = True
     for row in rows:
         if not isinstance(row, dict):
             return "invalid_report", None
         kind = row.get("kind")
-        if not isinstance(kind, str) or kind not in WINDOWS:
-            # New/scoped meters must never be relabelled as an account total.
+        scope = row.get("scope")
+        model = _model_scope(scope) if kind == "weekly_scoped" else None
+        unscoped = scope is None or (isinstance(scope, dict)
+            and not set(scope) - {"model", "surface"} and all(value is None for value in scope.values()))
+        if not isinstance(kind, str) or kind not in WINDOW_MINUTES or (kind == "weekly_scoped" and model is None) or (kind in WINDOWS and not unscoped):
+            # An unrecognized/surface meter is not an account total or proof
+            # that a previously understood meter has disappeared.
+            complete = False
             continue
-        if row.get("scope") is not None:
-            continue
-        slot = WINDOWS[kind]
-        if slot in windows:
+        bucket = model[0] if model else "account"
+        identity = (kind, bucket)
+        if identity in seen:
             # Even identical duplicate rows may represent different accounts.
             return "ambiguous_windows", None
+        seen.add(identity)
         used, stamp = row.get("percent"), row.get("resets_at")
         if not _numeric(used) or not 0 <= used <= 100:
             return "invalid_report", None
@@ -351,8 +380,16 @@ def _report_windows(report: dict) -> tuple[str, dict | None]:
                     raise ValueError("invalid reset")
             except (ValueError, OverflowError, OSError):
                 return "invalid_report", None
-        windows[slot] = {"used_percentage": used, "resets_at": int(seconds) if seconds is not None else None}
-    return ("ok", windows) if windows else ("no_numeric_windows", None)
+        value = {"used_percentage": used, "resets_at": int(seconds) if seconds is not None else None}
+        if kind in WINDOWS:
+            windows[WINDOWS[kind]] = value
+        normalized.append({"kind": kind, "bucket_id": bucket,
+            "bucket_label": model[1] if model else "全部模型", "model": model[0] if model else None,
+            "window_minutes": WINDOW_MINUTES[kind], **value})
+    snapshot = {"rate_limits": windows, "quota_windows": normalized, "snapshot_complete": complete}
+    # An explicit successful empty array means absence; a null/unknown shape
+    # cannot retract last-known readings. Never manufacture zero-percent rows.
+    return ("ok", snapshot) if normalized else ("no_numeric_windows", snapshot if complete else None)
 
 
 def parse_usage_output(raw: bytes, observed_at: datetime) -> ClaudeQuotaRead:
@@ -389,13 +426,13 @@ def parse_usage_output(raw: bytes, observed_at: datetime) -> ClaudeQuotaRead:
         return ClaudeQuotaRead("no_usage_report")
     if len(reports) != 1 or not isinstance(reports[0], dict):
         return ClaudeQuotaRead("ambiguous_reports")
-    status, windows = _report_windows(reports[0])
-    if windows is None:
+    status, snapshot = _report_windows(reports[0])
+    if snapshot is None:
         return ClaudeQuotaRead(status)
     if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
         return ClaudeQuotaRead("invalid_observation_time")
-    return ClaudeQuotaRead("ok", {"observed_at": observed_at.astimezone(timezone.utc).isoformat(
-        timespec="microseconds").replace("+00:00", "Z"), "rate_limits": windows})
+    return ClaudeQuotaRead(status, {"observed_at": observed_at.astimezone(timezone.utc).isoformat(
+        timespec="microseconds").replace("+00:00", "Z"), **snapshot})
 
 
 class ClaudeCliQuotaReader:
@@ -517,7 +554,9 @@ class ClaudeCliQuotaReader:
                 result = self._read(now + TOTAL_TIMEOUT)
             except Exception:
                 result = ClaudeQuotaRead("reader_failed")
-            if result.status == "ok":
+            if result.status == "ok" or (result.status == "no_numeric_windows"
+                    and isinstance(result.snapshot, dict) and result.snapshot.get("snapshot_complete") is True
+                    and result.snapshot.get("quota_windows") == []):
                 self._failures = 0
                 delay = MIN_INTERVAL
             else:

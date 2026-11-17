@@ -66,7 +66,7 @@ public final class ServerSettings {
     }
     private static void restartBody(Activity activity, NativeUi ui, LinearLayout content) {
         content.removeAllViews();
-        content.addView(ui.text("地址已保存。关闭后重新打开 Monitor，新地址才会生效。", 15));
+        content.addView(ui.text("地址已保存\n关闭后重新打开 Monitor，新地址才会生效", 15));
         content.addView(ui.space(16));
         content.addView(ui.button("关闭应用", () -> closeForRestart(activity)), new LinearLayout.LayoutParams(-1,-2));
     }
@@ -78,7 +78,7 @@ public final class ServerSettings {
             restartBody(activity, ui, content); sheet.body(content); sheet.show(); return sheet;
         }
         if (legacyConnection(activity)) {
-            content.addView(ui.text("检测到旧版连接，但没有保存服务器地址。请先清除本机旧连接，再设置地址并重新登录。", 15));
+            content.addView(ui.text("检测到旧版连接，但没有保存服务器地址\n请先清除本机旧连接，再设置地址并重新登录", 15));
             content.addView(ui.space(16));
             content.addView(ui.button("清除旧连接…", () -> { sheet.dismiss(); resetLegacy.run(); }), new LinearLayout.LayoutParams(-1,-2));
             sheet.body(content); sheet.show(); return sheet;
@@ -90,21 +90,21 @@ public final class ServerSettings {
         address.setText(origin(activity)); address.setPadding(ui.dp(14),ui.dp(14),ui.dp(14),ui.dp(14));
         address.setBackground(ui.bordered(ui.bg,16)); address.setContentDescription("HTTPS 服务器地址");
         content.addView(address,new LinearLayout.LayoutParams(-1,-2)); content.addView(ui.space(16));
-        TextView message=ui.text("填写你部署的 Monitor 地址。",14); message.setTextColor(ui.muted);
+        TextView message=ui.text("填写你部署的 Monitor 地址",14); message.setTextColor(ui.muted);
         content.addView(message); content.addView(ui.space(16));
         TextView save=ui.button("保存", () -> {
             String candidate = NativeWebPolicy.canonicalOrigin(address.getText().toString().trim());
-            if (candidate.isEmpty()) { message.setText("请使用 HTTPS 地址，不含路径、参数或非标准端口。"); return; }
+            if (candidate.isEmpty()) { message.setText("请使用 HTTPS 地址，不含路径、参数或非标准端口"); return; }
             if (candidate.equals(origin(activity))) { sheet.dismiss(); return; }
-            if (hasConnection(activity)) { message.setText("更换服务器前，请先完成退出登录并取消待确认的连接。"); return; }
+            if (hasConnection(activity)) { message.setText("更换服务器前，请先完成退出登录并取消待确认的连接"); return; }
             if (!activity.getSharedPreferences("monitor_server_v1",Context.MODE_PRIVATE).edit()
                     .putString("origin",candidate).putBoolean("pending_origin_change",true).commit()) {
-                message.setText("保存失败，请重试。"); return;
+                message.setText("保存失败，请重试"); return;
             }
             // Do not retarget any worker in this process, even after a successful local logout.
             restartBody(activity, ui, content);
         });
-        if(hasConnection(activity)) { address.setEnabled(false); save.setVisibility(View.GONE); message.setText("更换服务器前，请先完成退出登录。"); }
+        if(hasConnection(activity)) { address.setEnabled(false); save.setVisibility(View.GONE); message.setText("更换服务器前，请先完成退出登录"); }
         content.addView(save,new LinearLayout.LayoutParams(-1,-2)); sheet.body(content); sheet.show(); return sheet;
     }
 }

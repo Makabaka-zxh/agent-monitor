@@ -1,8 +1,9 @@
 """Passive, incremental usage accounting. This is an observed-log ledger, not billing.
 
-Only numeric usage and opaque identifiers leave this module. No credentials,
-conversation text, command execution, account requests, or provider configuration
-are involved. Missing records, ambiguous resets and midnight gaps remain partial.
+Only numeric usage, opaque keys and validated public model/quota metadata leave
+this module. No credentials, conversation text, command execution, account
+requests, or provider configuration are involved. Missing records, ambiguous
+resets and midnight gaps remain partial.
 """
 from __future__ import annotations
 
@@ -39,6 +40,8 @@ ACTIVE_METADATA_SECONDS = 0.1
 HISTORY_ANCHOR_BYTES = 2 * 1024 * 1024
 HISTORY_ANCHOR_FILES = 8
 MAX_BATCH = 200
+MAX_QUOTA_WINDOWS = 64
+USAGE_WIRE_VERSION = 2
 MAX_PENDING_BYTES = 4 * 1024 * 1024
 QUOTA_TAIL_FILES = 8
 QUOTA_TAIL_BYTES = 256 * 1024
@@ -47,6 +50,34 @@ QUOTA_TAIL_SECONDS = 0.4
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FIELDS = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens")
 BASES = {"own", "independent", "inherited", "unknown"}
+
+
+def _model(value, tool):
+    """Only public model identifiers, never free-form labels or account data."""
+    if not isinstance(value, str) or len(value) > 96:
+        return None
+    value = value.lower()
+    pattern = r"(?:gpt-[a-z0-9]|o[1-9])[a-z0-9._:-]*" if tool == "codex" else r"claude-[a-z0-9][a-z0-9._:-]*"
+    return value if re.fullmatch(pattern, value) else None
+
+
+def _bucket_label(value):
+    if not isinstance(value, str) or len(value) > 96:
+        return None
+    # Preserve provider/model meter names, not arbitrary names returned in a
+    # future account-scoped field. A missing label never becomes a model.
+    if value in {"全部模型", "总额度"}:
+        return value
+    if (re.fullmatch(r"(?:Codex|Claude|ChatGPT)(?: (?:Code|Spark|Pro|Plus))?", value)
+            or re.fullmatch(r"(?:GPT|gpt)-[0-9][A-Za-z0-9._:-]{0,80}", value)
+            or re.fullmatch(r"(?:Sonnet|Opus|Haiku|Fable|Mythos|sonnet|opus|haiku|fable|mythos)(?: [0-9]+(?:[.\-][0-9]+)*)?", value)):
+        return value
+    return None
+
+
+def _quota_metadata(tool, bucket, label=None, model=None):
+    return {"bucket_id": _hash("usage-quota-bucket", tool, bucket),
+            "bucket_label": _bucket_label(label), "model": _model(model, tool)}
 
 
 def _now(value=None):
@@ -224,6 +255,10 @@ class UsageLedger:
             quota_id TEXT PRIMARY KEY, tool TEXT NOT NULL, device_id TEXT NOT NULL,
             window_key TEXT NOT NULL, used_percent REAL NOT NULL, window_minutes INTEGER NOT NULL,
             resets_at INTEGER, observed_at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS usage_quota_snapshots (
+            tool TEXT NOT NULL,device_id TEXT NOT NULL,bucket_id TEXT NOT NULL,
+            observed_at TEXT NOT NULL,active_keys TEXT NOT NULL DEFAULT '[]',known_keys TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY(tool,device_id,bucket_id));
           CREATE TABLE IF NOT EXISTS usage_files (
             path TEXT PRIMARY KEY, root TEXT NOT NULL, tool TEXT NOT NULL,
             identity TEXT, offset INTEGER NOT NULL DEFAULT 0, head_hash TEXT, head_len INTEGER,
@@ -237,9 +272,20 @@ class UsageLedger:
             self.db.execute("ALTER TABLE usage_files ADD COLUMN mtime REAL NOT NULL DEFAULT 0")
         event_columns = {row[1] for row in self.db.execute("PRAGMA table_info(usage_events)")}
         for name, kind in (("counter_key", "TEXT"), ("anchor_input", "INTEGER"),
-                           ("anchor_output", "INTEGER"), ("anchor_at", "TEXT")):
+                           ("anchor_output", "INTEGER"), ("anchor_at", "TEXT"),
+                           ("model", "TEXT"), ("model_input_tokens", "INTEGER"),
+                           ("model_output_tokens", "INTEGER"), ("model_conflict", "INTEGER NOT NULL DEFAULT 0")):
             if name not in event_columns:
                 self.db.execute(f"ALTER TABLE usage_events ADD COLUMN {name} {kind}")
+        quota_columns = {row[1] for row in self.db.execute("PRAGMA table_info(usage_quotas)")}
+        for name, kind in (("bucket_id", "TEXT"), ("bucket_label", "TEXT"), ("model", "TEXT"),
+                           ("present", "INTEGER NOT NULL DEFAULT 1")):
+            if name not in quota_columns:
+                self.db.execute(f"ALTER TABLE usage_quotas ADD COLUMN {name} {kind}")
+        if "active_keys" not in {row[1] for row in self.db.execute("PRAGMA table_info(usage_quota_snapshots)")}:
+            self.db.execute("ALTER TABLE usage_quota_snapshots ADD COLUMN active_keys TEXT NOT NULL DEFAULT '[]'")
+        if "known_keys" not in {row[1] for row in self.db.execute("PRAGMA table_info(usage_quota_snapshots)")}:
+            self.db.execute("ALTER TABLE usage_quota_snapshots ADD COLUMN known_keys TEXT NOT NULL DEFAULT '[]'")
         if "owner_key" not in {row[1] for row in self.db.execute("PRAGMA table_info(usage_sessions)")}:
             self.db.execute("ALTER TABLE usage_sessions ADD COLUMN owner_key TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS usage_sessions_owner ON usage_sessions(owner_key)")
@@ -785,6 +831,12 @@ class UsageLedger:
                             # a new zero-based independent conversation.
                             meta.update(basis="unknown", independent_candidate=False)
                 return
+            if record.get("type") == "turn_context":
+                # This is the model recorded for this turn, not an inferred
+                # model from the plan name or the latest session-wide setting.
+                # Bad/missing context explicitly clears the previous turn.
+                meta["model"] = _model(payload.get("model"), "codex")
+                return
             if record.get("type") != "event_msg" or payload.get("type") != "token_count" or not stamp:
                 return
             self._codex_quotas(payload.get("rate_limits"), stamp, now)
@@ -818,6 +870,13 @@ class UsageLedger:
                 meta["counter_seen"] = True
             event = dict(numbers, tool="codex", session_key=meta["session_key"], occurred_at=stamp,
                          observed_at=_iso(now), final=True, basis=basis, started_at=meta.get("started_at"))
+            # Only the last response vector can establish model attribution of
+            # a cumulative delta. _upsert checks that it is exactly this delta.
+            explicit_model = payload.get("model", info.get("model"))
+            event["model"] = (_model(explicit_model, "codex") if explicit_model is not None
+                              else meta.get("model"))
+            if last:
+                event.update(model_input_tokens=last["input_tokens"], model_output_tokens=last["output_tokens"])
             if meta.get("counter_key"):
                 event.update({key: meta.get(key) for key in ("counter_key", "anchor_input", "anchor_output", "anchor_at")})
             event["event_key"] = _event_key(event)
@@ -842,22 +901,43 @@ class UsageLedger:
                          session_key=session_key, occurred_at=stamp, observed_at=_iso(now),
                          final=isinstance(message.get("stop_reason"), str) and bool(message.get("stop_reason")),
                          basis="own", started_at=None)
+            event["model"] = _model(message.get("model"), "claude")
         self._upsert(event, "local", local=True)
 
     def _codex_quotas(self, limits, stamp, now):
         if not isinstance(limits, dict):
             return
-        limit_id = _id(limits.get("limit_id")) or "codex"
+        raw_id = limits.get("limit_id", limits.get("limitId"))
+        limit_id = _id(raw_id) if raw_id is not None else "codex"
+        if limit_id is None:
+            self._stat("invalid_quotas")
+            return
+        metadata = _quota_metadata("codex", limit_id, limits.get("limit_name", limits.get("limitName")), limits.get("model"))
+        active, known = [], []
+        complete = all(slot in limits for slot in ("primary", "secondary"))
         for slot in ("primary", "secondary"):
+            key = _hash("codex-limit", limit_id, slot)
+            known.append(key)
             window = limits.get(slot)
-            if not isinstance(window, dict):
+            if window is None:
                 continue
-            quota = {"tool": "codex", "key": _hash("codex-limit", limit_id, slot),
-                     "used_percent": window.get("used_percent"), "window_minutes": window.get("window_minutes"),
-                     "resets_at": window.get("resets_at"), "observed_at": stamp}
+            if not isinstance(window, dict):
+                complete = False
+                continue
+            quota = {"tool": "codex", "key": key, **metadata,
+                     "used_percent": window.get("used_percent", window.get("usedPercent")),
+                     "window_minutes": window.get("window_minutes", window.get("windowDurationMins")),
+                     "resets_at": window.get("resets_at", window.get("resetsAt")), "observed_at": stamp}
             if self._valid_quota(quota, now):
                 self._quota(quota, "local", local=True)
+                active.append(key)
             else:
+                complete = False
+                self._stat("invalid_quotas")
+        if complete:
+            status = self._finish_quota_snapshot("codex", "local", metadata["bucket_id"], active, stamp,
+                                                local=True, known_keys=known)
+            if status == "conflict":
                 self._stat("invalid_quotas")
 
     def _upsert(self, event, device_id, *, local=False):
@@ -868,14 +948,21 @@ class UsageLedger:
             if old["tool"] != event["tool"] or old["session_key"] != event["session_key"]:
                 self.db.execute("UPDATE usage_events SET conflict=1 WHERE event_key=?", (key,))
                 self._stat("identity_conflicts")
+                if local and not old["conflict"]:
+                    self._changed("event", key)
                 return False
             if event["tool"] == "codex":
+                self._merge_duplicate_model(old, event, local=local)
                 return False
             same = all(old[field] == event[field] for field in FIELDS)
             if old["final"]:
                 if event["final"] and not same:
                     self.db.execute("UPDATE usage_events SET conflict=1 WHERE event_key=?", (key,))
                     self._stat("usage_conflicts")
+                    if local and not old["conflict"]:
+                        self._changed("event", key)
+                elif event["final"] and same:
+                    self._merge_duplicate_model(old, event, local=local)
                 return False
             # Never construct a usage vector from component-wise maxima. Older
             # placeholders cannot replace final or newer accumulated output.
@@ -885,27 +972,103 @@ class UsageLedger:
                    for field in ("input_tokens", "cached_input_tokens", "cache_write_tokens")):
                 self.db.execute("UPDATE usage_events SET conflict=1 WHERE event_key=?", (key,))
                 self._stat("usage_conflicts")
+                if local and not old["conflict"]:
+                    self._changed("event", key)
                 return False
             if not event["final"] and (same or event["output_tokens"] < old["output_tokens"]):
                 return False
             if event["output_tokens"] < old["output_tokens"]:
                 self.db.execute("UPDATE usage_events SET conflict=1 WHERE event_key=?", (key,))
                 self._stat("usage_conflicts")
+                if local and not old["conflict"]:
+                    self._changed("event", key)
                 return False
         day = _day(event["occurred_at"]) if event["tool"] == "claude" and event["final"] else None
         contribution = event["total_tokens"] if day else None
+        model = _model(event.get("model"), event["tool"])
+        model_conflict = int(bool((old["model_conflict"] if old else 0) or event.get("model_conflict", False)))
+        if old and old["model"] and model and old["model"] != model:
+            model_conflict = 1
+        if old and model is None:
+            model = old["model"]
         if event["tool"] == "codex":
+            previous = self.db.execute("SELECT * FROM usage_sessions WHERE session_key=?",
+                                       (event.get("counter_key") or event["session_key"],)).fetchone()
+            if previous:
+                baseline = previous["high_input"], previous["high_output"]
+            elif event.get("anchor_input") is not None:
+                baseline = event["anchor_input"], event["anchor_output"]
+            elif event["basis"] == "independent":
+                baseline = 0, 0
+            else:
+                baseline = None
             day, contribution = self._codex_advance(event)
+            if (contribution is None or baseline is None
+                    or event.get("model_input_tokens") != event["input_tokens"] - baseline[0]
+                    or event.get("model_output_tokens") != event["output_tokens"] - baseline[1]):
+                model = None
+                # A matching total alone is insufficient on replay: preserve
+                # no attribution proof when the input/output components fail.
+                event["model_input_tokens"] = event["model_output_tokens"] = None
+        if model_conflict:
+            model = None
         values = [event[k] for k in ("event_key", "tool", "session_key", "occurred_at", "observed_at", *FIELDS,
                                    "total_tokens", "final", "basis", "started_at")]
         self.db.execute("""INSERT OR REPLACE INTO usage_events(event_key,tool,session_key,occurred_at,observed_at,
             input_tokens,output_tokens,cached_input_tokens,cache_write_tokens,total_tokens,final,basis,started_at,
-            day,contribution,conflict,counter_key,anchor_input,anchor_output,anchor_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            day,contribution,conflict,counter_key,anchor_input,anchor_output,anchor_at,
+            model,model_input_tokens,model_output_tokens,model_conflict) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (*values, day, contribution, old["conflict"] if old else 0,
-                         *(event.get(key) for key in ("counter_key", "anchor_input", "anchor_output", "anchor_at"))))
+                         *(event.get(key) for key in ("counter_key", "anchor_input", "anchor_output", "anchor_at")),
+                         model, event.get("model_input_tokens"), event.get("model_output_tokens"), model_conflict))
         if local:
             self._changed("event", key)
         return True
+
+    def _merge_duplicate_model(self, old, event, *, local):
+        """Enrich an identical event without adding usage or changing its key."""
+        model = _model(event.get("model"), event["tool"])
+        if event.get("model_conflict") is True and not old["model_conflict"]:
+            self.db.execute("UPDATE usage_events SET model=NULL,model_conflict=1 WHERE event_key=?", (old["event_key"],))
+            if local:
+                self._changed("event", old["event_key"])
+            return
+        if model is None or old["model_conflict"] or old["conflict"]:
+            return
+        if event["tool"] == "codex":
+            if old["model"] is None and event["occurred_at"] != old["occurred_at"]:
+                # A later unchanged cumulative counter can belong to a new
+                # turn. Its current model is not evidence for earlier usage.
+                return
+            proof = (event.get("model_input_tokens"), event.get("model_output_tokens"))
+            if any(value is None for value in proof) or old["contribution"] is None or sum(proof) != old["contribution"]:
+                return
+            stored = old["model_input_tokens"], old["model_output_tokens"]
+            if proof != stored:
+                # A v1 hub row has no model proof. Reconstruct its exact input
+                # and output delta rather than accepting a matching total.
+                previous = self.db.execute("""SELECT input_tokens,output_tokens FROM usage_events
+                    WHERE tool='codex' AND COALESCE(counter_key,session_key)=? AND occurred_at<?
+                    ORDER BY occurred_at DESC,event_key DESC LIMIT 1""",
+                    (old["counter_key"] or old["session_key"], old["occurred_at"])).fetchone()
+                if previous:
+                    baseline = previous["input_tokens"], previous["output_tokens"]
+                elif old["counter_key"] and old["anchor_input"] is not None and old["anchor_output"] is not None:
+                    baseline = old["anchor_input"], old["anchor_output"]
+                elif old["basis"] == "independent" and old["started_at"] and _day(old["started_at"]) == old["day"]:
+                    baseline = 0, 0
+                else:
+                    return
+                if proof != (old["input_tokens"] - baseline[0], old["output_tokens"] - baseline[1]):
+                    return
+        if old["model"] == model:
+            return
+        conflict = bool(old["model"] and old["model"] != model)
+        self.db.execute("UPDATE usage_events SET model=?,model_conflict=?,model_input_tokens=?,model_output_tokens=? WHERE event_key=?",
+                        (None if conflict else model, int(conflict), event.get("model_input_tokens"),
+                         event.get("model_output_tokens"), old["event_key"]))
+        if local:
+            self._changed("event", old["event_key"])
 
     def _codex_advance(self, event):
         key, stamp = event.get("counter_key") or event["session_key"], event["occurred_at"]
@@ -953,16 +1116,26 @@ class UsageLedger:
 
     @staticmethod
     def _valid_quota(quota, now):
-        if not isinstance(quota, dict) or quota.get("tool") not in {"codex", "claude"}:
+        if (not isinstance(quota, dict) or not isinstance(quota.get("tool"), str)
+                or quota["tool"] not in {"codex", "claude"}):
             return False
         if not isinstance(quota.get("key"), str) or not HEX64.fullmatch(quota["key"]):
             return False
         percent, minutes, reset = quota.get("used_percent"), quota.get("window_minutes"), quota.get("resets_at")
-        if type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100:
+        if quota.get("present", True) is False:
+            if percent is not None:
+                return False
+        elif quota.get("present", True) is not True or type(percent) not in (int, float) or not 0 <= percent <= 100 or not math.isfinite(percent):
             return False
         if _int(minutes, 525600) is None or minutes == 0:
             return False
         if reset is not None and (_int(reset, int(now.timestamp()) + 366 * 86400) is None or reset < 946684800):
+            return False
+        if quota.get("bucket_id") is not None and (not isinstance(quota["bucket_id"], str) or not HEX64.fullmatch(quota["bucket_id"])):
+            return False
+        if quota.get("bucket_label") is not None and _bucket_label(quota["bucket_label"]) is None:
+            return False
+        if quota.get("model") is not None and _model(quota["model"], quota["tool"]) is None:
             return False
         return _stamp(quota.get("observed_at"), now) is not None
 
@@ -970,13 +1143,82 @@ class UsageLedger:
         key = _hash("quota-source", device_id, quota["tool"], quota["key"])
         old = self.db.execute("SELECT * FROM usage_quotas WHERE quota_id=?", (key,)).fetchone()
         stamp = quota["observed_at"]
-        if old and stamp <= old["observed_at"]:
+        if old and stamp < old["observed_at"]:
             return False
-        self.db.execute("INSERT OR REPLACE INTO usage_quotas VALUES(?,?,?,?,?,?,?,?)", (
-            key, quota["tool"], device_id, quota["key"], quota["used_percent"], quota["window_minutes"], quota.get("resets_at"), stamp))
+        bucket = quota.get("bucket_id") or (old["bucket_id"] if old else None)
+        for snapshot in self.db.execute("SELECT * FROM usage_quota_snapshots WHERE tool=? AND device_id=? AND (bucket_id IN (?, '*') OR ? IS NULL)",
+                                        (quota["tool"], device_id, bucket, bucket)):
+            if snapshot["bucket_id"] not in (bucket, "*") and quota["key"] not in json.loads(snapshot["known_keys"]):
+                continue
+            if stamp < snapshot["observed_at"]:
+                return False
+            if stamp == snapshot["observed_at"]:
+                # A complete membership snapshot can arrive before a numeric
+                # page. Admit only its active members at that exact time.
+                active = quota["key"] in json.loads(snapshot["active_keys"])
+                if bool(quota.get("present", True)) != active:
+                    return False
+        if old and stamp == old["observed_at"]:
+            present = quota.get("present", True)
+            if (bool(old["present"]) != present or old["window_minutes"] != quota["window_minutes"]
+                    or old["resets_at"] != quota.get("resets_at")
+                    or present and old["used_percent"] != quota["used_percent"]):
+                return False
+            metadata = ("bucket_id", "bucket_label", "model")
+            if any(old[field] is not None and quota.get(field) is not None and old[field] != quota[field] for field in metadata):
+                return False
+            filled = {field: old[field] if old[field] is not None else quota.get(field) for field in metadata}
+            if all(filled[field] == old[field] for field in metadata):
+                return False
+            self.db.execute("UPDATE usage_quotas SET bucket_id=?,bucket_label=?,model=? WHERE quota_id=?",
+                            (filled["bucket_id"], filled["bucket_label"], filled["model"], key))
+            if local:
+                self._changed("quota", key)
+            return True
+        self.db.execute("""INSERT OR REPLACE INTO usage_quotas(quota_id,tool,device_id,window_key,used_percent,
+            window_minutes,resets_at,observed_at,bucket_id,bucket_label,model,present) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            key, quota["tool"], device_id, quota["key"], quota["used_percent"] if quota.get("present", True) else 0,
+            quota["window_minutes"], quota.get("resets_at"), stamp, bucket,
+            quota.get("bucket_label", old["bucket_label"] if old else None),
+            quota.get("model", old["model"] if old else None), int(quota.get("present", True))))
         if local:
             self._changed("quota", key)
         return True
+
+    def _finish_quota_snapshot(self, tool, device_id, bucket, active, stamp, *, local, known_keys=()):
+        """Only an explicitly complete, validated newer observation can remove windows."""
+        where, args = "tool=? AND device_id=?", [tool, device_id]
+        if bucket != "*":
+            placeholders = ",".join("?" for _ in known_keys) or "NULL"
+            where += f" AND (bucket_id=? OR (bucket_id IS NULL AND window_key IN ({placeholders})))"
+            args.extend([bucket, *known_keys])
+        old = self.db.execute("SELECT * FROM usage_quota_snapshots WHERE tool=? AND device_id=? AND bucket_id=?",
+                              (tool, device_id, bucket)).fetchone()
+        rows = self.db.execute("SELECT * FROM usage_quotas WHERE " + where, args).fetchall()
+        active, known_keys = sorted(active), sorted(known_keys)
+        if old and stamp == old["observed_at"]:
+            return "duplicate" if (active == json.loads(old["active_keys"])
+                                    and known_keys == json.loads(old["known_keys"])) else "conflict"
+        related = self.db.execute("SELECT bucket_id,observed_at FROM usage_quota_snapshots WHERE tool=? AND device_id=?",
+                                  (tool, device_id)).fetchall()
+        if ((old and stamp < old["observed_at"]) or any(row["observed_at"] > stamp for row in rows)
+                or any(row["observed_at"] > stamp for row in related if bucket == "*" or row["bucket_id"] == "*")):
+            return "stale"
+        if any(row["observed_at"] == stamp and row["bucket_id"] != bucket for row in related
+               if bucket == "*" or row["bucket_id"] == "*"):
+            return "conflict"
+        if any(row["observed_at"] == stamp and bool(row["present"]) != (row["window_key"] in active) for row in rows):
+            return "conflict"
+        for row in rows:
+            if row["window_key"] not in active and row["observed_at"] < stamp:
+                self.db.execute("UPDATE usage_quotas SET present=0,observed_at=? WHERE quota_id=?", (stamp, row["quota_id"]))
+                if local:
+                    self._changed("quota", row["quota_id"])
+        self.db.execute("INSERT OR REPLACE INTO usage_quota_snapshots VALUES(?,?,?,?,?,?)",
+                        (tool, device_id, bucket, stamp, json.dumps(active), json.dumps(known_keys)))
+        if local:
+            self._changed("quota_snapshot", json.dumps([tool, bucket], separators=(",", ":")))
+        return "applied"
 
     def ingest_claude_quota(self, payload, now=None, device_id="local"):
         """Accept only the documented statusline windows, never its text/context.
@@ -989,24 +1231,62 @@ class UsageLedger:
             return {"accepted": 0, "rejected": 1}
         stamp = _stamp(payload.get("observed_at"), now)
         limits = payload.get("rate_limits")
-        if stamp is None or not isinstance(limits, dict):
+        expanded = payload.get("quota_windows")
+        if stamp is None or (expanded is None and not isinstance(limits, dict)):
+            return {"accepted": 0, "rejected": 1}
+        if expanded is not None and (not isinstance(expanded, list) or len(expanded) > MAX_QUOTA_WINDOWS):
             return {"accepted": 0, "rejected": 1}
         accepted = rejected = 0
+        active, seen = [], set()
         with self.lock, self.db:
-            for slot, minutes in (("five_hour", 300), ("seven_day", 10080)):
-                window = limits.get(slot)
+            if expanded is not None:
+                windows = expanded
+            else:
+                windows = [{"kind": slot, "window_minutes": minutes, **window}
+                           for slot, minutes in (("five_hour", 300), ("seven_day", 10080))
+                           if isinstance((window := limits.get(slot)), dict)]
+                rejected += sum(limits.get(slot) is not None and not isinstance(limits.get(slot), dict)
+                                for slot in ("five_hour", "seven_day"))
+            for window in windows:
                 if window is None:
+                    rejected += 1
                     continue
                 if not isinstance(window, dict):
                     rejected += 1
                     continue
-                quota = {"tool": "claude", "key": _hash("claude-statusline-limit", slot),
-                         "used_percent": window.get("used_percentage"), "window_minutes": minutes,
+                slot = window.get("kind")
+                if not isinstance(slot, str):
+                    rejected += 1
+                    continue
+                slot = {"session": "five_hour", "weekly_all": "seven_day"}.get(slot, slot)
+                if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", slot):
+                    rejected += 1
+                    continue
+                bucket = window.get("bucket_id", "account" if slot in {"five_hour", "seven_day"} else slot)
+                if not _id(bucket):
+                    rejected += 1
+                    continue
+                identity = (slot, bucket)
+                if identity in seen:
+                    rejected += 1
+                    continue
+                seen.add(identity)
+                # Keep established account-window keys for old ledger rows.
+                key = (_hash("claude-statusline-limit", slot) if slot in {"five_hour", "seven_day"} and bucket == "account"
+                       else _hash("claude-scoped-limit", slot, bucket))
+                quota = {"tool": "claude", "key": key,
+                         **_quota_metadata("claude", bucket, window.get("bucket_label"), window.get("model")),
+                         "used_percent": window.get("used_percentage"), "window_minutes": window.get("window_minutes"),
                          "resets_at": window.get("resets_at"), "observed_at": stamp}
                 if self._valid_quota(quota, now):
                     self._quota(quota, device_id, local=device_id == "local")
+                    active.append(key)
                     accepted += 1
                 else:
+                    rejected += 1
+            if expanded is not None and payload.get("snapshot_complete") is True and not rejected:
+                status = self._finish_quota_snapshot("claude", device_id, "*", active, stamp, local=device_id == "local")
+                if status == "conflict":
                     rejected += 1
         return {"accepted": accepted, "rejected": rejected}
 
@@ -1041,18 +1321,33 @@ class UsageLedger:
                 daily = {row["day"]: row["tokens"] for row in self.db.execute("""SELECT day,sum(contribution) AS tokens
                     FROM usage_events WHERE tool=? AND day>=? AND day<=? AND occurred_at<=?"""
                     + scope_sql + " GROUP BY day", (tool, history_days[0], day, _iso(now), *scope_args))}
+                models = {}
+                for row in self.db.execute("""WITH observed AS (
+                    SELECT day,model,contribution FROM usage_events
+                    WHERE tool=? AND day>=? AND day<=? AND occurred_at<=? AND model IS NOT NULL
+                    AND conflict=0 AND model_conflict=0""" + scope_sql + """), top_models AS (
+                    SELECT model FROM observed GROUP BY model ORDER BY sum(contribution) DESC,model LIMIT 32)
+                    SELECT day,model,sum(contribution) AS tokens FROM observed
+                    WHERE model IN (SELECT model FROM top_models) GROUP BY day,model ORDER BY day,tokens DESC,model""",
+                    (tool, history_days[0], day, _iso(now), *scope_args)):
+                    if row["tokens"] is not None:
+                        models.setdefault(row["day"], []).append({"model": row["model"], "tokens": row["tokens"]})
                 history = {"start_day": history_days[0], "end_day": day, "timezone": "Asia/Shanghai",
                            "days": [{"day": date, "tokens": daily.get(date),
+                                     "models": models.get(date, []),
+                                     "unknown_model_tokens": (daily[date] - sum(item["tokens"] for item in models.get(date, []))
+                                                               if daily.get(date) is not None else None),
                                      "coverage": "partial" if daily.get(date) is not None else "unavailable"}
                                     for date in history_days]}
                 quotas = []
-                for row in self.db.execute("SELECT * FROM usage_quotas WHERE tool=?" + quota_sql + " ORDER BY device_id,window_minutes",
+                for row in self.db.execute("SELECT * FROM usage_quotas WHERE tool=? AND present=1" + quota_sql + " ORDER BY device_id,bucket_id,window_minutes",
                                            (tool, *scope_args)):
                     minutes = row["window_minutes"]
                     label = f"{minutes // 1440} 天" if minutes % 1440 == 0 else f"{minutes // 60} 小时" if minutes % 60 == 0 else f"{minutes} 分钟"
                     observed = datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00"))
                     expired = row["resets_at"] is not None and row["resets_at"] <= now.timestamp()
                     quotas.append({"key": row["window_key"], "label": label, "used_percent": row["used_percent"],
+                                   "bucket_id": row["bucket_id"], "bucket_label": row["bucket_label"], "model": row["model"],
                                    "remaining_percent": max(0, min(100, 100 - row["used_percent"])),
                                    "window_minutes": minutes, "resets_at": row["resets_at"],
                                    "observed_at": row["observed_at"], "source_device_id": row["device_id"],
@@ -1132,14 +1427,33 @@ class UsageLedger:
         if row["tool"] == "codex" and row["counter_key"]:
             result.update({key: row[key] for key in ("counter_key", "anchor_input", "anchor_output", "anchor_at")})
         result["final"] = bool(result["final"])
+        conflicted = bool(row["model_conflict"] or row["conflict"])
+        result.update(model=None if conflicted else row["model"], model_conflict=conflicted)
+        if row["tool"] == "codex":
+            result.update({key: row[key] for key in ("model_input_tokens", "model_output_tokens")})
         return result
+
+    @staticmethod
+    def _public_quota(row):
+        # The v2 wire carries only validated public model metadata and opaque
+        # keys. Absence is explicit, never a fabricated zero-percent reading.
+        return {"tool": row["tool"], "key": row["window_key"],
+                "used_percent": row["used_percent"] if row["present"] else None,
+                "window_minutes": row["window_minutes"], "resets_at": row["resets_at"],
+                "observed_at": row["observed_at"], "present": bool(row["present"]),
+                "bucket_id": row["bucket_id"], "bucket_label": row["bucket_label"], "model": row["model"]}
+
+    @staticmethod
+    def _public_quota_snapshot(row):
+        return {"tool": row["tool"], "bucket_id": row["bucket_id"], "observed_at": row["observed_at"],
+                "complete": True, "active_keys": json.loads(row["active_keys"]), "known_keys": json.loads(row["known_keys"])}
 
     def export_batch(self, limit=MAX_BATCH):
         if type(limit) is not int or not 1 <= limit <= MAX_BATCH:
             raise ValueError("invalid export limit")
         with self.lock:
             changes = self.db.execute("SELECT * FROM usage_changes ORDER BY seq LIMIT ?", (limit,)).fetchall()
-            events, quotas, seen = [], [], set()
+            events, quotas, snapshots, seen = [], [], [], set()
             for change in changes:
                 identity = change["kind"], change["item_key"]
                 if identity in seen:
@@ -1149,12 +1463,18 @@ class UsageLedger:
                     row = self.db.execute("SELECT * FROM usage_events WHERE event_key=?", (change["item_key"],)).fetchone()
                     if row:
                         events.append(self._public_event(row))
+                elif change["kind"] == "quota_snapshot":
+                    tool, bucket = json.loads(change["item_key"])
+                    row = self.db.execute("SELECT * FROM usage_quota_snapshots WHERE tool=? AND device_id='local' AND bucket_id=?",
+                                          (tool, bucket)).fetchone()
+                    if row:
+                        snapshots.append(self._public_quota_snapshot(row))
                 else:
                     row = self.db.execute("SELECT * FROM usage_quotas WHERE quota_id=?", (change["item_key"],)).fetchone()
                     if row:
-                        quotas.append({"tool": row["tool"], "key": row["window_key"], "used_percent": row["used_percent"],
-                                       "window_minutes": row["window_minutes"], "resets_at": row["resets_at"], "observed_at": row["observed_at"]})
-            return {"version": 1, "events": events, "quotas": quotas, "cursor": changes[-1]["seq"] if changes else 0}
+                        quotas.append(self._public_quota(row))
+            return {"version": USAGE_WIRE_VERSION, "events": events, "quotas": quotas, "quota_snapshots": snapshots,
+                    "cursor": changes[-1]["seq"] if changes else 0}
 
     def export_quota_batch(self, limit=20):
         """Small current local snapshots, independent of the accounting outbox.
@@ -1169,10 +1489,10 @@ class UsageLedger:
         with self.lock:
             rows = self.db.execute("""SELECT * FROM usage_quotas WHERE device_id='local'
                 ORDER BY observed_at DESC,quota_id LIMIT ?""", (limit,)).fetchall()
-            quotas = [{"tool": row["tool"], "key": row["window_key"], "used_percent": row["used_percent"],
-                       "window_minutes": row["window_minutes"], "resets_at": row["resets_at"],
-                       "observed_at": row["observed_at"]} for row in rows]
-            return {"version": 1, "events": [], "quotas": quotas}
+            quotas = [self._public_quota(row) for row in rows]
+            snapshots = [self._public_quota_snapshot(row) for row in self.db.execute(
+                "SELECT * FROM usage_quota_snapshots WHERE device_id='local' ORDER BY observed_at DESC,tool,bucket_id LIMIT ?", (limit,))]
+            return {"version": USAGE_WIRE_VERSION, "events": [], "quotas": quotas, "quota_snapshots": snapshots}
 
     def ack_export(self, cursor):
         if type(cursor) is not int or cursor < 0:
@@ -1185,7 +1505,8 @@ class UsageLedger:
         if not isinstance(event, dict) or len(event) > 24:
             return None
         tool = event.get("tool")
-        if tool not in {"codex", "claude"} or event.get("basis") not in BASES or type(event.get("final")) is not bool:
+        if (not isinstance(tool, str) or tool not in {"codex", "claude"}
+                or not isinstance(event.get("basis"), str) or event["basis"] not in BASES or type(event.get("final")) is not bool):
             return None
         if any(not isinstance(event.get(k), str) or not HEX64.fullmatch(event[k]) for k in ("event_key", "session_key")):
             return None
@@ -1205,6 +1526,12 @@ class UsageLedger:
         if inp is None or out is None:
             return None
         segment = {}
+        model = _model(event.get("model"), tool)
+        if event.get("model") is not None and model is None:
+            return None
+        if type(event.get("model_conflict", False)) is not bool:
+            return None
+        model_fields = {"model": model, "model_conflict": event.get("model_conflict", False)}
         if tool == "codex":
             if total is None or total != inp + out or cached is not None and cached > inp or write is not None and write > inp:
                 return None
@@ -1222,37 +1549,85 @@ class UsageLedger:
                 segment = dict(counter_key=counter_key, anchor_input=ai, anchor_output=ao, anchor_at=at)
             elif any(event.get(key) is not None for key in ("anchor_input", "anchor_output", "anchor_at")):
                 return None
+            mi, mo = event.get("model_input_tokens"), event.get("model_output_tokens")
+            if any(value is not None for value in (mi, mo)):
+                if _int(mi) is None or _int(mo) is None or mi > inp or mo > out:
+                    return None
+            model_fields.update(model_input_tokens=mi, model_output_tokens=mo)
         elif total != (inp + out + cached + write if cached is not None and write is not None else None):
             return None
         # Strict reconstruction drops arbitrary text, absolute paths and fields.
         return dict(zip((*FIELDS, "total_tokens"), values), tool=tool, session_key=event["session_key"],
                     event_key=event["event_key"], occurred_at=occurred, observed_at=observed, started_at=started,
-                    final=event["final"], basis=event["basis"], **segment)
+                    final=event["final"], basis=event["basis"], **segment, **model_fields)
+
+    @staticmethod
+    def _validate_quota_snapshot(value, now):
+        if (not isinstance(value, dict) or not isinstance(value.get("tool"), str)
+                or value["tool"] not in {"codex", "claude"} or value.get("complete") is not True):
+            return None
+        bucket, stamp = value.get("bucket_id"), _stamp(value.get("observed_at"), now)
+        if not isinstance(bucket, str) or (bucket != "*" and not HEX64.fullmatch(bucket)) or stamp is None:
+            return None
+        active, known = value.get("active_keys"), value.get("known_keys", [])
+        for keys in (active, known):
+            if (not isinstance(keys, list) or len(keys) > MAX_QUOTA_WINDOWS
+                    or any(not isinstance(key, str) or not HEX64.fullmatch(key) for key in keys)
+                    or len(set(keys)) != len(keys)):
+                return None
+        if known and not set(active) <= set(known):
+            return None
+        return {"tool": value["tool"], "bucket_id": bucket, "observed_at": stamp,
+                "active_keys": sorted(active), "known_keys": sorted(known)}
 
     def ingest_batch(self, device_id, payload, now=None):
         now = _now(now)
         if not _id(device_id):
             raise ValueError("invalid source device")
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] not in (1, USAGE_WIRE_VERSION):
             return {"accepted": 0, "rejected": 1}
-        events, quotas = payload.get("events", []), payload.get("quotas", [])
-        if not isinstance(events, list) or not isinstance(quotas, list) or len(events) + len(quotas) > MAX_BATCH:
-            return {"accepted": 0, "rejected": 1}
+        version = payload["version"]
+        response_version = {"version": USAGE_WIRE_VERSION} if version == USAGE_WIRE_VERSION else {}
+        events, quotas, snapshots = payload.get("events", []), payload.get("quotas", []), payload.get("quota_snapshots", [])
+        if (not isinstance(events, list) or not isinstance(quotas, list) or not isinstance(snapshots, list)
+                or len(events) + len(quotas) + len(snapshots) > MAX_BATCH
+                or version == 1 and "quota_snapshots" in payload):
+            return {**response_version, "accepted": 0, "rejected": 1}
         accepted = rejected = 0
+        quota_rejected = False
         with self.lock, self.db:
             for item in events:
-                event = self._validate_event(item, now)
+                extended = {"model", "model_conflict", "model_input_tokens", "model_output_tokens"}
+                event = (None if version == 1 and isinstance(item, dict) and extended.intersection(item)
+                         else self._validate_event(item, now))
                 if event is None:
                     rejected += 1
                 else:
                     self._upsert(event, device_id)
                     accepted += 1
             for quota in quotas:
-                if self._valid_quota(quota, now):
+                extended = {"model", "bucket_id", "bucket_label", "present"}
+                if (not (version == 1 and isinstance(quota, dict) and extended.intersection(quota))
+                        and self._valid_quota(quota, now)):
                     clean = {key: quota.get(key) for key in ("tool", "key", "used_percent", "window_minutes", "resets_at", "observed_at")}
+                    if version == USAGE_WIRE_VERSION:
+                        clean.update({key: quota[key] for key in ("bucket_id", "bucket_label", "model") if key in quota})
+                    clean["present"] = quota.get("present", True)
                     clean["observed_at"] = _stamp(clean["observed_at"], now)
                     self._quota(clean, device_id)
                     accepted += 1
                 else:
                     rejected += 1
-        return {"accepted": accepted, "rejected": rejected}
+                    quota_rejected = True
+            for item in snapshots:
+                snapshot = self._validate_quota_snapshot(item, now)
+                if snapshot is None or quota_rejected:
+                    rejected += 1
+                    continue
+                status = self._finish_quota_snapshot(snapshot["tool"], device_id, snapshot["bucket_id"],
+                    snapshot["active_keys"], snapshot["observed_at"], local=False, known_keys=snapshot["known_keys"])
+                if status == "conflict":
+                    rejected += 1
+                else:
+                    accepted += 1
+        return {**response_version, "accepted": accepted, "rejected": rejected}

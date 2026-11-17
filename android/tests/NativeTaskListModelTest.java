@@ -35,11 +35,14 @@ public final class NativeTaskListModelTest {
         for (int i = 0; i < expected.length; i++) check(expected[i].equals(result.tasks.optJSONObject(i).optString("id")), "selection keeps snapshot order at " + i);
     }
     private static void counts(NativeTaskListModel.Result result, int all, int claude, int codex, int uncertain) {
-        check(java.util.Arrays.equals(result.toolCounts, new int[]{all, claude, codex}), "tool counts describe the query and current scope");
+        counts(result, all, claude, codex, 0, uncertain);
+    }
+    private static void counts(NativeTaskListModel.Result result, int all, int claude, int codex, int antigravity, int uncertain) {
+        check(java.util.Arrays.equals(result.toolCounts, new int[]{all, claude, codex, antigravity}), "tool counts describe the query and current scope");
         check(result.uncertainSelectedTasks == uncertain, "uncertain selected-tool records retain their own source/status semantics");
     }
     public static void main(String[] args) {
-        emptyQueryCompatibility(); searchAndFilters(); scopedComputerPage(); refreshAndInputOwnership(); malformedSnapshots(); allowedFieldsOnly();
+        emptyQueryCompatibility(); searchAndFilters(); antigravityTasks(); scopedComputerPage(); refreshAndInputOwnership(); malformedSnapshots(); allowedFieldsOnly();
         System.out.println("NativeTaskListModelTest: " + checks + " checks passed");
     }
     private static void emptyQueryCompatibility() {
@@ -86,6 +89,23 @@ public final class NativeTaskListModelTest {
         NativeTaskListModel.Result offlineMatches = select("all", "active", "Remote", false);
         ids(offlineMatches); counts(offlineMatches, 0, 0, 0, 1);
         ids(select("all", "all", "  ", false), "t1", "t2", "t3", "t4", "t6", "t7", "t8", "t9");
+    }
+    private static void antigravityTasks() {
+        fixture();
+        tasks = new JSONArray()
+                .put(task("build", "Search feature", "Test", "antigravity", "running", false, "d1"))
+                .put(task("archive", "Search old", "Test", "antigravity", "completed", true, "d1"))
+                .put(task("offline", "Search offline", "Test", "antigravity", "running", false, "d2"))
+                .put(task("completed", "Review changes", "Test", "codex", "completed", false, "d1"))
+                .put(task("claude", "Search index", "Test", "claude", "running", false, "d1"));
+        NativeTaskListModel.Result active = select("antigravity", "active", "search", false);
+        ids(active, "build"); counts(active, 2, 1, 0, 1, 1);
+        NativeTaskListModel.Result all = select("all", "all", "", false);
+        ids(all, "build", "offline", "completed", "claude"); counts(all, 4, 1, 1, 2, 1);
+        NativeTaskListModel.Result history = select("antigravity", "all", "search", false);
+        ids(history, "build", "offline"); counts(history, 3, 1, 0, 2, 1);
+        ids(select("antigravity", "archived", "", false), "archive");
+        ids(NativeTaskListModel.select(tasks, devices, "all", "all", "d1", "", false), "build", "completed", "claude");
     }
     private static void scopedComputerPage() {
         fixture();

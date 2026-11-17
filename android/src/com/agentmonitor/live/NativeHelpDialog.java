@@ -36,20 +36,16 @@ public final class NativeHelpDialog extends Dialog {
         content.setBackground(ui.bordered(ui.surface, 24));
 
         LinearLayout header = ui.row();
-        TextView heading = ui.text(title, 20, true);
+        TextView heading = ui.heading(title, 20);
         if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        View close = ui.iconButton("close", "关闭说明", this::cancel);
+        View close = ui.headerIconButton("close", "关闭说明", this::cancel);
         LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48));
-        // Align the drawn icon to the body inset while preserving its full touch target.
-        closeParams.rightMargin = -ui.dp(12);
         header.addView(close, closeParams);
         content.addView(header);
         content.addView(ui.space(12));
 
-        TextView body = ui.text(message, 15);
-        body.setTextColor(ui.muted);
-        body.setLineSpacing(ui.dp(4), 1.12f);
+        TextView body = ui.body(message, 15);
         content.addView(body, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         content.addView(ui.space(24));
         content.addView(ui.button("知道了", false, this::cancel),

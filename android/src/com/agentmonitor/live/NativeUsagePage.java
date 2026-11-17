@@ -18,7 +18,7 @@ import org.json.JSONObject;
 
 /** Native calendar history and source-scoped quotas. Ticks never rebuild charts. */
 public final class NativeUsagePage {
-    public static final String HELP = "Token 按北京时间统计已连接电脑采集到的记录，可能有历史缺口，并非完整账单。柱状图以周一至周日为一周，最多查看最近 90 天；— 表示未提供，0 表示已记录为零。点选日期可查看准确数字。\n\n套餐周额度是服务方提供的滚动窗口，与图表的日历周不同。百分比只使用服务方的真实读数，不用 Token 推算。额度按来源电脑分别查看，各电脑可能登录不同账号，不能合并。\n\n旧读数会标为上次记录。到达重置时间后等待新额度确认，不会自动显示为已恢复。缓存读取已包含在 Token 总量中，不重复相加。";
+    public static final String HELP = "Token 按北京时间统计已连接电脑采集到的记录，可能有历史缺口，并非完整账单\n柱状图以周一至周日为一周，最多查看最近 90 天；— 表示未提供，0 表示已记录为零\n点选日期可查看准确数字\n\n模型构成是所选日期各模型占已采集 Token 总量的比例，未识别模型也计入分母；不是官方额度消耗比例\n未提供模型记录时不显示该区块\n\n官方额度显示服务方实际返回的窗口及额度组，已用百分比只使用真实读数，不用 Token 推算\n未提供的窗口或模型不显示，也不按套餐名称猜测\n额度按来源电脑分别查看，各电脑可能登录不同账号，不能合并\n模型专属或共享额度组与全账号窗口分别计量\n\n未过期的旧读数会标为上次已用\n无有效读数或已到重置时间的窗口不显示，收到新的有效额度后再显示；不会自动当作已恢复\n缓存读取已包含在 Token 总量中，不重复相加";
     public interface Help { void show(String title, String message); }
     public final LinearLayout view;
     private final NativeUi ui;
@@ -29,6 +29,7 @@ public final class NativeUsagePage {
     private final List<QuotaRow> quotas = new ArrayList<>();
     private String signature = "";
     private TextView status, refresh;
+    private LinearLayout officialSection, localSection;
     private JSONObject summary;
     private boolean busy, failed;
     private static final class Selection {
@@ -72,12 +73,22 @@ public final class NativeUsagePage {
     }
     public void tick() {
         long now = System.currentTimeMillis();
-        for (ProviderCard card : cards) card.updateAmount(now);
+        for (ProviderCard card : cards) { card.updateAmount(now); card.updateQuotas(now); }
         for (QuotaRow quota : quotas) quota.update(now);
+        updateSectionVisibility(); updateStatus();
     }
     private void render() {
         view.removeAllViews(); cards.clear(); quotas.clear();
-        status = ui.text("", 14); status.setTextColor(ui.muted); view.addView(status, wrap()); view.addView(ui.space(12));
+        status = ui.text("", 13); status.setTextColor(ui.muted);
+        LinearLayout.LayoutParams statusLayout = wrap(); statusLayout.bottomMargin = ui.dp(16); view.addView(status, statusLayout);
+        officialSection = ui.column(); TextView officialTitle = ui.heading("官方额度", 20);
+        officialTitle.setContentDescription("官方额度 · 服务方实际读数，各窗口独立已用百分比");
+        officialSection.addView(officialTitle, wrap());
+        view.addView(officialSection, wrap());
+        localSection = ui.column(); TextView localTitle = ui.heading("本地 Token", 20);
+        localTitle.setContentDescription("本地使用 · 已记录 Token，与官方额度分别统计，可能有历史缺口");
+        localSection.addView(localTitle, wrap());
+        view.addView(localSection, wrap());
         JSONArray providers = summary == null ? null : summary.optJSONArray("providers");
         for (String tool : new String[]{"codex", "claude"}) {
             JSONObject data = null;
@@ -85,24 +96,44 @@ public final class NativeUsagePage {
                 JSONObject candidate = providers.optJSONObject(i);
                 if (candidate != null && tool.equals(candidate.optString("tool"))) { data = candidate; break; }
             }
-            ProviderCard card = new ProviderCard(tool, data); cards.add(card); view.addView(card.view, wrap()); view.addView(ui.space(14));
+            ProviderCard card = new ProviderCard(tool, data); cards.add(card);
+            LinearLayout.LayoutParams quotaLayout = wrap(); quotaLayout.topMargin = ui.dp(20); officialSection.addView(card.quotaView, quotaLayout);
+            LinearLayout.LayoutParams localLayout = wrap(); localLayout.topMargin = ui.dp(24); localSection.addView(card.view, localLayout);
         }
-        refresh = ui.button("刷新用量", false, retry); view.addView(refresh, wrap());
-        view.addView(ui.space(10)); view.addView(ui.button("提醒设置", false, reminders), wrap()); updateStatus(); tick();
+        LinearLayout actions = ui.row();
+        refresh = ui.quietButton("刷新用量", retry); actions.addView(refresh, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.addView(ui.quietButton("提醒设置", reminders), new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams actionsLayout = wrap(); actionsLayout.topMargin = ui.dp(24); view.addView(actions, actionsLayout); tick();
+    }
+    private void updateSectionVisibility() {
+        boolean official = false, local = false;
+        for (ProviderCard card : cards) {
+            official |= card.quotaView.getVisibility() == View.VISIBLE;
+            local |= card.view.getVisibility() == View.VISIBLE;
+        }
+        officialSection.setVisibility(official ? View.VISIBLE : View.GONE);
+        localSection.setVisibility(local ? View.VISIBLE : View.GONE);
+        LinearLayout.LayoutParams spacing = (LinearLayout.LayoutParams) localSection.getLayoutParams();
+        int gap = official ? ui.dp(36) : 0;
+        if (spacing.topMargin != gap) { spacing.topMargin = gap; localSection.setLayoutParams(spacing); }
     }
     private void updateStatus() {
         String text = failed ? summary == null ? "暂时无法读取用量" : "连接暂不可用，显示上次记录"
-                : busy ? "正在读取用量" : summary == null ? "等待用量记录" : "";
+                : busy ? "正在读取用量" : summary == null ? "等待用量记录"
+                : officialSection.getVisibility() != View.VISIBLE && localSection.getVisibility() != View.VISIBLE ? "暂无可用用量记录" : "";
         setText(status, text); status.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE); status.setTextColor(failed ? ui.warning : ui.muted);
         refresh.setEnabled(!busy); refresh.setAlpha(busy ? .55f : 1f); setText(refresh, busy ? "正在更新" : "刷新用量");
     }
     private final class ProviderCard {
-        final LinearLayout view = ui.card(), chartArea = ui.column(), quotaArea = ui.column();
+        final LinearLayout view = ui.column(), quotaView = ui.card(), chartArea = ui.column(), modelArea = ui.column(), quotaArea = ui.column();
         final JSONObject data; final Selection state;
-        final TextView caption = ui.text("", 14), amount = ui.text("—", 26, true), unit = ui.text("Token", 13);
+        final TextView caption = ui.text("", 13), amount = ui.text("—", 24, true), unit = ui.text("Token", 13);
         final Map<String, Long> history = new LinkedHashMap<>();
+        final Map<String, JSONObject> modelHistory = new LinkedHashMap<>();
         final List<Source> sources = new ArrayList<>();
-        LocalDate start, today, displayedWeek, displayedDay; boolean hasHistory; TextView weekName;
+        String modelsDay = "";
+        long nextQuotaExpiry = Long.MAX_VALUE;
+        LocalDate start, today, displayedWeek, displayedDay; boolean hasHistory, hasRecordedHistory; TextView weekName;
         ProviderCard(String tool, JSONObject data) {
             this.data = data; Selection found = selections.get(tool);
             if (found == null) { found = new Selection(); selections.put(tool, found); }
@@ -118,22 +149,32 @@ public final class NativeUsagePage {
                     for (int i = 0; days != null && i < Math.min(days.length(), 90); i++) {
                         JSONObject day = days.optJSONObject(i); if (day == null) continue;
                         LocalDate date = NativeUsagePresentation.date(day.optString("day"));
-                        if (date != null && !date.isBefore(start) && !date.isAfter(today) && !date.isAfter(upper))
+                        if (date != null && !date.isBefore(start) && !date.isAfter(today) && !date.isAfter(upper)) {
                             history.put(date.toString(), "unavailable".equals(day.optString("coverage")) ? null : number(day, "tokens"));
+                            modelHistory.put(date.toString(), day);
+                        }
                     }
                 }
             }
-            LinearLayout heading = ui.row(); heading.addView(ui.brand(tool, 28));
-            TextView name = ui.text(tool.equals("codex") ? "Codex" : "Claude Code", 17, true);
-            LinearLayout.LayoutParams words = new LinearLayout.LayoutParams(0, -2, 1); words.leftMargin = ui.dp(10); heading.addView(name, words);
-            heading.addView(ui.iconButton("info", "查看" + name.getText() + "用量说明", () -> help.show(name.getText().toString(), providerHelp(tool, data, findSource(state.saved.source)))));
-            view.addView(heading, wrap()); view.addView(ui.space(8));
-            caption.setTextColor(ui.muted); unit.setTextColor(ui.muted); amount.setSingleLine(true);
-            amount.setAutoSizeTextTypeUniformWithConfiguration(18, 26, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
-            view.addView(caption, wrap()); view.addView(ui.space(7)); view.addView(amount, wrap()); view.addView(ui.space(5)); view.addView(unit, wrap());
-            view.addView(ui.space(10)); view.addView(chartArea, wrap()); renderWeek();
-            view.addView(ui.space(14)); View divider = new View(ui.activity); divider.setBackgroundColor(ui.line); view.addView(divider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
-            view.addView(ui.space(12)); view.addView(quotaArea, wrap()); collectSources(); renderQuotas();
+            for (Long recorded : history.values()) if (recorded != null) { hasRecordedHistory = true; break; }
+            quotaView.addView(providerHeading(tool, "官方额度说明"), wrap()); quotaView.addView(quotaArea, wrap());
+            view.addView(providerHeading(tool, "本地使用说明"), wrap()); view.addView(ui.space(16));
+            caption.setTextColor(ui.muted); unit.setTextColor(ui.muted);
+            // Let long totals wrap at the user's font scale instead of shrinking the main number.
+            view.addView(caption, wrap()); view.addView(ui.space(12)); view.addView(amount, wrap()); view.addView(ui.space(8)); view.addView(unit, wrap());
+            view.addView(ui.space(20)); view.addView(chartArea, wrap()); renderWeek();
+            view.addView(modelArea, wrap()); view.setVisibility(hasRecordedHistory ? View.VISIBLE : View.GONE);
+            renderQuotas();
+        }
+        private LinearLayout providerHeading(String tool, String description) {
+            LinearLayout heading = ui.row(); heading.addView(ui.brand(tool, 24));
+            TextView name = ui.heading(tool.equals("codex") ? "Codex" : "Claude Code", 17);
+            LinearLayout.LayoutParams words = new LinearLayout.LayoutParams(0, -2, 1); words.setMarginStart(ui.dp(8)); heading.addView(name, words);
+            TextView details = ui.quietButton(description,
+                    () -> help.show(name.getText().toString(), providerHelp(tool, data, findSource(state.saved.source))));
+            details.setContentDescription("查看" + name.getText() + description);
+            heading.addView(details);
+            return heading;
         }
         private void renderWeek() {
             chartArea.removeAllViews(); today = NativeUsagePresentation.today(System.currentTimeMillis());
@@ -142,7 +183,7 @@ public final class NativeUsagePage {
             LinearLayout nav = ui.row();
             View previous = ui.iconButton("back", "查看上一周", () -> moveWeek(-1));
             previous.setEnabled(displayedWeek.isAfter(NativeUsagePresentation.monday(start))); previous.setAlpha(previous.isEnabled() ? 1f : .3f); nav.addView(previous);
-            weekName = ui.text("", 14, true); weekName.setGravity(Gravity.CENTER); weekName.setMinHeight(ui.dp(48));
+            weekName = ui.text("", 14); weekName.setTypeface(ui.medium); weekName.setTextColor(ui.muted); weekName.setGravity(Gravity.CENTER); weekName.setMinHeight(ui.dp(48));
             weekName.setBackground(ui.ripple(android.graphics.Color.TRANSPARENT, 12)); weekName.setFocusable(true); weekName.setClickable(true);
             weekName.setAccessibilityDelegate(NativeUi.buttonAccessibility()); weekName.setContentDescription("返回本周");
             weekName.setOnClickListener(v -> { LocalDate current = NativeUsagePresentation.today(System.currentTimeMillis()); state.saved.week = NativeUsagePresentation.monday(current); state.saved.day = current; renderWeek(); });
@@ -161,11 +202,46 @@ public final class NativeUsagePage {
             Long tokens = history.get(displayedDay.toString()); setText(amount, NativeUsagePresentation.exact(tokens));
             setText(unit, tokens != null ? "Token" : !hasHistory && busy ? "正在读取历史" : "暂无可用记录");
             if (weekName != null) setText(weekName, (displayedWeek.equals(NativeUsagePresentation.monday(current)) ? "本周 · " : "") + NativeUsagePresentation.range(displayedWeek));
+            renderModels();
         }
-        private void collectSources() {
+        private void renderModels() {
+            String dayKey = displayedDay.toString(); if (dayKey.equals(modelsDay)) return;
+            modelsDay = dayKey; modelArea.removeAllViews();
+            JSONObject day = modelHistory.get(dayKey); JSONArray models = day == null ? null : day.optJSONArray("models");
+            int count = models == null ? 0 : models.length();
+            if (count == 0 || count > 100) { modelArea.setVisibility(View.GONE); return; }
+            String[] names = new String[count]; Long[] values = new Long[count];
+            for (int i = 0; i < count; i++) {
+                JSONObject model = models.optJSONObject(i); if (model == null) continue;
+                names[i] = model.optString("model", ""); values[i] = number(model, "tokens");
+            }
+            NativeUsagePresentation.ModelShare[] shares = NativeUsagePresentation.modelShares(names, values,
+                    number(day, "unknown_model_tokens"), history.get(dayKey));
+            modelArea.setVisibility(shares.length == 0 ? View.GONE : View.VISIBLE); if (shares.length == 0) return;
+            modelArea.addView(ui.space(24)); TextView modelTitle = ui.heading("模型 Token 占比", 16);
+            modelTitle.setContentDescription("模型构成 · 所选日期各模型占已采集 Token 总量的比例，未识别模型也计入分母，不是官方额度消耗比例");
+            modelArea.addView(modelTitle, wrap());
+            Map<String, String> variantNotes = NativeUsagePresentation.modelVariantNotes(shares);
+            for (NativeUsagePresentation.ModelShare share : shares) {
+                modelArea.addView(ui.space(20)); LinearLayout row = ui.row(); row.setGravity(Gravity.TOP);
+                TextView name = ui.text(share.displayName, 14);
+                LinearLayout.LayoutParams modelName = new LinearLayout.LayoutParams(0, -2, 1); modelName.setMarginEnd(ui.dp(12)); row.addView(name, modelName);
+                TextView proportion = ui.text(NativeUsageFormat.percentage(share.percent), 16); proportion.setTypeface(ui.medium); proportion.setGravity(Gravity.END); row.addView(proportion);
+                modelArea.addView(row, wrap()); modelArea.addView(ui.space(8));
+                String detail = NativeUsageFormat.exact(share.tokens) + " Token";
+                if (variantNotes.containsKey(share.model)) detail += " · " + variantNotes.get(share.model);
+                TextView total = ui.text(detail, 13); total.setTextColor(ui.muted); modelArea.addView(total, wrap());
+            }
+        }
+        private void collectSources(long now) {
+            sources.clear(); nextQuotaExpiry = Long.MAX_VALUE;
             Map<String, Source> found = new LinkedHashMap<>(); JSONArray windows = data == null ? null : data.optJSONArray("quotas");
             for (int i = 0; windows != null && i < Math.min(windows.length(), 200); i++) {
                 JSONObject quota = windows.optJSONObject(i); if (quota == null) continue;
+                long reset = NativeUsageFormat.epochMillis(quota.opt("resets_at"));
+                if (!NativeUsagePresentation.quotaVisible(NativeUsageFormat.percent(quota.opt("remaining_percent")),
+                        NativeUsageFormat.percent(quota.opt("used_percent")), reset, now)) continue;
+                nextQuotaExpiry = NativeUsagePresentation.nextQuotaExpiry(nextQuotaExpiry, reset, now);
                 String id = quota.optString("source_device_id").trim();
                 // Missing source identity cannot authorize merging by a display name.
                 String key = id.isEmpty() ? "unknown:" + quota.optString("key") + ":" + i : "device:" + id;
@@ -177,50 +253,68 @@ public final class NativeUsagePage {
             String[] available = new String[sources.size()]; Source best = null;
             for (int index = 0; index < sources.size(); index++) {
                 Source item = sources.get(index); available[index] = item.key;
-                if (best == null || sourceScore(item) > sourceScore(best)) best = item;
+                if (best == null || sourceScore(item, now) > sourceScore(best, now)) best = item;
             }
             String next = NativeUsageSelectionPolicy.sourceAfterSnapshot(state.saved.source, available, best == null ? "" : best.key, summary != null);
             if (!next.equals(state.saved.source) || sources.size() <= 1) state.pickerOpen = false;
             state.saved.source = next;
         }
-        private long sourceScore(Source source) {
-            long best = 0, now = System.currentTimeMillis();
+        private long sourceScore(Source source, long now) {
+            long best = 0;
             for (JSONObject quota : source.windows) best = Math.max(best, quotaRank(quota, now) * 100000000000000L + NativeApi.time(quota.optString("observed_at")));
             return best;
         }
         private Source findSource(String key) { for (Source source : sources) if (source.key.equals(key)) return source; return null; }
-        private void renderQuotas() {
+        void updateQuotas(long now) { if (now >= nextQuotaExpiry) renderQuotas(now); }
+        private void renderQuotas() { renderQuotas(System.currentTimeMillis()); }
+        private void renderQuotas(long now) {
+            collectSources(now);
             for (int i = quotas.size() - 1; i >= 0; i--) if (quotas.get(i).owner == this) quotas.remove(i);
             quotaArea.removeAllViews(); Source source = findSource(state.saved.source);
+            quotaView.setVisibility(source == null ? View.GONE : View.VISIBLE); if (source == null) return;
             if (source != null) {
                 LinearLayout choices = ui.column(); choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE);
-                TextView choose = ui.button("来源 · " + source.name + (sources.size() > 1 ? "  ▾" : ""), false,
-                        () -> { if (sources.size() > 1) { state.pickerOpen = !state.pickerOpen; choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE); } else help.show("额度来源", source.name + "\n\n额度来自这台电脑登录的账号。不同电脑的百分比不合并。\n\n" + windowsHelp(source)); });
-                choose.setTextSize(14); choose.setMaxLines(2); quotaArea.addView(choose, wrap());
+                TextView choose = ui.quietButton("来源 · " + source.name + (sources.size() > 1 ? "  ▾" : ""),
+                        () -> { if (sources.size() > 1) { state.pickerOpen = !state.pickerOpen; choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE); } else help.show("额度来源", source.name + "\n\n额度来自这台电脑登录的账号\n不同电脑的百分比不合并\n\n" + windowsHelp(source)); });
+                choose.setTextSize(13); choose.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); choose.setPadding(0, ui.dp(10), 0, ui.dp(10)); quotaArea.addView(choose, wrap());
                 if (sources.size() > 1) for (Source item : sources) {
-                    choices.addView(ui.space(6)); choices.addView(ui.button((item.key.equals(state.saved.source) ? "✓  " : "") + item.name, false,
-                            () -> { state.saved.source = item.key; state.pickerOpen = false; renderQuotas(); }), wrap());
+                    TextView choice = ui.quietButton((item.key.equals(state.saved.source) ? "✓  " : "") + item.name,
+                            () -> { state.saved.source = item.key; state.pickerOpen = false; renderQuotas(); });
+                    choice.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+                    if (item.key.equals(state.saved.source)) { choice.setTextColor(ui.accent); choice.setBackground(ui.ripple(ui.soft, 10)); }
+                    choices.addView(choice, wrap());
                 }
-                quotaArea.addView(choices, wrap()); quotaArea.addView(ui.space(14));
+                quotaArea.addView(choices, wrap()); quotaArea.addView(ui.space(12));
             }
-            JSONObject week = pick(source, 10080), fiveHours = pick(source, 300);
-            QuotaRow weekly = new QuotaRow(this, "周额度", week, true); quotaArea.addView(weekly.view, wrap()); quotas.add(weekly);
-            quotaArea.addView(ui.space(16)); QuotaRow shortWindow = new QuotaRow(this, "5 小时额度", fiveHours, false);
-            quotaArea.addView(shortWindow.view, wrap()); quotas.add(shortWindow);
-            if (source != null && source.windows.size() > (week == null ? 0 : 1) + (fiveHours == null ? 0 : 1)) {
-                quotaArea.addView(ui.space(10)); quotaArea.addView(ui.button("全部额度窗口", false, () -> help.show("额度窗口 · " + source.name, windowsHelp(source))), wrap());
+            List<JSONObject> windows = visibleWindows(source, now);
+            for (int i = 0; i < windows.size(); i++) {
+                if (i > 0) quotaArea.addView(ui.space(24));
+                QuotaRow row = new QuotaRow(this, quotaLabel(windows.get(i)), windows.get(i));
+                quotaArea.addView(row.view, wrap()); quotas.add(row); row.update(now);
             }
-            weekly.update(System.currentTimeMillis()); shortWindow.update(System.currentTimeMillis());
         }
     }
-    private JSONObject pick(Source source, long minutes) {
-        JSONObject best = null; long now = System.currentTimeMillis();
+    private List<JSONObject> visibleWindows(Source source, long now) {
+        Map<String, JSONObject> best = new LinkedHashMap<>(); int ordinal = 0;
         if (source != null) for (JSONObject candidate : source.windows) {
-            if (candidate.optLong("window_minutes") != minutes) continue;
-            if (best == null || quotaRank(candidate, now) > quotaRank(best, now)
-                    || quotaRank(candidate, now) == quotaRank(best, now) && NativeApi.time(candidate.optString("observed_at")) > NativeApi.time(best.optString("observed_at"))) best = candidate;
+            if (!NativeUsagePresentation.quotaVisible(NativeUsageFormat.percent(candidate.opt("remaining_percent")),
+                    NativeUsageFormat.percent(candidate.opt("used_percent")), NativeUsageFormat.epochMillis(candidate.opt("resets_at")), now)) continue;
+            // Same-duration windows from different model/usage buckets are independent.
+            String bucket = candidate.optString("bucket_id").trim(), key = candidate.optString("key").trim();
+            String identity = NativeUsagePresentation.quotaIdentity(bucket, key, candidate.optLong("window_minutes"), ordinal);
+            ordinal++; JSONObject previous = best.get(identity);
+            if (previous == null || quotaRank(candidate, now) > quotaRank(previous, now)
+                    || quotaRank(candidate, now) == quotaRank(previous, now) && NativeApi.time(candidate.optString("observed_at")) > NativeApi.time(previous.optString("observed_at"))) best.put(identity, candidate);
         }
-        return best;
+        return new ArrayList<>(best.values());
+    }
+    private String quotaLabel(JSONObject data) {
+        String model = data.opt("model") instanceof String ? LivePresentation.clean(data.optString("model"), 120) : "";
+        String bucket = data.opt("bucket_label") instanceof String ? LivePresentation.clean(data.optString("bucket_label"), 120) : "";
+        String label = NativeUsageFormat.window(data.optLong("window_minutes"), "额度窗口");
+        // The provider's meter label is presentation only; it never infers a model identity.
+        String name = NativeUsageFormat.modelName(bucket.isEmpty() ? model : bucket);
+        return name.isEmpty() ? label : name + " · " + label;
     }
     private int quotaRank(JSONObject data, long now) {
         Double left = NativeUsageFormat.percent(data.opt("remaining_percent")), used = NativeUsageFormat.percent(data.opt("used_percent"));
@@ -230,10 +324,10 @@ public final class NativeUsagePage {
         return failed || data.optBoolean("stale", true) || !UsageAlertPolicy.observationFresh(NativeApi.time(data.optString("observed_at")), now);
     }
     private String windowsHelp(Source source) {
-        StringBuilder message = new StringBuilder("各窗口分别计量，不能合并为一个余额。\n"); long now = System.currentTimeMillis();
-        for (JSONObject window : source.windows) {
+        StringBuilder message = new StringBuilder("各窗口分别计量，不能合并为一个余额\n"); long now = System.currentTimeMillis();
+        for (JSONObject window : visibleWindows(source, now)) {
             long reset = NativeUsageFormat.epochMillis(window.opt("resets_at")); boolean old = stale(window, now);
-            message.append("\n").append(NativeUsageFormat.window(window.optLong("window_minutes"), window.optString("label"))).append("\n")
+            message.append("\n").append(quotaLabel(window)).append("\n")
                     .append(NativeUsageFormat.remaining(NativeUsageFormat.percent(window.opt("remaining_percent")), NativeUsageFormat.percent(window.opt("used_percent")), old, reset, now)).append("\n")
                     .append(NativeUsageFormat.reset(reset, now, old));
             String at = readableTime(window.optString("observed_at")); if (!at.isEmpty()) message.append("\n记录于 ").append(at);
@@ -243,23 +337,32 @@ public final class NativeUsagePage {
     }
     private final class QuotaRow {
         final ProviderCard owner; final LinearLayout view = ui.column(); final TextView title, remaining, reset; final Meter meter;
-        final JSONObject data; final String label; final boolean weekly;
-        QuotaRow(ProviderCard owner, String label, JSONObject data, boolean weekly) {
-            this.owner = owner; this.label = label; this.data = data; this.weekly = weekly;
-            LinearLayout heading = ui.row(); title = ui.text(label, 14, true); title.setMaxLines(2);
-            heading.addView(title, new LinearLayout.LayoutParams(0, -2, 1)); remaining = ui.text("", 14, true); remaining.setGravity(Gravity.END); heading.addView(remaining);
-            view.addView(heading, wrap()); view.addView(ui.space(9)); meter = new Meter(); view.addView(meter, new LinearLayout.LayoutParams(-1, ui.dp(8)));
-            view.addView(ui.space(7)); reset = ui.text("", 13); reset.setTextColor(ui.muted); view.addView(reset, wrap());
+        final JSONObject data; final String label;
+        QuotaRow(ProviderCard owner, String label, JSONObject data) {
+            this.owner = owner; this.label = label; this.data = data;
+            title = ui.text(label, 14); title.setTypeface(ui.medium);
+            remaining = ui.text("", 26, true);
+            view.addView(title, wrap()); view.addView(ui.space(12)); view.addView(remaining, wrap());
+            view.addView(ui.space(12)); meter = new Meter(); view.addView(meter, new LinearLayout.LayoutParams(-1, ui.dp(5)));
+            view.addView(ui.space(12)); reset = ui.text("", 13); reset.setTextColor(ui.muted); view.addView(reset, wrap());
         }
         void update(long now) {
-            if (data == null) { setText(title, label); setText(remaining, "未提供"); remaining.setTextColor(ui.muted); setText(reset, "等待电脑提供额度"); meter.set(null, true); return; }
-            long resetTime = NativeUsageFormat.epochMillis(data.opt("resets_at")); boolean old = stale(data, now), expired = NativeUsageFormat.expired(resetTime, now);
+            if (data == null) { view.setVisibility(View.GONE); return; }
+            long resetTime = NativeUsageFormat.epochMillis(data.opt("resets_at")); boolean old = stale(data, now);
             Double left = NativeUsageFormat.percent(data.opt("remaining_percent")), used = NativeUsageFormat.percent(data.opt("used_percent"));
-            Double value = NativeUsagePresentation.remaining(left, used);
-            setText(title, weekly && used != null && !expired ? "周额度" + (old ? " · 上次已用 " : "已用 ") + NativeUsageFormat.percentage(used) : label);
-            setText(remaining, NativeUsageFormat.remaining(left, used, old, resetTime, now).replace("暂未提供", "未提供"));
-            remaining.setTextColor(old || expired ? ui.muted : value != null && value <= 10 ? ui.warning : ui.text);
-            setText(reset, NativeUsageFormat.reset(resetTime, now, old)); meter.set(expired ? null : value, old);
+            boolean visible = NativeUsagePresentation.quotaVisible(left, used, resetTime, now);
+            view.setVisibility(visible ? View.VISIBLE : View.GONE); if (!visible) return;
+            Double value = NativeUsagePresentation.used(used, left);
+            setText(title, label);
+            String prefix = old ? "上次已用 " : "已用 ";
+            String reading = prefix + NativeUsageFormat.percentage(value);
+            if (!reading.contentEquals(remaining.getText())) {
+                android.text.SpannableString styled = new android.text.SpannableString(reading);
+                styled.setSpan(new android.text.style.RelativeSizeSpan(14f / 26f), 0, prefix.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                remaining.setText(styled);
+            }
+            remaining.setTextColor(old ? ui.muted : value != null && value >= 90 ? ui.warning : ui.text);
+            setText(reset, NativeUsageFormat.reset(resetTime, now, old)); meter.set(value, old);
         }
     }
     private final class Meter extends View {
@@ -269,7 +372,7 @@ public final class NativeUsagePage {
         @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas); float radius = getHeight() / 2f; paint.setColor(ui.line);
             canvas.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), radius, radius, paint);
-            if (value != null && value > 0) { paint.setColor(old ? ui.muted : value <= 10 ? ui.warning : ui.accent); paint.setAlpha(old ? 110 : 255);
+            if (value != null && value > 0) { paint.setColor(old ? ui.muted : value >= 90 ? ui.warning : ui.accent); paint.setAlpha(old ? 110 : 255);
                 canvas.drawRoundRect(new RectF(0, 0, (float) (getWidth() * value / 100), getHeight()), radius, radius, paint); paint.setAlpha(255); }
         }
     }
@@ -293,7 +396,7 @@ public final class NativeUsagePage {
             if (interval >= 300 && interval <= 3600 && (state.equals("no_live_data") || state.equals("unavailable")))
                 message += "\n后续按 " + (interval + 59) / 60 + " 分钟间隔重试";
         }
-        return message + "\n\n额度记录时间与读取尝试时间分别显示；尝试读取不会让旧额度变成新数据。\n\n" + HELP;
+        return message + "\n\n额度记录时间与读取尝试时间分别显示；尝试读取不会让旧额度变成新数据\n\n" + HELP;
     }
     private static void setText(TextView view, String value) { if (!value.contentEquals(view.getText())) view.setText(value); }
     public static final class TaskCard {
@@ -301,26 +404,29 @@ public final class NativeUsagePage {
         private final TextView value;
         private JSONObject usage;
         public TaskCard(NativeUi ui, Help help) {
-            view = ui.card(); view.setOrientation(LinearLayout.HORIZONTAL); view.setGravity(Gravity.CENTER_VERTICAL);
-            LinearLayout words = ui.column(); TextView heading = ui.text("本次对话已记录", 15, true); words.addView(heading, wrap()); words.addView(ui.space(7));
-            value = ui.text("暂未提供", 15); value.setTextColor(ui.muted); words.addView(value, wrap()); view.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
-            view.addView(ui.iconButton("info", "查看对话 Token 明细", () -> help.show("对话用量", taskHelp(usage))));
+            view = ui.row(); view.setPadding(0, ui.dp(10), 0, ui.dp(10)); view.setVisibility(View.GONE);
+            LinearLayout words = ui.column(); TextView heading = ui.text("本次对话已记录", 13); heading.setTextColor(ui.muted); words.addView(heading, wrap()); words.addView(ui.space(6));
+            value = ui.text("", 18, true); words.addView(value, wrap()); view.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView details = ui.quietButton("查看明细", () -> help.show("对话用量", taskHelp(usage)));
+            details.setContentDescription("查看对话 Token 明细");
+            view.addView(details);
         }
         public void update(JSONObject task) {
             usage = task == null ? null : task.optJSONObject("usage"); Long total = number(usage, "total_tokens");
-            String text = total == null ? "暂未提供" : NativeUsageFormat.compact(total) + " Token" + ("complete".equals(usage.optString("coverage")) ? "" : " · 部分记录");
+            view.setVisibility(total == null ? View.GONE : View.VISIBLE);
+            String text = total == null ? "" : NativeUsageFormat.compact(total) + " Token" + ("complete".equals(usage.optString("coverage")) ? "" : " · 部分记录");
             if (!text.contentEquals(value.getText())) value.setText(text);
         }
     }
     private static String taskHelp(JSONObject usage) {
-        if (usage == null) return "这台电脑暂未提供此对话的用量记录。未提供不代表没有使用。";
+        if (usage == null) return "这台电脑暂未提供此对话的用量记录\n未提供不代表没有使用";
         String message = "总量：" + NativeUsageFormat.exact(number(usage, "total_tokens")) + " Token"
                 + "\n输入：" + NativeUsageFormat.exact(number(usage, "input_tokens"))
                 + "\n输出：" + NativeUsageFormat.exact(number(usage, "output_tokens"))
                 + "\n缓存读取：" + NativeUsageFormat.exact(number(usage, "cached_input_tokens"))
                 + "\n缓存写入：" + NativeUsageFormat.exact(number(usage, "cache_write_tokens"));
         String time = readableTime(usage.optString("observed_at")); if (!time.isEmpty()) message += "\n最近记录：" + time;
-        return message + "\n\n这是已采集到的对话记录，可能不是完整历史。缓存相关分类依工具定义，总量由采集端去重计算，不把分类重复相加。";
+        return message + "\n\n这是已采集到的对话记录，可能不是完整历史\n缓存相关分类依工具定义，总量由采集端去重计算，不把分类重复相加";
     }
     private static String readableTime(String value) {
         long time = NativeApi.time(value); if (time <= 0) return "";

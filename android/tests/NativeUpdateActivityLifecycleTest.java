@@ -251,7 +251,7 @@ public final class NativeUpdateActivityLifecycleTest {
     }
     private static void cooldownRateLimitResponses() throws Exception {
         fixture();NativeUpdateActivity p=create(null);p.onResume();UpdateClient.checkRetryMillis=2001;call(p,"check");deliver(p);
-        check(state(p).equals("ERROR")&&message(p).equals("更新请求较多，请等待后重试。"),"typed rate limit receives fixed actionable message");
+        check(state(p).equals("ERROR")&&message(p).equals("更新请求较多，请等待后重试"),"typed rate limit receives fixed actionable message");
         check(!control(p,"重试检查").isEnabled()&&retryNotice(p).text.contains("3"),"actual check failure delivery renders retry countdown");
         call(p,"check");deliver(p);check(UpdateClient.checkCalls==1,"rate-limited check result suppresses subsequent direct checks");close(p);
         fixture();p=create(null);p.onResume();call(p,"check");deliver(p);UpdateClient.downloadRetryMillis=1500;call(p,"download");deliver(p);

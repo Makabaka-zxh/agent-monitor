@@ -13,6 +13,9 @@ public final class NativeWorkbenchPolicy {
             case "tasks": case "task": case "devices": case "device": return PageRead.WORKBENCH;
             case "usage": return PageRead.USAGE;
             case "account": case "profile": case "sync": case "sessions": return PageRead.ACCOUNT;
+            // Browsing local settings must not broaden the account or workspace request scope.
+            case "settings": case "settings-appearance": case "settings-notifications":
+            case "settings-support": case "settings-security": return PageRead.NONE;
             // Pairing has its own explicit create/details requests, not account data.
             default: return PageRead.NONE;
         }
@@ -28,6 +31,16 @@ public final class NativeWorkbenchPolicy {
             case ACCOUNT: account.run(); break;
             default: break;
         }
+    }
+
+    /** Refresh on the workbench's own clock, and give slower servers time between requests. */
+    static long nextSnapshot(long started, long completed, boolean success) {
+        if (!success) return completed + 7000;
+        return Math.max(started + 4000, completed + 2000);
+    }
+
+    static long snapshotDelay(long now, long scheduled, long cooldownUntil) {
+        return Math.max(0, Math.max(scheduled, cooldownUntil) - now);
     }
 
     public static final class RevisionGate {

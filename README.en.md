@@ -2,7 +2,7 @@
 
 <img src="assets/identity/monitor-brand.png" width="128" height="128" alt="Monitor application mark">
 
-A self-hosted companion for Codex and Claude Code across multiple computers. View tasks, final responses, attachments and available usage information from a native Android app, a SwiftUI macOS client or a browser.
+A self-hosted companion for Codex, Claude Code and Antigravity desktop tasks across multiple computers. View tasks, available final responses, attachments and usage information from a native Android app, a SwiftUI macOS client or a browser. [Antigravity desktop support](docs/CONNECTORS.md#antigravity-桌面会话) is read-only, with verified final text when result sync is enabled.
 
 [中文介绍](README.md) · [Android releases](https://github.com/Makabaka-zxh/agent-monitor/releases/latest)
 

@@ -19,7 +19,7 @@ public class Context {
     public final NotificationManager notifications = new NotificationManager(this);
     public final KeyguardManager keyguard = new KeyguardManager();
     public final PowerManager power = new PowerManager();
-    public boolean missingKeyguard, missingPower;
+    public boolean missingKeyguard, missingPower, failScreenRegistration;
     public final List<Registration> registrations = new ArrayList<>();
     public int receiverUnregistrations;
     private final ApplicationInfo applicationInfo = new ApplicationInfo();
@@ -36,9 +36,11 @@ public class Context {
         throw new AssertionError("Unexpected service " + type);
     }
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) {
+        if (failScreenRegistration) throw new IllegalStateException("synthetic registration failure");
         registrations.add(new Registration(receiver, filter, 0)); return null;
     }
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter, int flags) {
+        if (failScreenRegistration) throw new IllegalStateException("synthetic registration failure");
         registrations.add(new Registration(receiver, filter, flags)); return null;
     }
     public void unregisterReceiver(BroadcastReceiver receiver) {

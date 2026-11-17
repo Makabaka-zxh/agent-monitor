@@ -7,8 +7,9 @@ public final class NativeScreenPolicyTest {
         String id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", token = "nrd_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefg";
         check("codex".equals(NativeScreenPolicy.tool("codex")), "preserve selected Codex");
         check("claude".equals(NativeScreenPolicy.tool("claude")), "preserve selected Claude");
+        check("antigravity".equals(NativeScreenPolicy.tool("antigravity")), "preserve the Antigravity filter across refreshes");
         check("all".equals(NativeScreenPolicy.tool(null)), "unknown filter defaults safely");
-        for (String actual : new String[]{"codex", "claude"}) for (String status : new String[]{"running", "waiting", "error", "completed", "idle", "unknown"}) {
+        for (String actual : new String[]{"codex", "claude", "antigravity"}) for (String status : new String[]{"running", "waiting", "error", "completed", "idle", "unknown"}) {
             boolean active = status.equals("running") || status.equals("waiting") || status.equals("error");
             check(NativeScreenPolicy.includes("all", "active", actual, status, false, false) == active, "active state selection");
             check(!NativeScreenPolicy.includes("all", "active", actual, status, false, true), "offline task never shown as current activity");

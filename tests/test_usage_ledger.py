@@ -464,7 +464,10 @@ class UsageLedgerTests(unittest.TestCase):
             path = self.write([self.meta(session=f"session-{index}")], filename=f"{index}.jsonl")
             with path.open("ab") as handle:
                 handle.write(b" " * (300 * 1024) + b"\n" + json.dumps(self.quota_record(index)).encode() + b"\n")
-        report = self.scan()
+        # Exercise the deterministic file/byte caps separately from the wall
+        # clock budget: a slow host may correctly stop before all eight files.
+        with patch("agent_monitor.usage_ledger.time.monotonic", return_value=0):
+            report = self.scan()
         self.assertEqual(report["quota_tail_files"], 8)
         self.assertLessEqual(report["quota_tail_bytes"], 2 * 1024 * 1024)
         before = self.provider()["quotas"]
@@ -594,7 +597,7 @@ class UsageLedgerTests(unittest.TestCase):
             earlier = {}
             for event in batch["events"]:
                 earlier.setdefault(event.get("counter_key") or event["session_key"], event)
-            hub.ingest_batch("older-pc", {"version": 1, "events": list(earlier.values())}, self.now)
+            hub.ingest_batch("older-pc", {"version": batch["version"], "events": list(earlier.values())}, self.now)
 
             template = next(event for event in batch["events"] if not event.get("counter_key"))
             for start in range(0, 3000, 200):
@@ -603,8 +606,8 @@ class UsageLedgerTests(unittest.TestCase):
                     event = dict(template, session_key=f"{index + 1:064x}")
                     event["event_key"] = _event_key(event)
                     noise.append(event)
-                self.assertEqual(hub.ingest_batch("unrelated-pc", {"version": 1, "events": noise}, self.now),
-                                 {"accepted": 200, "rejected": 0})
+                self.assertEqual(hub.ingest_batch("unrelated-pc", {"version": batch["version"], "events": noise}, self.now),
+                                 {"version": 2, "accepted": 200, "rejected": 0})
             self.assertGreaterEqual(hub.db.execute("SELECT count(*) FROM usage_events").fetchone()[0], 3000)
 
             # Simulate an already populated pre-index ledger, including the
@@ -736,7 +739,7 @@ class UsageLedgerTests(unittest.TestCase):
         self.write([self.claude_record()], "claude")
         self.scan()
         shared = next(event for event in self.ledger.export_batch()["events"] if event["tool"] == "codex" and event["total_tokens"] == 120)
-        self.ledger.ingest_batch("remote-computer", {"version": 1, "events": [shared]}, self.now)
+        self.ledger.ingest_batch("remote-computer", {"version": 2, "events": [shared]}, self.now)
         before = dict(self.ledger.db.execute("SELECT * FROM usage_events WHERE event_key=?", (shared["event_key"],)).fetchone())
         claude_before = dict(self.ledger.db.execute("SELECT * FROM usage_events WHERE tool='claude'").fetchone())
         with self.ledger.db:
@@ -883,10 +886,10 @@ class UsageLedgerTests(unittest.TestCase):
             self.assertEqual(len(history["days"]), 90)
             self.assertEqual([item["day"] for item in history["days"]], sorted({item["day"] for item in history["days"]}))
             self.assertTrue(all(item["tokens"] is None and item["coverage"] == "unavailable" for item in history["days"]))
-        # Live snapshots carry only the fixed daily aggregates, with one range
-        # query per provider; no per-day queries or transcript data.
-        self.assertEqual(sum("GROUP BY day" in query for query in queries), 2)
-        self.assertLess(len(json.dumps(result, separators=(",", ":")).encode()), 16000)
+        # One total and one model range aggregation per provider; no per-day
+        # queries or transcript data. Unknown model is not a zero usage day.
+        self.assertEqual(sum("GROUP BY day" in query for query in queries), 4)
+        self.assertLess(len(json.dumps(result, separators=(",", ":")).encode()), 26000)
 
     def test_history_preserves_real_zero_and_unknown_cache_data(self):
         zero = self.claude_record(response="zero", input_tokens=0, output=0,
@@ -896,8 +899,8 @@ class UsageLedgerTests(unittest.TestCase):
         self.write([zero, unknown], "claude")
         self.scan()
         days = self.provider("claude")["history"]["days"]
-        self.assertEqual(days[-1], {"day": "2026-09-25", "tokens": 0, "coverage": "partial"})
-        self.assertEqual(days[-2], {"day": "2026-09-24", "tokens": None, "coverage": "unavailable"})
+        self.assertEqual(days[-1], {"day": "2026-09-25", "tokens": 0, "models": [], "unknown_model_tokens": 0, "coverage": "partial"})
+        self.assertEqual(days[-2], {"day": "2026-09-24", "tokens": None, "models": [], "unknown_model_tokens": None, "coverage": "unavailable"})
         self.assertIsNone(days[-3]["tokens"])
 
     def test_history_window_excludes_old_and_future_records(self):
@@ -937,8 +940,8 @@ class UsageLedgerTests(unittest.TestCase):
                 self.ledger.scan(self.codex, self.claude, now=midnight)
                 history = self.provider("claude", midnight)["history"]
                 self.assertEqual(history["end_day"], today)
-                self.assertEqual(history["days"][-2], {"day": previous, "tokens": 170, "coverage": "partial"})
-                self.assertEqual(history["days"][-1], {"day": today, "tokens": 171, "coverage": "partial"})
+                self.assertEqual(history["days"][-2], {"day": previous, "tokens": 170, "models": [], "unknown_model_tokens": 170, "coverage": "partial"})
+                self.assertEqual(history["days"][-1], {"day": today, "tokens": 171, "models": [], "unknown_model_tokens": 171, "coverage": "partial"})
                 self.assertEqual(len(history["days"]), 90)
 
     def test_history_uses_codex_contributions_not_cumulative_or_last_totals(self):

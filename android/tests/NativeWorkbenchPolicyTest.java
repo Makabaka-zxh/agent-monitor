@@ -14,8 +14,22 @@ public final class NativeWorkbenchPolicyTest {
         navigationAndNotificationReadsStayScoped();
         computerManagementUnderAccountKeepsWorkspaceReads();
         pauseResumeAndLoginChangesRespectCurrentPage();
+        settingsRecreationNeverBroadensReads();
+        refreshCadenceAvoidsDuplicatesAndHonorsBackoff();
         System.out.println("NativeWorkbenchPolicyTest: " + checks + " checks passed");
     }
+    private static void refreshCadenceAvoidsDuplicatesAndHonorsBackoff() {
+        long next = NativeWorkbenchPolicy.nextSnapshot(1000, 1150, true);
+        check(NativeWorkbenchPolicy.snapshotDelay(3000, next, 0) == 2000, "warm return uses the existing due time");
+        check(NativeWorkbenchPolicy.snapshotDelay(5000, next, 0) == 0, "refresh can dispatch at its exact due time");
+        check(NativeWorkbenchPolicy.nextSnapshot(1000, 6400, true) == 8400, "a slow request leaves a two-second rest");
+        long retry = NativeWorkbenchPolicy.nextSnapshot(1000, 1300, false);
+        check(NativeWorkbenchPolicy.snapshotDelay(1300, retry, 0) == 7000, "ordinary error backoff stays intact");
+        check(NativeWorkbenchPolicy.snapshotDelay(5000, next, 12000) == 7000, "server cooldown overrides cadence");
+        check(NativeWorkbenchPolicy.snapshotDelay(5000, 0, 12000) == 7000, "explicit refresh cannot bypass server cooldown");
+        check(NativeWorkbenchPolicy.snapshotDelay(12000, 0, 12000) == 0, "first read or explicit refresh can run when cooldown ends");
+    }
+
     private static final class PageReads {
         final java.util.List<String> requests = new java.util.ArrayList<>();
         void load(String page, boolean visible, boolean connected) {
@@ -26,6 +40,24 @@ public final class NativeWorkbenchPolicyTest {
             check(requests.equals(java.util.Arrays.asList(expected)), "visible-page dispatch sequence: " + requests);
             requests.clear();
         }
+    }
+    private static void settingsRecreationNeverBroadensReads() {
+        PageReads reads = new PageReads();
+        for (String page : new String[]{"settings", "settings-appearance", "settings-notifications", "settings-support", "settings-security"}) {
+            check(NativeWorkbenchPolicy.pageRead(page) == NativeWorkbenchPolicy.PageRead.NONE,
+                    "settings has no account, usage, or workspace data dependency");
+            reads.load(page, true, true); // Enter the category.
+            reads.load(page, false, true); // Sheet opens system settings or app pauses.
+            reads.load(page, true, true); // Recreated or resumed category/sheet.
+            reads.load(page, true, false); // Revoked login cannot read local settings data remotely.
+            reads.expect();
+        }
+        // Traversing all settings depths performs no eager read; the existing owning
+        // pages still fetch exactly their usual resource on an explicit return.
+        for (String page : new String[]{"account", "settings", "settings-appearance", "settings",
+                "settings-notifications", "settings", "settings-security", "settings", "account", "devices", "usage"})
+            reads.load(page, true, true);
+        reads.expect("account", "account", "workbench", "usage");
     }
     private static void coldLaunchRequestsOnlyVisibleData() {
         PageReads reads = new PageReads();

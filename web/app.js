@@ -93,7 +93,8 @@
     nativeRequest: null, nativeError: "", nativeRevision: 0, nativeBusy: false,
     nativePresentation: null
   };
-  const toolNames = { all: "全部", claude: "Claude Code", codex: "Codex" };
+  const toolNames = { all: "全部", claude: "Claude Code", codex: "Codex", antigravity: "Antigravity" };
+  const toolKeys = Object.keys(toolNames);
   const statuses = {
     running: "执行中", waiting: "等待批准", completed: "本轮结束",
     error: "执行出错", unknown: "状态未知", idle: "空闲", stale: "状态已过期"
@@ -123,7 +124,7 @@
   };
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const icon = (name, extra = "") => `<svg class="icon ${extra}" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.monitor}</svg>`;
-  const brand = (tool) => `<span class="brand" aria-hidden="true"><img src="/assets/${tool === "claude" ? "claude-official.png" : tool === "codex" ? "codex-official.png" : "app-icon-192.png"}" width="34" height="34" alt=""></span>`;
+  const brand = (tool) => `<span class="brand" aria-hidden="true"><img src="/assets/${tool === "claude" ? "claude-official.png" : tool === "codex" ? "codex-official.png" : tool === "antigravity" ? "antigravity.svg" : "app-icon-192.png"}" width="34" height="34" alt=""></span>`;
   const encoded = (value) => esc(encodeURIComponent(String(value)));
   const device = (id) => state.snapshot?.devices?.find((d) => String(d.id) === String(id));
   const tasks = () => Array.isArray(state.snapshot?.tasks) ? state.snapshot.tasks : [];
@@ -412,20 +413,20 @@
       task: ["任务说明", [task?.status_source === "hook" ? "状态来自电脑上的任务事件。" : "状态根据电脑上的本地记录判断；没有明确记录时显示未知。", "“本轮结束”表示响应已结束，是否完成仍需检查结果。"]],
       devices: ["电脑连接", ["每台电脑配对一次，任务会汇总到工作台。", "电脑离线后只保留最后记录，不能据此确认任务仍在运行。"]],
       device: ["电脑说明", [sourceSummary(computer?.sources) + "。", computer?.local ? "这台电脑运行个人同步服务，请在电脑端管理服务。" : "移除只会断开绑定，不会停止电脑上的任务。"]],
-      account: ["账号说明", ["换手机后，登录同一账号即可恢复已绑定电脑与偏好。", "Codex 和 Claude Code 继续使用电脑上的登录，本 App 不同步它们的密码。", "字体：MiSans，由小米提供。"]],
+      account: ["账号说明", ["换手机后，登录同一账号即可恢复已绑定电脑与偏好。", "AI 工具继续使用电脑上的登录，本 App 不同步它们的密码。", "字体：MiSans，由小米提供。"]],
       sync: ["同步说明", ["电脑、任务状态与偏好保存在这个个人服务中。其他手机需访问同一服务地址。", "在工作台切换筛选后自动保存，下次登录会恢复。"]],
       sessions: ["登录设备说明", ["退出设备后，该设备需重新登录才能查看任务。", "电脑上的任务不受影响；电脑连接在“我的电脑”中管理。"]],
-      pairing: ["配对说明", ["新电脑必须能访问服务地址。localhost 或 127.0.0.1 只指向本机，跨电脑连接需使用可访问的地址。", "连接程序读取任务记录，不复制 Codex 或 Claude Code 的登录凭据。"]],
+      pairing: ["配对说明", ["新电脑必须能访问服务地址。localhost 或 127.0.0.1 只指向本机，跨电脑连接需使用可访问的地址。", "连接程序读取任务记录，不复制 AI 工具的登录凭据。"]],
       profile: ["个人资料", ["头像会在本机裁剪后保存到个人服务，同一账号的设备可同步。", "关联 Google 后可用该账号登录，并获取头像和名字。"]],
       scanner: ["扫码配对", ["在电脑连接程序选择扫码配对，再扫描它显示的二维码。", "确认电脑名称后才会建立连接。"]],
-      "pairing-confirm": ["确认电脑", ["请核对电脑名称，确认后这台电脑会同步 Codex 和 Claude Code 的任务状态。", "这不会登录或复制 AI 工具的账号。"]],
+      "pairing-confirm": ["确认电脑", ["请核对电脑名称，确认后这台电脑会同步已支持的任务状态。", "这不会登录或复制 AI 工具的账号。"]],
       "native-connect": state.nativeRequest?.mode === "full_app"
         ? ["连接 Monitor", ["这台设备将登录完整工作台：查看任务和已同步结果、下载配套文件、回复可续接的任务、归档任务，以及管理个人资料、电脑和登录设备。", "系统实况通知取决于设备支持情况；需要批准的操作仍在任务所在电脑上确认。", "退出这台 App、撤销此连接，或批准连接的浏览器登录失效，都会结束本次 App 连接；电脑上的任务继续运行。"]]
         : ["连接实况 App", ["确认后，这台手机只可查看任务状态，并在你主动跟踪时显示通知。", "可在“登录设备”中断开。退出本次授权所用的浏览器账号后，实况 App 也需重新连接。"]],
-      auth: ["登录说明", ["这是本 App 的个人账号，与 Codex 或 Claude Code 账号分开。", "首次建立账号需在运行个人服务的电脑上操作，其他设备使用同一账号登录。", "账号为 3–32 个字符，密码为 12–128 个字符。"]]
+      auth: ["登录说明", ["这是本 App 的个人账号，与 AI 工具账号分开。", "首次建立账号需在运行个人服务的电脑上操作，其他设备使用同一账号登录。", "账号为 3–32 个字符，密码为 12–128 个字符。"]]
     };
     if (key === "device" && Array.isArray(computer?.sources)) {
-      pages.device[1][0] = computer.sources.slice(0, 2).map((source) => `${toolNames[source.tool] || source.tool}：${source.detail || (source.available ? "可读取任务记录" : "未找到任务记录")}`).join("\n") || "尚未收到工具状态。";
+      pages.device[1][0] = computer.sources.filter((source) => source?.tool !== "all" && Object.hasOwn(toolNames, source?.tool)).map((source) => `${toolNames[source.tool] || source.tool}：${source.detail || (source.available ? "可读取任务记录" : "未找到任务记录")}`).join("\n") || "尚未收到工具状态。";
     }
     if (state.nativePresentation && ["tasks", "task", "account"].includes(key)) {
       pages[key][1].push("在任务详情中开始跟踪，并在手机上选择时长，可随时停止。实况显示由系统通知设置决定。");
@@ -476,12 +477,12 @@
   }
   const section = (key, title, list) => list.length ? `<section data-key="${key}">${title ? `<h2 class="section-label">${title}</h2>` : ""}<div class="stack" data-key="task-list">${list.map(taskCard).join("")}</div></section>` : "";
   function filter(scope) {
-    const keys = ["all", "claude", "codex"];
+    const keys = toolKeys;
     return `<div class="filter glass" data-key="tool-filter" style="--active-index:${keys.indexOf(state.preferences.tool_filter)}" role="group" aria-label="按工具筛选">${keys.map((key) => `<button type="button" data-key="filter-${key}" data-filter="${key}" aria-pressed="${state.preferences.tool_filter === key}"><span>${toolNames[key]}</span><span class="count" aria-hidden="true">${scope.filter((t) => key === "all" || t.tool === key).length}</span></button>`).join("")}</div>`;
   }
   function taskCard(task) {
     const status = currentStatus(task);
-    return `<div class="task-entry" data-key="entry-${encoded(task.id)}"><button type="button" class="card card-button task" data-key="task-${encoded(task.id)}" data-page="task" data-id="${encoded(task.id)}" aria-label="${esc(`${task.title || "未命名任务"}，${toolNames[task.tool] || task.tool}，${device(task.device_id)?.name || "未知电脑"}，${statuses[status]}`)}"><div class="task-top">${brand(task.tool)}<div class="task-main"><h3 class="task-title">${esc(task.title || "未命名任务")}</h3><p class="source">${esc(device(task.device_id)?.name || "未知电脑")}</p></div>${icon("chevron", "chevron")}</div><div class="task-body compact"><div class="meta-row">${pill(status)}<span>${esc(relativeTime(task.updated_at))}</span></div></div></button><button type="button" class="archive-quick" data-action="archive-task" data-id="${encoded(task.id)}" aria-label="${task.archived ? "恢复" : "归档"}：${esc(task.title)}" title="${task.archived ? "恢复任务" : "归档任务"}">${icon(task.archived ? "restore" : "archive")}</button></div>`;
+    return `<div class="task-entry" data-key="entry-${encoded(task.id)}"><button type="button" class="card card-button task" data-key="task-${encoded(task.id)}" data-page="task" data-id="${encoded(task.id)}" aria-label="${esc(`${task.title || "未命名任务"}，${toolNames[task.tool] || task.tool}，${device(task.device_id)?.name || "未知电脑"}，${statuses[status]}`)}"><div class="task-top">${brand(task.tool)}<div class="task-main"><h3 class="task-title">${esc(task.title || "未命名任务")}</h3><p class="source">${esc(`${toolNames[task.tool] || "任务"} · ${device(task.device_id)?.name || "未知电脑"}`)}</p></div>${icon("chevron", "chevron")}</div><div class="task-body compact"><div class="meta-row">${pill(status)}<span>${esc(relativeTime(task.updated_at))}</span></div></div></button><button type="button" class="archive-quick" data-action="archive-task" data-id="${encoded(task.id)}" aria-label="${task.archived ? "恢复" : "归档"}：${esc(task.title)}" title="${task.archived ? "恢复任务" : "归档任务"}">${icon(task.archived ? "restore" : "archive")}</button></div>`;
   }
   function taskViews() {
     return `<div class="task-views" data-key="task-views" role="group" aria-label="按任务状态筛选">${[["active","进行中"],["all","全部任务"],["archived","已归档"]].map(([key,label]) => `<button type="button" data-task-view="${key}" data-key="view-${key}" aria-pressed="${state.taskView === key}">${label}</button>`).join("")}</div>`;
@@ -510,7 +511,7 @@
       return;
     }
     const computer = device(task.device_id);
-    setHeader(`${back("tasks", "工作台")}<div class="detail-heading">${brand(task.tool)}<h1>${esc(task.title || "未命名任务")}</h1>${helpButton("task")}</div><p class="subtitle">${esc(computer?.name || "未知电脑")}</p>`);
+    setHeader(`${back("tasks", "工作台")}<div class="detail-heading">${brand(task.tool)}<h1>${esc(task.title || "未命名任务")}</h1>${helpButton("task")}</div><p class="subtitle">${esc(`${toolNames[task.tool] || "任务"} · ${computer?.name || "未知电脑"}`)}</p>`);
     const statusNote = stale(task) ? '<p class="inline-note warning">状态已过期，以下为最后收到的记录。</p>' : task.status === "waiting" ? `<p class="inline-note warning">请到 ${esc(computer?.name || "这台电脑")} 处理批准请求。</p>` : "";
     const output = state.preferences.sync_output ? task.output : "";
     const live = nativeActive() && state.nativePresentation.taskId === String(task.id)
@@ -519,8 +520,8 @@
   }
   function sourceSummary(sources) {
     if (!Array.isArray(sources)) return "暂未收到工具状态";
-    const available = sources.filter((s) => s.available).map((s) => toolNames[s.tool] || s.tool);
-    return available.length ? available.join(" · ") : "尚未找到可读取的任务记录";
+    const available = toolKeys.slice(1).filter((key) => sources.some((source) => source?.tool === key && source.available === true));
+    return available.length ? available.map((key) => toolNames[key]).join(" · ") : "尚未找到可读取的任务记录";
   }
   function deviceCard(computer) {
     const online = !dataOld() && computer.online;
@@ -546,7 +547,7 @@
     const shown = scope.filter((task) => !task.archived).filter(matches);
     const online = !dataOld() && computer.online;
     heading(computer.name, `${computer.platform || "电脑"} · ${online ? "在线" : dataOld() ? "状态未知" : "离线"}`, back("devices", "我的电脑"));
-    setMain(`${!online ? `<p class="inline-note warning">最后连接 ${esc(relativeTime(computer.last_seen))}，当前任务状态已过期。</p>` : ""}${filter(scope)}${shown.length ? `<div class="stack">${shown.map(taskCard).join("")}</div>` : empty("暂无任务")}${!computer.local ? `<button type="button" class="button danger full spaced" data-action="remove-device" data-id="${encoded(computer.id)}">移除电脑</button>` : ""}`);
+    setMain(`<p class="source" data-key="device-task-sources">任务来源：${esc(sourceSummary(computer.sources))}</p>${!online ? `<p class="inline-note warning">最后连接 ${esc(relativeTime(computer.last_seen))}，当前任务状态已过期。</p>` : ""}${filter(scope)}${shown.length ? `<div class="stack">${shown.map(taskCard).join("")}</div>` : empty("暂无任务")}${!computer.local ? `<button type="button" class="button danger full spaced" data-action="remove-device" data-id="${encoded(computer.id)}">移除电脑</button>` : ""}`);
   }
   const menu = (page, glyph, title) => `<button type="button" class="card card-button menu-row compact" data-page="${page}">${icon(glyph)}<div class="grow"><h3>${title}</h3></div>${icon("chevron", "chevron")}</button>`;
   const avatarMarkup = (value, extra = "") => `<span class="avatar ${extra}">${/^data:image\/(jpeg|png|webp);base64,/.test(value || "") ? `<img src="${esc(value)}" alt="头像">` : icon("user")}</span>`;

@@ -18,6 +18,8 @@ public final class NativeNavigationPolicyTest {
 
     public static void main(String[] args) {
         nativeTabHierarchy();
+        settingsHierarchyAndRestoration();
+        directionalTransitions();
         check(ACTION.equals("com.agentmonitor.live.OPEN_TASK"), "notification action is fixed and app-specific");
         String taskA = "local:codex:task_A", taskB = "home:claude:task-B";
         String a = NativeNavigationPolicy.notificationUri(taskA, 10);
@@ -91,6 +93,58 @@ public final class NativeNavigationPolicyTest {
         System.out.println("NativeNavigationPolicyTest: " + checks + " checks passed");
     }
 
+    private static void directionalTransitions() {
+        String[][] branches = {
+                {"tasks", "task"}, {"account", "settings"}, {"settings", "settings-appearance"},
+                {"settings-appearance", "settings-background"}, {"settings", "settings-notifications"},
+                {"settings", "settings-support"}, {"settings", "settings-security"},
+                {"account", "devices"}, {"devices", "device"}, {"devices", "pairing"},
+                {"pairing", "pairing-confirm"}, {"account", "profile"}, {"account", "sync"},
+                {"account", "sessions"}, {"device", "task"}
+        };
+        for (String[] branch : branches) {
+            check(NativeNavigationPolicy.transitionDirection(branch[0], branch[1]) == 1,
+                    "entering a child uses forward motion");
+            check(NativeNavigationPolicy.transitionDirection(branch[1], branch[0]) == -1,
+                    "returning to a parent reverses the motion");
+        }
+        check(NativeNavigationPolicy.transitionDirection("settings-background", "account") == -1,
+                "returning directly to an ancestor keeps backward direction");
+        check(NativeNavigationPolicy.transitionDirection("account", "settings-background") == 1,
+                "opening a deeper settings descendant keeps forward direction");
+        String[] tabs = NativeNavigationPolicy.rootPages();
+        for (int before = 0; before < tabs.length; before++) for (int after = 0; after < tabs.length; after++) {
+            check(NativeNavigationPolicy.transitionDirection(tabs[before], tabs[after]) == Integer.compare(after, before),
+                    "root tab direction follows the displayed tab order, including no-op selection");
+        }
+        check(NativeNavigationPolicy.transitionDirection("settings-appearance", "settings-security") == 0,
+                "sibling navigation does not pretend to descend a level");
+        check(NativeNavigationPolicy.transitionDirection("settings-background", "usage") == -1,
+                "leaving an account descendant for the earlier usage tab moves left");
+        check(NativeNavigationPolicy.transitionDirection("usage", "settings-background") == 1,
+                "opening an account descendant from usage moves right");
+        check(NativeNavigationPolicy.transitionDirection("task", "usage", "synthetic-device") == -1,
+                "computer task detail stays in the account branch when switching to usage");
+        check(NativeNavigationPolicy.transitionDirection("task", "account", "synthetic-device") == -1,
+                "a computer task returns toward its account ancestor");
+        check(NativeNavigationPolicy.transitionDirection("task", "tasks", "synthetic-device") == -1,
+                "a computer task switches left to the workbench root");
+        check(NativeNavigationPolicy.transitionDirection("task", "usage", "") == 1,
+                "a workbench task switches right to usage");
+        check(NativeNavigationPolicy.transitionDirection("task", "usage", "bad/device") == 1,
+                "invalid computer ancestry cannot create an account branch");
+        for (String invalid : new String[]{null, "", "unknown", "Tasks", "task/extra"}) {
+            check(NativeNavigationPolicy.transitionDirection(invalid, "tasks") == 0,
+                    "missing or unknown previous page has no invented motion");
+            check(NativeNavigationPolicy.transitionDirection("settings", invalid) == 0,
+                    "unknown destination has no invented motion");
+        }
+        for (String page : new String[]{"task", "settings", "settings-background", "pairing-confirm"}) {
+            check(NativeNavigationPolicy.transitionDirection(page, page) == 0,
+                    "refreshing the same page does not animate navigation");
+        }
+    }
+
     private static void nativeTabHierarchy() {
         check(Arrays.equals(NativeNavigationPolicy.rootPages(), new String[]{"tasks", "usage", "account"}),
                 "usage is the second root and computer management lives below My Account");
@@ -101,11 +155,12 @@ public final class NativeNavigationPolicyTest {
             check(root.equals(NativeNavigationPolicy.tabForPage(root, "old-device")), "stale task ancestry cannot redirect a root tab");
             check(NativeNavigationPolicy.backTarget(root, "old-device") == null, "root Back finishes instead of entering another tab");
         }
-        for (String child : new String[]{"devices", "device", "profile", "sync", "sessions", "pairing", "pairing-confirm"}) {
+        for (String child : new String[]{"devices", "device", "profile", "sync", "sessions", "settings", "pairing", "pairing-confirm"}) {
             check(!NativeNavigationPolicy.rootPage(child), "account descendants expose Back");
             check("account".equals(NativeNavigationPolicy.tabForPage(child, "")), "account descendant keeps My Account selected");
             check(child.equals(NativeNavigationPolicy.safePage(child)), "existing saved descendant remains restorable");
         }
+        expectBack("settings", "", "account", "");
         expectBack("devices", "", "account", "");
         expectBack("device", "", "devices", "");
         expectBack("pairing", "", "devices", "");
@@ -133,5 +188,43 @@ public final class NativeNavigationPolicyTest {
         NativeNavigationPolicy.BackTarget back = NativeNavigationPolicy.backTarget(page, device);
         check(back != null && expectedPage.equals(back.page) && expectedId.equals(back.id),
                 "Back respects the native parent and exact synthetic selection");
+    }
+
+    private static void settingsHierarchyAndRestoration() {
+        String[][] sheets = {
+                {"settings-appearance", "display", "privacy"},
+                {"settings-notifications", "notifications", "background", "alerts"},
+                {"settings-support", "system-help"},
+                {"settings-security"}
+        };
+        for (String[] branch : sheets) {
+            String savedPage = branch[0], restoredPage = NativeNavigationPolicy.safePage(savedPage);
+            check(savedPage.equals(restoredPage), "recreation retains the exact settings category");
+            check(!NativeNavigationPolicy.rootPage(restoredPage), "every settings category retains a Back affordance");
+            check("account".equals(NativeNavigationPolicy.tabForPage(restoredPage, "stale-computer")), "settings restores the My Account tab regardless of stale computer ancestry");
+            check(!NativeNavigationPolicy.settingsTitle(restoredPage).isEmpty(), "each settings route has its own heading");
+            check(NativeNavigationPolicy.settingsHelp(restoredPage).contains("\n"), "each settings route has readable help with real line breaks");
+            expectBack(restoredPage, "stale-computer", "settings", "");
+            expectBack("settings", "stale-computer", "account", "");
+            for (int index = 1; index < branch.length; index++) {
+                String sheet = branch[index];
+                check(savedPage.equals(NativeNavigationPolicy.settingsSheetParent(sheet)), "third-level sheet is owned by its category");
+                String restoredSheet = NativeNavigationPolicy.restorableSettingsSheet(restoredPage, sheet, "account-A", "account-A");
+                check(sheet.equals(restoredSheet), "same-account recreation restores the open third-level sheet");
+                // Closing a sheet reveals its existing owner. Back then traverses Settings and My Account.
+                check(restoredPage.equals(NativeNavigationPolicy.settingsSheetParent(restoredSheet)), "third-level dismissal cannot skip or replace its second-level owner");
+                check(NativeNavigationPolicy.restorableSettingsSheet("settings", sheet, "account-A", "account-A").isEmpty(), "sheet is not reopened above the settings root");
+                check(NativeNavigationPolicy.restorableSettingsSheet("tasks", sheet, "account-A", "account-A").isEmpty(), "notification or tab navigation cancels old sheet restoration");
+                check(NativeNavigationPolicy.restorableSettingsSheet(restoredPage, sheet, "account-A", "account-B").isEmpty(), "account switch drops settings UI restoration");
+                check(NativeNavigationPolicy.restorableSettingsSheet(restoredPage, sheet, "", "").isEmpty(), "logged-out recreation never opens a settings sheet");
+                check(NativeNavigationPolicy.restorableSettingsSheet(restoredPage, sheet, null, "account-A").isEmpty(), "missing saved fingerprint cannot restore settings UI");
+            }
+        }
+        for (String invalid : new String[]{null, "", "settings", "logout", "privacy/other", "server-change"}) {
+            check(NativeNavigationPolicy.settingsSheetParent(invalid).isEmpty(), "unknown or destructive actions cannot be restored as settings sheets");
+            check(NativeNavigationPolicy.restorableSettingsSheet("settings-security", invalid, "account-A", "account-A").isEmpty(), "restoration cannot execute logout or change-server confirmation");
+        }
+        check(NativeNavigationPolicy.settingsTitle("task").isEmpty(), "task title is not replaced by a settings title");
+        check(NativeNavigationPolicy.settingsHelp("account").isEmpty(), "account retains its own help");
     }
 }

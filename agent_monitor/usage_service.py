@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .usage_claude_cli import ClaudeCliQuotaReader
+from .usage_claude_cli import MAX_LIMITS, ClaudeCliQuotaReader
 from .usage_ledger import SHANGHAI, UsageLedger, read_claude_quota_file
 from .usage_statusline import atomic_write, decode, safe_path
 
@@ -186,7 +186,7 @@ class UsageService:
                      "phase": phase if isinstance(phase, str) and phase in _CLAUDE_QUOTA_PHASES else "unknown",
                      "completed_at": completed_at or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                      "retry_after_seconds": min(3600, max(300, retry)) if type(retry) is int else 300,
-                     "accepted": accepted if type(accepted) is int and 0 <= accepted <= 2 else 0}
+                     "accepted": accepted if type(accepted) is int and 0 <= accepted <= MAX_LIMITS else 0}
             atomic_write(self._claude_status_path, json.dumps(value, allow_nan=False, separators=(",", ":")).encode("ascii"))
         except Exception:
             # Local diagnostics are best effort, never part of quota ingestion.
@@ -203,7 +203,10 @@ class UsageService:
             completed_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             delay = result.retry_after_seconds
             delay = min(3600, max(300, delay)) if type(delay) is int else 300
-            if result.status == "ok" and isinstance(result.snapshot, dict):
+            successful_empty = (result.status == "no_numeric_windows" and isinstance(result.snapshot, dict)
+                                and result.snapshot.get("snapshot_complete") is True
+                                and result.snapshot.get("quota_windows") == [])
+            if (result.status == "ok" or successful_empty) and isinstance(result.snapshot, dict):
                 stage = "ingest_failed"
                 accepted = self.ledger.ingest_claude_quota(result.snapshot)
                 accepted_count = accepted.get("accepted", 0)
@@ -212,7 +215,7 @@ class UsageService:
             self._record_claude_check(result.status, delay, accepted_count, completed_at, source_generation)
             self._record_claude_status(result.status, delay, accepted_count, completed_at)
             stage = "refresh_failed"
-            if accepted_count > 0:
+            if accepted_count > 0 or successful_empty:
                 self.refresh()
             return delay
         except Exception as exc:
@@ -229,7 +232,7 @@ class UsageService:
             return
         state = "unavailable"
         if isinstance(status, str):
-            if status == "ok" and type(accepted) is int and 0 < accepted <= 2:
+            if status == "ok" and type(accepted) is int and 0 < accepted <= MAX_LIMITS:
                 state = "updated"
             elif status in {"no_live_limits", "no_numeric_windows"}:
                 state = "no_live_data"

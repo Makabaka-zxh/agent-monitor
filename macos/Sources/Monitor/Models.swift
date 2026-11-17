@@ -1,9 +1,9 @@
 import Foundation
 
 enum ToolFilter: String, CaseIterable, Identifiable {
-    case all, claude, codex
+    case all, claude, codex, antigravity
     var id: String { rawValue }
-    var title: String { switch self { case .all: "全部"; case .claude: "Claude Code"; case .codex: "Codex" } }
+    var title: String { switch self { case .all: "全部"; case .claude: "Claude Code"; case .codex: "Codex"; case .antigravity: "Antigravity" } }
 }
 enum TaskScope: String, CaseIterable, Identifiable {
     case active, all, archived
@@ -24,7 +24,12 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
     let finalResultId: String?
     var archived: Bool
     let stale: Bool?
-    var brand: String { tool == "claude" ? "Claude Code" : tool == "codex" ? "Codex" : "任务" }
+    static func brand(for tool: String) -> String {
+        guard let source = ToolFilter(rawValue: tool), source != .all else { return "任务" }
+        return source.title
+    }
+    var brand: String { Self.brand(for: tool) }
+    var supportsReply: Bool { tool == "claude" || tool == "codex" }
     var statusTitle: String {
         switch status {
         case "running": "进行中"

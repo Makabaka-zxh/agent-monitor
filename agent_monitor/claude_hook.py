@@ -109,6 +109,14 @@ def record_event(payload: dict, *, state_dir: Path | str | None = None,
             minimal["background_count"] = background
         if scheduled is not None:
             minimal["scheduled_count"] = scheduled
+    elif event == "StopFailure":
+        try:
+            from .failure_reasons import failure_code_for_claude
+        except ImportError:  # Hook may be invoked by its absolute script path.
+            from failure_reasons import failure_code_for_claude
+        failure = failure_code_for_claude(payload.get("error"))
+        if failure:
+            minimal["failure_code"] = failure
     # Independent files prevent asynchronous hooks overwriting one another out
     # of order. The receive-time prefix determines the newest observation.
     name = f"state-{stamp_ns:020d}-{uuid.uuid4().hex}.json"

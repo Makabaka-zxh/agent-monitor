@@ -27,6 +27,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from .store import SESSION_SECONDS, PairingRequestError, Store, iso
 from .profile import AVATAR_DATA_URL_LENGTH, normalize_avatar
 from .error_analysis import ErrorAnalysis
+from .failure_reasons import FailureCode
 
 COOKIE = "agent_monitor_session"
 logger = logging.getLogger("agent_monitor")
@@ -47,7 +48,7 @@ class Login(BaseModel):
 
 
 class Preferences(BaseModel):
-    tool_filter: Literal["all", "codex", "claude"] | None = None
+    tool_filter: Literal["all", "codex", "claude", "antigravity"] | None = None
     sync_output: bool | None = None
 
 
@@ -102,7 +103,7 @@ class Registration(BaseModel):
 
 class Task(BaseModel):
     id: str = Field(min_length=1, max_length=200)
-    tool: Literal["codex", "claude"]
+    tool: Literal["codex", "claude", "antigravity"]
     title: str = Field(min_length=1, max_length=200)
     status: Literal["running", "waiting", "completed", "error", "unknown", "idle"]
     updated_at: str
@@ -113,6 +114,7 @@ class Task(BaseModel):
     project: str = Field(default="", max_length=120)
     status_source: Literal["local_log", "hook"] = "local_log"
     error_analysis: ErrorAnalysis | None = None
+    failure_code: FailureCode | Literal[""] = ""
 
     @field_validator("updated_at")
     @classmethod
@@ -125,7 +127,7 @@ class Task(BaseModel):
 
 
 class Source(BaseModel):
-    tool: Literal["codex", "claude"]
+    tool: Literal["codex", "claude", "antigravity"]
     available: bool
     mode: str = Field(max_length=60)
     detail: str = Field(default="", max_length=500)
@@ -170,13 +172,14 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
 
     local_id = None
 
-    def collect_once():
+    def collect_once(codex_growth):
         nonlocal local_id
         try:
             from .collector import collect_snapshot
             if local_id is None:
                 local_id = store.ensure_local(platform.node() or "这台电脑", platform.system())
-            snapshot = collect_snapshot(include_output=store.preferences()["sync_output"])
+            snapshot = collect_snapshot(include_output=store.preferences()["sync_output"], codex_growth=codex_growth,
+                                        codex_primary_backfill=True)
             parsed = Heartbeat.model_validate(snapshot)
             store.ingest(local_id, [t.model_dump() for t in parsed.tasks], [s.model_dump() for s in parsed.sources])
         except Exception as exc:
@@ -185,10 +188,12 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
             logger.warning("Local collection unavailable (%s)", type(exc).__name__)
 
     async def collect_loop():
+        from .collector import CodexGrowthTracker
+        codex_growth = CodexGrowthTracker()
         while True:
             # Preferences and ingest also acquire the Store's threading lock.
             # Keep the whole step off the event loop, not only the log scan.
-            worker = asyncio.get_running_loop().run_in_executor(None, collect_once)
+            worker = asyncio.get_running_loop().run_in_executor(None, collect_once, codex_growth)
             cancelled = False
             while True:
                 try:
@@ -446,7 +451,7 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
         if not device_id:
             raise HTTPException(401, "设备连接已失效，请重新配对")
         store.ingest(device_id, [t.model_dump() for t in payload.tasks], [s.model_dump() for s in payload.sources])
-        return {"sync_output": store.preferences()["sync_output"]}
+        return {"sync_output": store.preferences()["sync_output"], "antigravity_v1": True}
 
     from .google_login import install_google_routes
     google_enabled = install_google_routes(app, store, state_dir, public_url, authenticated, same_origin)

@@ -56,7 +56,8 @@ class ParseUsageTests(unittest.TestCase):
     def test_only_numeric_windows_survive_and_ingest(self):
         read = cli.parse_usage_output(wire([row(percent=0), row("weekly_all", 87.5)]), NOW)
         self.assertEqual(read.status, "ok")
-        self.assertEqual(set(read.snapshot), {"observed_at", "rate_limits"})
+        self.assertEqual(set(read.snapshot), {"observed_at", "rate_limits", "quota_windows", "snapshot_complete"})
+        self.assertTrue(read.snapshot["snapshot_complete"])
         self.assertEqual(set(read.snapshot["rate_limits"]), {"five_hour", "seven_day"})
         self.assertNotIn(PRIVATE, json.dumps(asdict(read)))
         with tempfile.TemporaryDirectory() as directory:
@@ -82,6 +83,55 @@ class ParseUsageTests(unittest.TestCase):
                 read = cli.parse_usage_output(wire([row(), row("weekly_all"), duplicate]), NOW)
                 self.assertEqual(read.status, "ambiguous_windows")
                 self.assertIsNone(read.snapshot)
+
+    def test_model_scoped_rows_keep_independent_weekly_percentages(self):
+        read = cli.parse_usage_output(wire([
+            row("weekly_all", 14),
+            row("weekly_scoped", 0, scope={"model": {"display_name": "Sonnet 4.6"}}),
+            row("weekly_scoped", 82.5, scope={"model": {"display_name": "Claude Opus"}, "surface": None}),
+        ]), NOW)
+        self.assertEqual(read.status, "ok")
+        self.assertTrue(read.snapshot["snapshot_complete"])
+        self.assertEqual(set(read.snapshot["rate_limits"]), {"seven_day"})
+        self.assertEqual([q["model"] for q in read.snapshot["quota_windows"]], [None, "claude-sonnet-4-6", "claude-opus"])
+        self.assertEqual([q["used_percentage"] for q in read.snapshot["quota_windows"]], [14, 0, 82.5])
+        self.assertEqual([q["window_minutes"] for q in read.snapshot["quota_windows"]], [10080] * 3)
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = UsageLedger(Path(directory) / "ledger.sqlite3")
+            try:
+                self.assertEqual(ledger.ingest_claude_quota(read.snapshot, now=NOW), {"accepted": 3, "rejected": 0})
+                quotas = ledger.summary(now=NOW)["providers"][1]["quotas"]
+                self.assertEqual(len(quotas), 3)
+                self.assertEqual({q["model"] for q in quotas}, {None, "claude-sonnet-4-6", "claude-opus"})
+            finally:
+                ledger.close()
+
+    def test_unknown_and_surface_scopes_are_not_models_or_absence_proof(self):
+        for scope in ({"model": {"display_name": PRIVATE}}, {"surface": {"display_name": "Sonnet"}},
+                      {"model": {"display_name": "Sonnet"}, "surface": {"display_name": "Code"}},
+                      {"model": {"display_name": "All models"}}, {"model": {"display_name": "Sonnet\n"}},
+                      {"model": {"display_name": "Sonnet"}, "other": "ignored?"}):
+            with self.subTest(scope=scope):
+                read = cli.parse_usage_output(wire([row("weekly_all"), row("weekly_scoped", scope=scope)]), NOW)
+                self.assertFalse(read.snapshot["snapshot_complete"])
+                self.assertEqual(len(read.snapshot["quota_windows"]), 1)
+                self.assertNotIn(PRIVATE, json.dumps(asdict(read)))
+
+    def test_duplicate_model_is_ambiguous_even_with_equivalent_label(self):
+        read = cli.parse_usage_output(wire([
+            row("weekly_scoped", scope={"model": {"display_name": "Sonnet"}}),
+            row("weekly_scoped", scope={"model": {"display_name": "Claude sonnet"}}),
+        ]), NOW)
+        self.assertEqual(read.status, "ambiguous_windows")
+        self.assertIsNone(read.snapshot)
+
+    def test_successful_empty_rows_explicitly_retract_but_null_is_unknown(self):
+        empty = cli.parse_usage_output(wire([]), NOW)
+        self.assertEqual(empty.status, "no_numeric_windows")
+        self.assertEqual(empty.snapshot["quota_windows"], [])
+        self.assertTrue(empty.snapshot["snapshot_complete"])
+        unknown = cli.parse_usage_output(wire([row("future_kind")]), NOW)
+        self.assertIsNone(unknown.snapshot)
 
     def test_nullable_reset_is_not_invented_and_week_survives(self):
         read = cli.parse_usage_output(wire([row(reset=None), row("weekly_all")]), NOW)
@@ -292,6 +342,16 @@ class ReaderTests(unittest.TestCase):
         self.assertIsNone(failed.snapshot)
         self.assertEqual(json.dumps(first.snapshot, sort_keys=True), old)
 
+    def test_successful_empty_report_is_not_treated_as_a_read_failure(self):
+        reader = self.reader()
+        self.usage = cli.CommandResult(0, wire([]))
+        for _ in range(3):
+            read = reader.poll()
+            self.assertEqual(read.status, "no_numeric_windows")
+            self.assertEqual(read.retry_after_seconds, 300)
+            self.assertTrue(read.snapshot["snapshot_complete"])
+            self.clock.t += 300
+
     def test_parent_deadline_covers_all_commands(self):
         def slow(args, timeout):
             answer = self.runner(args, timeout)
@@ -369,20 +429,27 @@ class ChildContainmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory)/"owned-child-marker.txt"
             ran = Path(directory)/"parent-started.txt"
-            child = "import time,pathlib;time.sleep(1.2);pathlib.Path(" + repr(str(marker)) + ").write_text('test')"
+            # Leave time for the resumed Python interpreter to start on a busy
+            # Windows host, after assignment and the runner's 0.25s cleanup
+            # reserve. The child still writes only after the command's
+            # entire deadline, so survival outside the job remains observable.
+            command_budget = 4
+            child_delay = command_budget + 1.5
+            child = ("import time,pathlib;time.sleep(" + repr(child_delay)
+                     + ");pathlib.Path(" + repr(str(marker)) + ").write_text('test')")
             parent = ("import pathlib,subprocess,sys,time;pathlib.Path(" + repr(str(ran))
                       + ").write_text('started');subprocess.Popen([sys.executable,'-c',"
-                      + repr(child) + "]);time.sleep(3)")
+                      + repr(child) + "]);time.sleep(" + repr(command_budget + 5) + ")")
             original = cli._WindowsJob.assign
             def delayed(job, process):
                 time.sleep(.5)
                 self.assertFalse(ran.exists(), "child ran before job assignment")
                 return original(job, process)
             with patch.object(cli._WindowsJob, "assign", delayed):
-                result = cli._run_command([sys.executable, "-c", parent], 1)
+                result = cli._run_command([sys.executable, "-c", parent], command_budget)
             self.assertEqual(result.error, "timeout")
             self.assertTrue(ran.exists(), "test did not exercise resumed parent")
-            time.sleep(1.5)
+            time.sleep(child_delay + .5)
             self.assertFalse(marker.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows suspended process fail-closed cleanup")

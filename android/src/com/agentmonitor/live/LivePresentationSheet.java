@@ -33,6 +33,9 @@ final class LivePresentationSheet extends Dialog {
     private boolean closing;
 
     LivePresentationSheet(Activity activity, String title) {
+        this(activity, title, "关闭设置");
+    }
+    LivePresentationSheet(Activity activity, String title, String closeDescription) {
         super(activity, android.R.style.Theme_Material_Dialog_NoActionBar);
         this.activity = activity; ui = new NativeUi(activity);
         setCanceledOnTouchOutside(true);
@@ -47,13 +50,13 @@ final class LivePresentationSheet extends Dialog {
         };
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(ui.dp(20), ui.dp(14), ui.dp(20), ui.dp(20));
-        panel.setBackground(ui.bordered(ui.surface, 24)); panel.setClipToOutline(true);
+        panel.setBackground(ui.rounded(ui.bg, 24)); panel.setClipToOutline(true);
         content = ui.column();
         header = ui.row();
         TextView heading = ui.text(title, 20, true);
         if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        View close = ui.iconButton("close", "关闭设置", this::cancel);
+        View close = ui.iconButton("close", closeDescription, this::cancel);
         LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48));
         closeParams.rightMargin = -ui.dp(12);
         header.addView(close, closeParams); panel.addView(header); panel.addView(ui.space(8));
@@ -83,8 +86,54 @@ final class LivePresentationSheet extends Dialog {
     }
     void action(String text, Runnable action) {
         TextView row = ui.button(text, false, () -> { dismiss(); action.run(); });
+        row.setTypeface(ui.regular); row.setTextColor(ui.text);
+        row.setMinHeight(ui.dp(52)); row.setPadding(0, ui.dp(12), 0, ui.dp(12));
+        row.setBackground(ui.ripple(Color.TRANSPARENT, 10));
         row.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        content.addView(row, new LinearLayout.LayoutParams(-1, -2)); content.addView(ui.space(8));
+        content.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        View rule = new View(activity); rule.setBackgroundColor(ui.line);
+        rule.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        content.addView(rule, new LinearLayout.LayoutParams(-1, ui.dp(1)));
+    }
+    /** A choice uses the same palette and touch rhythm as the settings sheet. */
+    void choice(String label, String count, boolean selected, Runnable action) {
+        LinearLayout row = ui.row();
+        row.setMinimumHeight(ui.dp(52));
+        row.setPaddingRelative(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10));
+        row.setBackground(ui.ripple(selected ? ui.soft : Color.TRANSPARENT, 12));
+        row.setSelected(selected);
+        row.setFocusable(true);
+        row.setContentDescription(count.isEmpty() ? label : label + "，" + count + " 项");
+        row.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.setClassName("android.widget.RadioButton");
+                info.setCheckable(true); info.setChecked(host.isSelected());
+            }
+        });
+        TextView name = ui.text(label, 15, selected);
+        name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        if (!count.isEmpty()) {
+            TextView total = ui.body(count, 13);
+            total.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams totalParams = new LinearLayout.LayoutParams(-2, -2);
+            totalParams.setMarginStart(ui.dp(10));
+            row.addView(total, totalParams);
+        }
+        View check = selected ? ui.icon("check", 18) : new View(activity);
+        check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams checkParams = new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18));
+        checkParams.setMarginStart(ui.dp(12));
+        row.addView(check, checkParams);
+        row.setOnClickListener(v -> {
+            if (closing || !isShowing()) return;
+            try { action.run(); } finally { dismiss(); }
+        });
+        ui.pressFeedback(row, .985f);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+        layout.bottomMargin = ui.dp(4);
+        content.addView(row, layout);
     }
     void toggle(String text, String key) {
         Switch row = new Switch(activity);

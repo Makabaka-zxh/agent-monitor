@@ -126,7 +126,7 @@ class CompressedDiscoveryTests(unittest.TestCase):
             seen.append(path.name)
             if path.name == "050.jsonl.zst":
                 return None  # A selected child is rejected by the content parser.
-            return {"id": path.name, "updated_at": "2026-01-01T00:00:00Z"}
+            return {"id": path.name, "tool": "codex", "updated_at": "2026-01-01T00:00:00Z"}
         with patch.object(collector, "parse_codex_session", side_effect=parse), \
                 patch.object(collector, "_codex_titles", return_value={}), \
                 patch.object(collector, "_hook_tasks", return_value=[]):

@@ -179,7 +179,7 @@ public final class TrackingService extends Service {
         notificationTaskId = trackedId;
         title = clean(intent.getStringExtra("title"), 160);
         String requestedTool = intent.getStringExtra("tool");
-        tool = "claude".equals(requestedTool) || "codex".equals(requestedTool) ? requestedTool : "";
+        tool = NativeScreenPolicy.toolIndex(requestedTool) > 0 ? requestedTool : "";
         presentationData = new LivePresentation.Data();
         durationMs = TrackingPolicy.durationMs(intent.getIntExtra("duration_minutes", TrackingPolicy.DEFAULT_DURATION_MINUTES));
         untilTaskEnd = durationMs == TrackingPolicy.UNTIL_TASK_END_MS;
@@ -399,44 +399,60 @@ public final class TrackingService extends Service {
         String target = NativeNavigationPolicy.notificationUri(notificationTaskId, epoch);
         if (target != null) open.setAction(NativeNavigationPolicy.NOTIFICATION_ACTION).setData(Uri.parse(target));
         PendingIntent content = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        int accent = "claude".equals(tool) ? 0xffbf785c : "codex".equals(tool) ? 0xff7766df : 0xff356555;
+        int accent = "claude".equals(tool) ? 0xff96664f : "codex".equals(tool) ? 0xff506b8d : 0xff626b75;
         String displayMessage = message.startsWith("更新暂停") ? "正在重连" : message;
-        String toolLabel = "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "任务";
-        String compactTool = "claude".equals(tool) ? "Claude" : "codex".equals(tool) ? "Codex" : "任务";
+        String toolLabel = NativeListPresentation.toolLabel(tool);
         int smallIcon = R.drawable.ic_monitor;
         // The expanded content template needs its own full-color brand icon; the monochrome
         // small icon is reserved for the status bar and the compact live-update presentation.
-        Icon contentIcon = Icon.createWithResource(this, "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : R.drawable.monitor_brand);
+        Icon contentIcon = Icon.createWithResource(this, "claude".equals(tool) ? R.drawable.claude
+                : "codex".equals(tool) ? R.drawable.codex : "antigravity".equals(tool) ? R.drawable.antigravity : R.drawable.monitor_brand);
         lockscreenRedacted = shouldRedactLockscreen();
-        // Completion notices outlive this service, so remain brand-only when the screen later locks.
-        boolean brandOnly = lockscreenRedacted || !ongoing;
         LivePresentation.Options displayOptions = LivePresentationPreferences.options(this);
+        long elapsed = Math.max(0, SystemClock.elapsedRealtime() - started);
+        // Completed sessions keep only a fixed state. Ongoing public details require a separate choice.
+        boolean publicDetails = ongoing && LivePresentationPreferences.lockscreenDetails(this);
+        boolean showDetails = ongoing && (!lockscreenRedacted || publicDetails);
+        String publicSummary = LivePresentation.statusLine(LivePresentation.publicState(displayMessage),
+                displayOptions.elapsed && ongoing, elapsed);
+        String detailSummary = LivePresentation.statusLine(displayMessage, displayOptions.elapsed, elapsed);
+        String detailTitle = LivePresentation.title(title, toolLabel, displayOptions);
+        String publicTitle = publicDetails ? detailTitle : toolLabel;
+        String primaryTitle = showDetails ? detailTitle : toolLabel;
+        String publicIdentity = LivePresentation.compactIdentity(toolLabel, presentationData.computer, publicDetails && displayOptions.computer);
+        String primaryIdentity = LivePresentation.compactIdentity(toolLabel, presentationData.computer, showDetails && displayOptions.computer);
         Notification.Builder publicBuilder = new Notification.Builder(this, CHANNEL)
-                .setSmallIcon(smallIcon).setLargeIcon(contentIcon).setContentTitle(toolLabel)
+                .setSmallIcon(smallIcon).setLargeIcon(contentIcon)
+                .setContentTitle(publicTitle)
+                .setContentText(publicDetails ? detailSummary : publicSummary)
+                .setSubText(publicIdentity.equals(publicTitle) ? null : publicIdentity)
                 .setColor(accent).setColorized(false).setContentIntent(content)
                 .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true)
                 .setOngoing(ongoing).setAutoCancel(!ongoing).setShowWhen(false);
         if (Build.VERSION.SDK_INT >= 31 && ongoing) publicBuilder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
         if (!ongoing) publicBuilder.setTimeoutAfter(60000);
-        if (Build.VERSION.SDK_INT >= 36 && promote && ongoing) publicBuilder.setShortCriticalText(compactTool);
+        if (publicDetails) publicBuilder.setStyle(new Notification.BigTextStyle().bigText(
+                LivePresentation.expanded(toolLabel, displayMessage, presentationData, displayOptions, elapsed, System.currentTimeMillis())));
+        if (Build.VERSION.SDK_INT >= 36 && promote && ongoing) publicBuilder.setShortCriticalText("执行中");
         Notification publicVersion = publicBuilder.build();
         if (ongoing) publicVersion.flags |= Notification.FLAG_NO_CLEAR;
         Notification.Builder builder = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(smallIcon).setLargeIcon(contentIcon)
-                .setContentTitle(brandOnly ? toolLabel : LivePresentation.title(title, toolLabel, displayOptions))
-                .setContentText(brandOnly ? null : toolLabel + " · " + displayMessage)
+                .setContentTitle(primaryTitle)
+                .setContentText(showDetails ? detailSummary : publicSummary)
+                .setSubText(primaryIdentity.equals(primaryTitle) ? null : primaryIdentity)
                 .setColor(accent).setColorized(false)
                 .setContentIntent(content).setVisibility(Notification.VISIBILITY_PRIVATE).setOnlyAlertOnce(true)
                 .setPublicVersion(publicVersion)
                 .setOngoing(ongoing).setAutoCancel(!ongoing).setShowWhen(false);
-        if (!brandOnly) builder.setStyle(new Notification.BigTextStyle().bigText(
+        if (showDetails) builder.setStyle(new Notification.BigTextStyle().bigText(
                 LivePresentation.expanded(toolLabel, displayMessage, presentationData, displayOptions,
-                        SystemClock.elapsedRealtime() - started, System.currentTimeMillis())));
+                        elapsed, System.currentTimeMillis())));
         // Android 12+ may defer foreground visibility beyond POST_SETTLE_MS; that is not a user dismissal.
         if (Build.VERSION.SDK_INT >= 31 && ongoing) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
         if (Build.VERSION.SDK_INT >= 36 && promote && ongoing) {
             // BigTextStyle is eligible for Live Updates without inventing task progress.
-            builder.setShortCriticalText(brandOnly ? compactTool : "执行中");
+            builder.setShortCriticalText("执行中");
         }
         if (!ongoing) builder.setTimeoutAfter(60000);
         if (ongoing) {
@@ -451,7 +467,7 @@ public final class TrackingService extends Service {
             Intent dismiss = new Intent(this, DismissReceiver.class).setData(Uri.parse("agentmonitor://tracking-dismiss/" + epoch + "/" + recovery.presentationNonce()))
                     .putExtra("generation", epoch).putExtra(EXTRA_SESSION, recovery.sessionNonce()).putExtra(EXTRA_PRESENTATION, recovery.presentationNonce());
             PendingIntent deleted = PendingIntent.getBroadcast(this, 0, dismiss, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            if (!brandOnly) builder.addAction(new Notification.Action.Builder(null, "停止跟踪", action).build());
+            if (!lockscreenRedacted) builder.addAction(new Notification.Action.Builder(null, "停止跟踪", action).build());
             builder.setDeleteIntent(deleted);
         }
         promotionRequested = false;
@@ -462,9 +478,10 @@ public final class TrackingService extends Service {
         Notification result = builder.build();
         // Request exclusion from Clear all; a delivered dismissal still ends this session.
         if (ongoing) result.flags |= Notification.FLAG_NO_CLEAR;
-        // The Xiaomi adapter uses only bundled tool branding, including in publicVersion.
+        // OEM surfaces receive only bundled branding and a fixed public state, never task details.
         // Waiting/reconnecting/confirmation/completion retain ordinary notification semantics.
-        XiaomiLiveNotification.apply(this, result, deviceBrand, XiaomiLiveCapabilities.cached(), tool, promote && ongoing);
+        XiaomiLiveNotification.apply(this, result, deviceBrand, XiaomiLiveCapabilities.cached(), tool,
+                promote && ongoing, publicSummary);
         return result;
     }
     private void finish(String message, boolean leaveNotice) {

@@ -34,7 +34,7 @@ public final class NativeUsageChart extends LinearLayout {
             column.setContentDescription(day + "，" + (amounts[i] == null ? "未提供记录" : NativeUsageFormat.exact(amounts[i]) + " Token"));
             if (availableDay) column.setOnClickListener(v -> { select(day); selection.select(day); });
             Bar bar = new Bar(amounts[i], maximum); bars[i] = bar;
-            column.addView(bar, new LinearLayout.LayoutParams(-1, ui.dp(96)));
+            column.addView(bar, new LinearLayout.LayoutParams(-1, -2));
             TextView weekday = ui.text(names[i], 13); weekday.setTextColor(ui.muted); weekday.setGravity(Gravity.CENTER);
             weekday.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             column.addView(ui.space(8)); column.addView(weekday, new LinearLayout.LayoutParams(-1, -2));
@@ -55,12 +55,25 @@ public final class NativeUsageChart extends LinearLayout {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Long amount; private final long maximum; private boolean selected;
         Bar(Long amount, long maximum) { super(ui.activity); this.amount = amount; this.maximum = maximum; setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO); }
+        private void prepareLabelPaint() {
+            paint.setTypeface(ui.regular); paint.setTextSize(ui.sp(13)); paint.setTextAlign(Paint.Align.CENTER);
+        }
+        @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            prepareLabelPaint();
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            int labelHeight = (int) Math.ceil(metrics.bottom - metrics.top);
+            int labelWidth = (int) Math.ceil(Math.max(paint.measureText("—"), paint.measureText("0")));
+            int desiredHeight = Math.max(ui.dp(96), labelHeight + ui.dp(12));
+            int desiredWidth = Math.max(ui.dp(32), labelWidth + ui.dp(10));
+            setMeasuredDimension(resolveSize(desiredWidth, widthMeasureSpec), resolveSize(desiredHeight, heightMeasureSpec));
+        }
         @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas); float bottom = getHeight() - ui.dp(3), width = Math.min(ui.dp(22), getWidth() - ui.dp(10));
+            super.onDraw(canvas); float bottom = getHeight() - ui.dp(3), width = Math.max(0, Math.min(ui.dp(22), getWidth() - ui.dp(10)));
             paint.setColor(selected ? ui.accent : ui.dark ? 0xFF7BADA1 : 0xFF93B8AD);
             if (amount == null || amount == 0) {
-                paint.setColor(ui.muted); paint.setTypeface(ui.regular); paint.setTextSize(ui.dp(13)); paint.setTextAlign(Paint.Align.CENTER);
-                canvas.drawText(amount == null ? "—" : "0", getWidth() / 2f, bottom, paint); return;
+                paint.setColor(ui.muted); prepareLabelPaint();
+                // Respect the scaled font's descent; parent constraints still own final available space.
+                canvas.drawText(amount == null ? "—" : "0", getWidth() / 2f, bottom - paint.getFontMetrics().bottom, paint); return;
             }
             float height = Math.max(ui.dp(5), (float) (NativeUsagePresentation.ratio(amount, maximum) * (getHeight() - ui.dp(10))));
             float left = (getWidth() - width) / 2f;

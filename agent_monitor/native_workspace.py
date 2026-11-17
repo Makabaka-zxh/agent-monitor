@@ -34,8 +34,10 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
 
     from .task_results import install_result_routes
     from .task_replies import install_reply_routes
+    from .task_interactions import install_control_routes
     install_result_routes(app, app.state.task_results, perform)
     install_reply_routes(app, store, perform)
+    install_control_routes(app, store, perform)
 
     def identity(value, *, native=False):
         pattern = r"[A-Za-z0-9_-]{32}" if native else r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"

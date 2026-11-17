@@ -12,7 +12,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from agent_monitor import remote_agent as agent
+from agent_monitor import collector, remote_agent as agent
 
 
 @contextmanager
@@ -46,6 +46,29 @@ def fake_hub(responder):
 
 
 class RemoteAgentTests(unittest.TestCase):
+    def test_antigravity_is_negotiated_and_does_not_break_an_older_hub(self):
+        support = True
+
+        def respond(_path, payload):
+            if not support and any(row["tool"] == "antigravity" for row in payload["tasks"]):
+                return 422, {}, {"detail": "unsupported provider"}
+            return 200, {}, {"sync_output": False, **({"antigravity_v1": True} if support else {})}
+
+        snapshot = {"tasks": [{"id": name + ":task", "tool": name} for name in ("codex", "claude", "antigravity")],
+                    "sources": [{"tool": name} for name in ("codex", "claude", "antigravity")]}
+        with fake_hub(respond) as (url, requests):
+            config = agent.AgentConfig(url, "desktop", "secret")
+            client = agent.HubClient(url)
+            for _ in range(2):
+                self.assertFalse(agent.heartbeat(client, config, snapshot))
+            self.assertTrue(config.antigravity_v1)
+            support = False
+            self.assertFalse(agent.heartbeat(client, config, snapshot))
+            self.assertFalse(config.antigravity_v1)
+            self.assertFalse(agent.heartbeat(client, config, snapshot))
+        sizes = [(len(req[2]["tasks"]), len(req[2]["sources"])) for req in requests]
+        self.assertEqual(sizes, [(2, 2), (3, 3), (3, 3), (2, 2), (2, 2)])
+
     def test_platform_uses_macos_without_changing_other_platform_names(self):
         for system, expected in (("Darwin", "macOS"), ("Windows", "Windows"), ("Linux", "Linux")):
             with self.subTest(system=system), patch("platform.system", return_value=system):
@@ -79,7 +102,10 @@ class RemoteAgentTests(unittest.TestCase):
                     patch("agent_monitor.remote_replies.RemoteReplyWorker") as replies:
                 with self.assertRaises(KeyboardInterrupt):
                     agent.run(state_dir, status_only=True, allow_replies=True, sleep=finish_after_two)
-            self.assertEqual([call.kwargs for call in collect.call_args_list], [{"include_output": False}] * 2)
+            self.assertEqual([call.kwargs["include_output"] for call in collect.call_args_list], [False, False])
+            first, second = [call.kwargs["codex_growth"] for call in collect.call_args_list]
+            self.assertIsInstance(first, collector.CodexGrowthTracker)
+            self.assertIs(first, second)
             results.assert_not_called()
             replies.assert_not_called()
             usage.assert_called_once()
@@ -132,7 +158,9 @@ class RemoteAgentTests(unittest.TestCase):
                     with self.assertRaises(KeyboardInterrupt):
                         agent.run(state_dir, sleep=Mock(side_effect=KeyboardInterrupt), **options)
 
-                collect.assert_called_once_with(include_output=True)
+                collect.assert_called_once()
+                self.assertIs(collect.call_args.kwargs["include_output"], True)
+                self.assertIsInstance(collect.call_args.kwargs["codex_growth"], collector.CodexGrowthTracker)
                 self.assertEqual([call.args[0] for call in post.call_args_list], [
                     "/api/agent/heartbeat", "/api/agent/results/status", "/api/agent/results",
                     "/api/agent/results/file",

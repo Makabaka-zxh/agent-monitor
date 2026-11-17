@@ -12,6 +12,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -25,9 +26,11 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.AbsListView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -51,18 +54,41 @@ import org.json.JSONObject;
 public final class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newFixedThreadPool(2);
+    // Visible task reads do not queue behind account requests or local image work.
+    private final ExecutorService workbenchReader = Executors.newSingleThreadExecutor();
     private final Set<String> mutations = new HashSet<>();
     private final NativeWorkbenchPolicy.RevisionGate dataRevision = new NativeWorkbenchPolicy.RevisionGate();
     private final Map<String, Parcelable> listPositions = new HashMap<>();
     private final Map<String, Integer> scrollPositions = new HashMap<>();
+    private int workbenchHeaderScroll;
     private NativeUi ui;
+    private NativeSystemBars systemBars;
+    private NativeBingWallpaper bingWallpaper;
+    private NativeBingWallpaper.Result wallpaperResult;
+    private NativeAppearancePage appearancePage;
     private final LiveActivitySettings liveSettings = new LiveActivitySettings(this, view -> { if (ui != null) ui.applyFont(view); });
-    private LinearLayout root, titleBar, titleHeading, bottomBar, pageColumn;
-    private FrameLayout body;
+    private LinearLayout root, pageHeader, titleBar, titleHeading, titleActions, headerMeta, pageColumn;
+    private FrameLayout stage, body;
+    private NativeGlassNavigation bottomBar;
+    private View fixedBottomAction;
+    private int listBaseBottomPadding;
+    private boolean imeVisible;
+    private boolean overlayHeader;
+    private boolean integratedHeader;
+    private Drawable compactHeaderSurface;
+    private boolean opaqueCompactHeader;
+    private float compactTitleAlpha;
+    private float expandedTitleAlpha;
+    private int expandedRootOpening;
+    private String renderedPage = "", currentSettingsSheet = "", pendingSettingsSheet = "";
+    private Dialog settingsSheetDialog;
+    private View pageRule;
     private TextView title, connection, trackingButton, trackingNote, archiveButton, emptyLabel, deviceStatus, profileSaveButton, avatarPickButton;
     private TextView loginStatus, loginNote, loginButton, loginCheckButton;
     private TextView taskSearchSummary;
-    private TextView taskHeadingTitle, taskHeadingComputer;
+    private TextView expandedRootTitle, taskSearchAffordanceLabel;
+    private View taskSearchAffordance;
+    private TextView taskHeadingTitle;
     private LinearLayout taskHeadingTool;
     private EditText taskSearchInput;
     private View taskSearchClear, taskSearchToggle;
@@ -79,7 +105,12 @@ public final class MainActivity extends Activity {
     private ScrollView scroll;
     private NativePages.TaskAdapter taskAdapter;
     private NativePages.DeviceAdapter deviceAdapter;
-    private NativePages.Segments toolSegments, scopeSegments;
+    private static final String[] TASK_SOURCES = NativeScreenPolicy.toolFilters();
+    private static final String[] TASK_SCOPES = {"active", "all", "archived"};
+    private static final String[] TASK_SCOPE_LABELS = {"进行中", "全部任务", "已归档"};
+    private TextView taskScopeFilter, taskSourceFilter;
+    private int[] taskSourceCounts;
+    private LivePresentationSheet taskFilterSheet;
     private NativePages.TaskDetail taskDetail;
     private NativeTaskResults taskResults;
     private NativeUsagePage nativeUsage;
@@ -114,14 +145,17 @@ public final class MainActivity extends Activity {
     private android.window.OnBackInvokedCallback backCallback;
     private interface Reply { void done(JSONObject value, long requestedPage); }
 
+    private final Runnable refreshWorkspace = this::fetchSnapshot;
+    private LinearLayout pairingCodeArea;
+
     private final Runnable heartbeat = new Runnable() { @Override public void run() {
         if (!visible || isDestroyed()) return;
         NativeConnection.tick(MainActivity.this);
         String error = NativeConnection.consumeError(); if (!error.isEmpty()) notice(error);
         reconcileConnection(); updateLogin();
-        if (!loadedToken.isEmpty() && workspacePage() && SystemClock.elapsedRealtime() >= nextSnapshot) fetchSnapshot();
         if (!loadedToken.isEmpty() && page.equals("usage") && SystemClock.elapsedRealtime() >= nextUsage) fetchUsage();
         if (nativeUsage != null) nativeUsage.tick();
+        updatePairingCodeExpiry();
         if (filterDirty && !filterBusy && SystemClock.elapsedRealtime() >= filterRetryAt) flushFilter();
         boolean nowStale = stale(); if (lastStale != nowStale) { lastStale = nowStale; updateWorkspace(); }
         updateConnection(); updateTracking(); if (taskResults != null) taskResults.tick(); handler.postDelayed(this, 1000);
@@ -136,25 +170,61 @@ public final class MainActivity extends Activity {
             page = safePage(saved.getString("page", "tasks")); selectedId = saved.getString("id", "");
             tool = NativeScreenPolicy.tool(saved.getString("tool", tool)); scope = NativeScreenPolicy.scope(saved.getString("scope", scope));
             profileDraft = saved.getBoolean("profile_draft"); draftName = saved.getString("draft_name", ""); draftAvatar = saved.getString("draft_avatar", "");
-            pairingCode = saved.getString("pairing_code", ""); pairingExpires = saved.getString("pairing_expires", "");
             pageEpoch = saved.getLong("page_epoch", 0); taskReturnDevice = saved.getString("task_return_device", ""); pendingAvatarUri = saved.getString("avatar_uri", "");
             Parcelable position = saved.getParcelable("list_position"); if (position != null) listPositions.put(pageKey(), position);
             scrollPositions.put(pageKey(), saved.getInt("scroll_y", 0));
+            workbenchHeaderScroll = saved.getInt("workbench_header_scroll", 0);
         }
         root = ui.column(); root.setBackground(ui.background());
-        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
-        getWindow().setStatusBarColor(Color.TRANSPARENT); getWindow().setNavigationBarColor(ui.bg);
-        if (!ui.dark) root.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(ui.bg));
+        systemBars = NativeSystemBars.attach(getWindow(), root, ui.headerTopColor(), ui.bg);
         root.setOnApplyWindowInsetsListener((view, insets) -> {
+            systemBars.onInsets(insets);
             if (Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, insets.getInsets(WindowInsets.Type.ime()).bottom));
-            } else view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+                imeVisible = insets.isVisible(WindowInsets.Type.ime());
+                int safeBottom = Math.max(bars.bottom, insets.getInsets(WindowInsets.Type.mandatorySystemGestures()).bottom);
+                view.setPadding(bars.left, bars.top, bars.right, Math.max(safeBottom, insets.getInsets(WindowInsets.Type.ime()).bottom));
+            } else {
+                imeVisible = insets.getSystemWindowInsetBottom() > ui.dp(160);
+                view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            }
+            updateNavigationInsets();
             return insets;
         });
-        titleBar = ui.row(); titleBar.setPadding(ui.dp(18), ui.dp(6), ui.dp(8), ui.dp(4)); root.addView(titleBar, wrap());
-        body = new FrameLayout(this); root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
-        bottomBar = ui.row(); bottomBar.setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(6)); root.addView(bottomBar, wrap()); setContentView(root); root.requestApplyInsets();
+        pageHeader = ui.column();
+        pageHeader.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        titleBar = ui.row(); pageHeader.addView(titleBar, wrap());
+        headerMeta = ui.column(); pageHeader.addView(headerMeta, wrap());
+        pageRule = new View(this);
+        pageRule.setBackgroundColor(ui.line);
+        pageRule.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams ruleParams = new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(1)));
+        ruleParams.setMarginStart(ui.dp(20)); ruleParams.setMarginEnd(ui.dp(20));
+        pageHeader.addView(pageRule, ruleParams);
+        stage = new FrameLayout(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                // Give the scroll viewport its starting clearance in the same measure pass.
+                measureChildWithMargins(pageHeader, widthSpec, 0, heightSpec, 0);
+                int height = pageHeader.getMeasuredHeight();
+                // Every scrolling page starts below its measured header and can move behind its tint.
+                // A collapsing root owns its opening in the content and only reserves a pinned panel.
+                boolean scrollsBehindHeader = scroll != null || list != null;
+                ((FrameLayout.LayoutParams) body.getLayoutParams()).topMargin = scrollsBehindHeader ? 0 : height;
+                boolean pinned = integratedHeader && headerNeedsClearance();
+                updateContentPadding(scrollsBehindHeader && (!integratedHeader || pinned) ? height : 0);
+                updateExpandedRootSpacing(pinned);
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        root.addView(stage, new LinearLayout.LayoutParams(-1, 0, 1));
+        body = new FrameLayout(this); stage.addView(body, new FrameLayout.LayoutParams(-1, -1));
+        stage.addView(pageHeader, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+        bottomBar = new NativeGlassNavigation(ui, body, root, NativeNavigationPolicy.tabForPage(page, taskReturnDevice), key -> { if (!page.equals(key)) navigate(key, ""); });
+        FrameLayout.LayoutParams navigation = new FrameLayout.LayoutParams(ui.dp(320), ui.dp(72), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        navigation.bottomMargin = ui.dp(10); stage.addView(bottomBar, navigation);
+        stage.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> { if (right - left != oldRight - oldLeft) updateNavigationInsets(); });
+        setContentView(root); root.requestApplyInsets();
         if (Build.VERSION.SDK_INT >= 33) { backCallback = this::back; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback); }
         JSONObject store = SessionStore.read(this); if (fullConnection(store)) loadedToken = store.optString("reader_token");
         if (saved != null) {
@@ -167,9 +237,11 @@ public final class MainActivity extends Activity {
                     saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken), pageEpoch,
                     saved.getInt("task_search_selection_start", -1), saved.getInt("task_search_selection_end", -1));
             if (!loadedToken.isEmpty() && tokenFingerprint(loadedToken).equals(saved.getString("state_fingerprint", ""))) usagePageState = saved.getBundle("usage_page_state");
+            pendingSettingsSheet = NativeNavigationPolicy.restorableSettingsSheet(page, saved.getString("settings_sheet", ""),
+                    saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken));
         }
         UsageAlerts.sync(this);
-        if (saved != null && !tokenFingerprint(loadedToken).equals(saved.getString("state_fingerprint", ""))) { profileDraft = false; draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = ""; taskReturnDevice = ""; selectedId = ""; page = "tasks"; listPositions.clear(); scrollPositions.clear(); }
+        if (saved != null && !tokenFingerprint(loadedToken).equals(saved.getString("state_fingerprint", ""))) { profileDraft = false; draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = ""; taskReturnDevice = ""; selectedId = ""; page = "tasks"; listPositions.clear(); scrollPositions.clear(); workbenchHeaderScroll = 0; }
         if (saved != null && !loadedToken.isEmpty() && tokenFingerprint(loadedToken).equals(saved.getString("picker_fingerprint", ""))) { pickerToken = loadedToken; pickerPage = saved.getString("picker_page", ""); pickerEpoch = saved.getLong("picker_epoch", -1); }
         openNotification(getIntent()); handleReturn(getIntent()); showPage(false);
     }
@@ -178,16 +250,18 @@ public final class MainActivity extends Activity {
     private boolean workspacePage() { return NativeWorkbenchPolicy.pageRead(page) == NativeWorkbenchPolicy.PageRead.WORKBENCH; }
     private boolean accountPage() { return NativeWorkbenchPolicy.pageRead(page) == NativeWorkbenchPolicy.PageRead.ACCOUNT; }
     private void loadCurrentPage() {
-        NativeWorkbenchPolicy.loadPage(page, visible, !loadedToken.isEmpty(), () -> {
-            // Repeated lifecycle callbacks must not erase a running read's next-poll time.
-            if (!snapshotBusy) { nextSnapshot = 0; fetchSnapshot(); }
-        }, () -> {
+        if (!workspacePage()) handler.removeCallbacks(refreshWorkspace);
+        NativeWorkbenchPolicy.loadPage(page, visible, !loadedToken.isEmpty(), this::scheduleSnapshot, () -> {
             if (!usageBusy) { nextUsage = 0; fetchUsage(); }
         }, this::fetchAccount);
     }
     private boolean rootPage() { return NativeNavigationPolicy.rootPage(page); }
     private boolean fullConnection(JSONObject store) { return ServerSettings.configured(this) && !store.optString("reader_token").equals(invalidToken) && NativeScreenPolicy.connected(store.optString("mode"), store.optBoolean("logout_pending"), store.optBoolean("native_ready") || store.optBoolean("cookie_ready"), store.optString("reader_token"), NativeApi.time(store.optString("expires_at")), System.currentTimeMillis()); }
-    private boolean valid(String token, long epoch) { return !isDestroyed() && !isFinishing() && epoch == sessionEpoch && token.equals(loadedToken) && fullConnection(SessionStore.read(this)) && token.equals(SessionStore.token(this)); }
+    private boolean valid(String token, long epoch) {
+        if (isDestroyed() || isFinishing() || epoch != sessionEpoch || !token.equals(loadedToken)) return false;
+        JSONObject store = SessionStore.read(this);
+        return token.equals(store.optString("reader_token")) && fullConnection(store);
+    }
     private boolean samePage(long revision) { return !isDestroyed() && revision == pageEpoch; }
     private void reconcileConnection() {
         JSONObject store = SessionStore.read(this); String token = fullConnection(store) ? store.optString("reader_token") : "";
@@ -196,29 +270,38 @@ public final class MainActivity extends Activity {
         usageSummary = null; usagePageState = null; nativeUsage = null; usageBusy = false; usageFailed = false; nextUsage = 0;
         usageRequestRevision = 0; usageAcceptedRevision = 0; usageAlertRevision = 0;
         UsageAlerts.sync(this);
-        snapshotBusy = false; accountBusy = false; filterBusy = false; filterDirty = false; apiCooldownUntil = 0; avatarBusy = false; avatarGeneration++; mutations.clear(); listPositions.clear(); scrollPositions.clear(); cancelDuration(); clearNotificationRequest();
+        snapshotBusy = false; accountBusy = false; filterBusy = false; filterDirty = false; apiCooldownUntil = 0; avatarBusy = false; avatarGeneration++; mutations.clear(); listPositions.clear(); scrollPositions.clear(); workbenchHeaderScroll = 0; cancelDuration(); clearNotificationRequest();
         // A direct account switch has the same private-state boundary as logout.
         profileDraft = false; draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = "";
         pickerToken = ""; pickerPage = ""; pickerEpoch = -1; taskResultsState = null;
         pendingDocumentResult = null; hasPendingDocumentResult = false;
         showPage(false); loadCurrentPage();
     }
-    private void request(String method, String path, JSONObject payload, Reply done) {
+    private boolean request(String method, String path, JSONObject payload, Reply done) {
         final String token = loadedToken; final long epoch = sessionEpoch, revision = pageEpoch;
-        if (token.isEmpty() || !valid(token, epoch)) return;
-        if (SystemClock.elapsedRealtime() < apiCooldownUntil) { done.done(null, revision); return; }
-        worker.execute(() -> {
+        final boolean readsWorkspace = method.equals("GET") && path.equals("/api/native/workbench");
+        if (token.isEmpty() || !valid(token, epoch)) {
+            if (readsWorkspace) workbenchReadSkipped(epoch);
+            return false;
+        }
+        if (SystemClock.elapsedRealtime() < apiCooldownUntil) { done.done(null, revision); return true; }
+        ExecutorService executor = readsWorkspace ? workbenchReader : worker;
+        executor.execute(() -> {
             JSONObject value = null; NativeApi.Failure failure = null;
             try { value = NativeApi.call(method, path, payload, token); } catch (NativeApi.Failure error) { failure = error; }
             final JSONObject result = value; final NativeApi.Failure error = failure;
             handler.post(() -> {
-                if (!valid(token, epoch)) return;
+                if (!valid(token, epoch)) {
+                    if (readsWorkspace) workbenchReadSkipped(epoch);
+                    return;
+                }
                 if (error != null && (error.status == 401 || error.status == 403)) { invalidate(token); return; }
                 if (error != null && error.status == 429) apiCooldownUntil = Math.max(apiCooldownUntil, SystemClock.elapsedRealtime() + error.retryAfterMs);
                 if (error != null && !method.equals("GET") && samePage(revision) && visible) notice(error.getMessage());
                 done.done(error == null ? result : null, revision);
             });
         });
+        return true;
     }
     private void mutate(String key, String method, String path, JSONObject payload, Reply done) {
         if (mutations.contains(key) || loadedToken.isEmpty()) return;
@@ -226,28 +309,56 @@ public final class MainActivity extends Activity {
         request(method, path, payload, (result, revision) -> {
             mutations.remove(key); dataRevision.finished(NativeWorkbenchPolicy.Change.WORKSPACE); nextSnapshot = 0;
             if (result != null) done.done(result, revision);
-            if (visible && !loadedToken.isEmpty() && workspacePage()) fetchSnapshot();
+            scheduleSnapshot();
         });
     }
     private void invalidate(String token) { disconnectLocally(token); if (visible) notice("登录已失效，请重新登录"); }
+    private boolean canReadWorkspace() {
+        return visible && !isDestroyed() && !isFinishing() && workspacePage() && !loadedToken.isEmpty() && !snapshotBusy;
+    }
+    private void scheduleSnapshot() {
+        handler.removeCallbacks(refreshWorkspace);
+        if (!canReadWorkspace()) return;
+        long now = SystemClock.elapsedRealtime();
+        long delay = NativeWorkbenchPolicy.snapshotDelay(now, nextSnapshot, apiCooldownUntil);
+        if (delay == 0) fetchSnapshot();
+        else handler.postDelayed(refreshWorkspace, delay);
+    }
+    private void workbenchReadSkipped(long epoch) {
+        // Ignore an old session's callback without disturbing a newer read.
+        if (epoch != sessionEpoch) return;
+        snapshotBusy = false;
+        nextSnapshot = SystemClock.elapsedRealtime() + 1000;
+        scheduleSnapshot();
+    }
+    private void refreshWorkspaceNow() {
+        nextSnapshot = 0;
+        scheduleSnapshot();
+    }
     private void fetchSnapshot() {
-        if (!visible || !workspacePage() || loadedToken.isEmpty() || snapshotBusy || SystemClock.elapsedRealtime() < apiCooldownUntil) return;
-        snapshotBusy = true; final long requestedData = dataRevision.capture(); nextSnapshot = SystemClock.elapsedRealtime() + 5000;
+        if (!canReadWorkspace()) return;
+        long started = SystemClock.elapsedRealtime();
+        if (NativeWorkbenchPolicy.snapshotDelay(started, nextSnapshot, apiCooldownUntil) > 0) { scheduleSnapshot(); return; }
+        snapshotBusy = true; final long requestedData = dataRevision.capture();
         final long requestedUsage = ++usageRequestRevision;
         updateConnection();
         if (snapshot == null && emptyLabel != null) emptyLabel.setText("正在读取");
         request("GET", "/api/native/workbench", null, (value, revision) -> {
             snapshotBusy = false;
-            if (!dataRevision.accepts(requestedData)) { logWorkbench("discard_epoch", value); nextSnapshot = 0; updateConnection(); return; }
-            if (value == null) { logWorkbench("failure", null); failed = true; nextSnapshot = Math.max(apiCooldownUntil, SystemClock.elapsedRealtime() + 7000); }
+            if (!dataRevision.accepts(requestedData)) {
+                logWorkbench("discard_epoch", value); updateConnection(); refreshWorkspaceNow(); return;
+            }
+            nextSnapshot = NativeWorkbenchPolicy.nextSnapshot(started, SystemClock.elapsedRealtime(), value != null);
+            if (value == null) { logWorkbench("failure", null); failed = true; }
             else {
                 snapshot = value; failed = false; lastSuccess = SystemClock.elapsedRealtime(); JSONObject preferences = value.optJSONObject("preferences");
                 acceptUsage(value.optJSONObject("usage"), requestedUsage);
                 logWorkbench("accepted", value);
                 if (preferences != null) applyOutputPreference(preferences.optBoolean("sync_output"));
-                if (!filterInitialized && preferences != null) { tool = NativeScreenPolicy.tool(preferences.optString("tool_filter")); filterInitialized = true; saveFilters(); if (toolSegments != null) toolSegments.select(tool); }
+                if (!filterInitialized && preferences != null) { tool = NativeScreenPolicy.tool(preferences.optString("tool_filter")); filterInitialized = true; saveFilters(); updateTaskFilterLabels(); }
             }
             updateConnection(); updateWorkspace();
+            scheduleSnapshot();
         });
     }
     private void logWorkbench(String outcome, JSONObject value) {
@@ -323,85 +434,278 @@ public final class MainActivity extends Activity {
         });
     }
     private void navigate(String destination, String id) {
-        pendingTaskSearchFocus = null;
+        pendingTaskSearchFocus = null; pendingSettingsSheet = "";
         savePosition(); captureDraft(); if (destination.equals("task")) taskReturnDevice = page.equals("device") ? selectedId : "";
         page = safePage(destination); selectedId = id == null ? "" : id; pageEpoch++; actionRevision++; cancelDuration(); clearNotificationRequest();
         showPage(true); loadCurrentPage();
     }
-    private void savePosition() { if (list != null) listPositions.put(pageKey(), list.onSaveInstanceState()); if (scroll != null) scrollPositions.put(pageKey(), scroll.getScrollY()); }
-    private void restorePosition() { if (list != null && listPositions.containsKey(pageKey())) list.onRestoreInstanceState(listPositions.get(pageKey())); if (scroll != null) { final ScrollView target = scroll; int y = scrollPositions.containsKey(pageKey()) ? scrollPositions.get(pageKey()) : 0; target.post(() -> target.scrollTo(0, y)); } }
+    private void savePosition() {
+        if (list != null) listPositions.put(pageKey(), list.onSaveInstanceState());
+        if (page.equals("tasks")) workbenchHeaderScroll = currentWorkbenchHeaderScroll();
+        if (scroll != null) scrollPositions.put(pageKey(), scroll.getScrollY());
+    }
+    private int currentWorkbenchHeaderScroll() {
+        return list == null || !list.isInTouchMode() || list.getFirstVisiblePosition() != 0
+                ? 0 : firstListRowOffset(list);
+    }
+    private void restorePosition() {
+        if (list != null && listPositions.containsKey(pageKey())) {
+            list.onRestoreInstanceState(listPositions.get(pageKey()));
+            // Native list state does not preserve a partial offset in the first fixed row.
+            final ListView target = list;
+            final int offset = page.equals("tasks") ? workbenchHeaderScroll : 0;
+            if (offset > 0) target.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override public void onLayoutChange(View view, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    target.removeOnLayoutChangeListener(this);
+                    if (list == target && target.getFirstVisiblePosition() == 0 && target.isInTouchMode()) {
+                        int delta = offset - currentWorkbenchHeaderScroll();
+                        if (delta > 0) target.scrollListBy(delta);
+                    }
+                }
+            });
+        }
+        if (scroll != null) {
+            final ScrollView target = scroll;
+            int y = scrollPositions.containsKey(pageKey()) ? scrollPositions.get(pageKey()) : 0;
+            target.post(() -> { if (scroll == target) target.scrollTo(0, y); });
+        }
+    }
 
     private void showPage(boolean animate) {
         if (body == null) return;
+        String previousPage = renderedPage; renderedPage = page;
+        pairingCodeArea = null;
+        if (!page.equals(NativeNavigationPolicy.settingsSheetParent(pendingSettingsSheet))) pendingSettingsSheet = "";
         if (!page.equals("tasks") || loadedToken.isEmpty()) pendingTaskSearchFocus = null;
         if (taskSearchInput != null && taskSearchInput.hasFocus()) hideTaskSearchKeyboard();
-        cancelSearchAnimation(); taskSearchInput = null; taskSearchClear = null; taskSearchSummary = null; taskSearchPanel = null; taskSearchToggle = null;
-        UsageAlerts.dismissSettings(this);
+        cancelSearchAnimation();
+        if (taskSearchPanel != null) pageHeader.removeView(taskSearchPanel);
+        taskSearchInput = null; taskSearchClear = null; taskSearchSummary = null; taskSearchPanel = null; taskSearchToggle = null;
+        expandedRootTitle = null; expandedRootOpening = 0; taskSearchAffordance = null; taskSearchAffordanceLabel = null;
+        UsageAlerts.dismissSettings(this); liveSettings.dismiss(); currentSettingsSheet = ""; settingsSheetDialog = null;
         if (helpDialog != null && (loadedToken.isEmpty() || !pageKey().equals(helpPage))) dismissHelp();
+        dismissTaskFilterSheet();
         if (taskResults != null) { taskResults.dispose(); taskResults = null; }
-        taskHeadingTitle = null; taskHeadingComputer = null; taskHeadingTool = null;
+        taskHeadingTitle = null; taskHeadingTool = null;
         if (nativeUsage != null) usagePageState = nativeUsage.saveState(); nativeUsage = null; taskUsage = null;
-        list = null; scroll = null; taskAdapter = null; deviceAdapter = null; toolSegments = null; scopeSegments = null; taskDetail = null; trackingButton = null; trackingNote = null; archiveButton = null; emptyLabel = null; deviceStatus = null; nameInput = null; avatarView = null; outputSwitch = null; profileSaveButton = null; avatarPickButton = null;
+        list = null; scroll = null; fixedBottomAction = null; taskAdapter = null; deviceAdapter = null; taskScopeFilter = null; taskSourceFilter = null; taskSourceCounts = null; taskDetail = null; trackingButton = null; trackingNote = null; archiveButton = null; emptyLabel = null; deviceStatus = null; nameInput = null; avatarView = null; outputSwitch = null; profileSaveButton = null; avatarPickButton = null;
         loginStatus = null; loginNote = null; loginButton = null; loginCheckButton = null;
         accountCard = null; accountName = null; accountRetry = null; accountAvatar = null; accountChevron = null;
-        body.animate().cancel(); body.setAlpha(1); body.setTranslationY(0); body.removeAllViews(); titleBar.removeAllViews(); bottomBar.removeAllViews();
-        titleHeading = null; connection = null;
-        // A 24 dp icon is centered in its 48 dp touch target: 6 + 12 = 18 dp visual inset.
-        titleBar.setPadding(ui.dp(!loadedToken.isEmpty() && !rootPage() ? 6 : 18), ui.dp(6), ui.dp(8), ui.dp(4));
-        if (loadedToken.isEmpty()) { buildLogin(); return; }
-        if (!rootPage()) titleBar.addView(ui.iconButton("back", "返回", this::back));
+        body.animate().cancel(); body.setAlpha(1); body.setTranslationY(0); body.setTranslationX(0); body.removeAllViews(); titleBar.removeAllViews();
+        titleBar.animate().cancel(); titleBar.setAlpha(1); titleBar.setTranslationX(0); titleBar.setTranslationY(0);
+        titleHeading = null; titleActions = null; connection = null; appearancePage = null;
+        headerMeta.removeAllViews(); headerMeta.setVisibility(View.GONE);
+        overlayHeader = !loadedToken.isEmpty() && rootPage();
+        integratedHeader = overlayHeader && usesCollapsingTitle();
+        compactTitleAlpha = 0f; expandedTitleAlpha = 1f;
+        pageRule.setVisibility(integratedHeader ? View.INVISIBLE : View.VISIBLE);
+        pageRule.setAlpha(1f);
+        // Do not pass taps on fixed toolbar gaps into a row passing beneath them.
+        pageHeader.setClickable(!integratedHeader);
+        pageHeader.setFocusable(false);
+        updateHeaderSurface();
+        headerMeta.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(overlayHeader ? 6 : 16));
+        // The back glyph remains aligned with the reading column inside its 48 dp hit area.
+        int titlePadding = ui.dp(overlayHeader ? (page.equals("tasks") || page.equals("usage") ? 4 : 2) : 12);
+        titleBar.setPadding(ui.dp(!loadedToken.isEmpty() && !rootPage() ? 8 : 20), titlePadding,
+                ui.dp(overlayHeader ? 14 : rootPage() ? 20 : 10), titlePadding);
+        if (loadedToken.isEmpty()) { buildLogin(); updateNavigationInsets(); return; }
+        if (!rootPage()) addTitleAction(ui.iconButton("back", "返回", this::back));
         titleHeading = ui.column(); titleHeading.setGravity(Gravity.CENTER_VERTICAL); titleHeading.setMinimumHeight(ui.dp(48));
-        titleHeading.setBackground(ui.ripple(Color.TRANSPARENT, 14));
-        title = ui.text(pageTitle(), rootPage() ? 24 : 19, true); title.setMaxLines(2); titleHeading.addView(title, wrap());
-        connection = ui.text(" ", 12, false); connection.setTextColor(ui.warning); connection.setMinLines(1); connection.setSingleLine(true);
-        connection.setEllipsize(android.text.TextUtils.TruncateAt.END); connection.setPadding(0, ui.dp(2), 0, 0);
-        // Reserve a measured SP line, including at large system fonts, in both connection states.
-        connection.setVisibility(View.INVISIBLE); titleHeading.addView(connection, wrap());
-        title.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO); connection.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        titleHeading.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
-        titleHeading.setOnClickListener(v -> {
-            if (connection == null || connection.getVisibility() != View.VISIBLE || snapshotBusy || SystemClock.elapsedRealtime() < apiCooldownUntil) { updateConnection(); return; }
-            loadCurrentPage();
+        title = ui.heading(pageTitle(), rootPage() ? 23 : page.equals("task") ? 18 : 20);
+        title.setMaxLines(2); title.setMinHeight(ui.dp(48)); title.setGravity(Gravity.CENTER_VERTICAL); titleHeading.addView(title, wrap());
+        if (integratedHeader) title.setAlpha(0f);
+        connection = ui.text("", 14, false); connection.setTextColor(ui.warning);
+        int warningInset = overlayHeader ? ui.dp(10) : 0;
+        // A healthy connection has no placeholder; warnings occupy their own readable line.
+        connection.setVisibility(View.GONE); headerMeta.addView(connection, wrap());
+        connection.setBackground(ui.ripple(overlayHeader ? ui.surface : Color.TRANSPARENT, 12));
+        connection.setPadding(warningInset, ui.dp(6), warningInset, ui.dp(6));
+        connection.setOnClickListener(v -> {
+            if (connection == null || v != connection) return;
+            if (connection.getVisibility() == View.VISIBLE && !snapshotBusy) refreshWorkspaceNow();
         });
-        titleHeading.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+        connection.setAccessibilityDelegate(new View.AccessibilityDelegate() {
             @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
                 super.onInitializeAccessibilityNodeInfo(host, info);
                 if (host.isClickable()) info.setClassName("android.widget.Button");
             }
         });
-        titleBar.addView(titleHeading, new LinearLayout.LayoutParams(0, -2, 1));
+        title.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        titleHeading.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        titleHeading.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                if (android.os.Build.VERSION.SDK_INT >= 28) info.setHeading(true);
+                if (host.isClickable()) info.setClassName("android.widget.Button");
+            }
+        });
+        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, -2, 1);
+        headingParams.gravity = Gravity.CENTER_VERTICAL; titleBar.addView(titleHeading, headingParams);
         if (page.equals("tasks")) {
-            taskSearchToggle = ui.iconButton("search", "展开搜索", () -> setTaskSearchExpanded(!taskSearchExpanded, true));
-            titleBar.addView(taskSearchToggle); updateSearchToggle();
+            titleActions = ui.headerActions();
+            LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-2, -2);
+            actionParams.gravity = Gravity.CENTER_VERTICAL; actionParams.leftMargin = ui.dp(12); titleBar.addView(titleActions, actionParams);
+            taskSearchToggle = ui.headerIconButton("search", "展开搜索", () -> setTaskSearchExpanded(!taskSearchExpanded, true));
+            addTitleAction(taskSearchToggle); updateSearchToggle();
         }
-        titleBar.addView(ui.iconButton("info", "页面说明", this::help)); buildNavigation();
+        buildNavigation();
         switch (page) {
             case "tasks": buildTasks(); break; case "devices": buildDevices(); break; case "task": buildTask(); break; case "device": buildDevice(); break;
-            case "account": buildAccount(); break; case "profile": buildProfile(); break; case "sync": buildSync(); break; case "sessions": buildSessions(); break; case "usage": buildUsage(); break;
+            case "account": buildAccount(); break;
+            case "settings": case "settings-appearance": case "settings-background": case "settings-notifications": case "settings-support": case "settings-security": buildSettings(); break;
+            case "profile": buildProfile(); break; case "sync": buildSync(); break; case "sessions": buildSessions(); break; case "usage": buildUsage(); break;
             case "pairing": buildPairing(); break; case "pairing-confirm": buildPairingConfirm(); break; default: break;
         }
-        updateConnection(); updateWorkspace(); restorePosition();
-        if (animate) ui.reveal(body);
+        updateConnection(); updateWorkspace(); updateNavigationInsets(); restorePosition();
+        settleCollapsingTitleBeforeDraw();
+        if (animate) { ui.transitionPage(body, previousPage, page, taskReturnDevice); ui.transitionPage(titleBar, previousPage, page, taskReturnDevice); }
+        bottomBar.refreshBackdrop();
     }
-    private String pageTitle() { switch (page) { case "tasks": return "工作台"; case "devices": return "我的电脑"; case "account": return "我的"; case "profile": return "个人资料"; case "sync": return "个人同步"; case "sessions": return "登录设备"; case "usage": return "用量"; case "pairing": return "添加电脑"; case "pairing-confirm": return "确认电脑"; case "device": return "电脑详情"; default: return "任务详情"; } }
+    private boolean usesCollapsingTitle() { return page.equals("tasks") || page.equals("usage"); }
+    private void addExpandedRootTitle(LinearLayout column) {
+        setVerticalPadding(column, 0, column.getPaddingBottom());
+        TextView heading = ui.heading(pageTitle(), 34);
+        heading.setGravity(Gravity.CENTER);
+        heading.setMinHeight(ui.dp(108));
+        // Keep the existing vertical space and center the title with equal side insets.
+        heading.setPadding(ui.dp(24), ui.dp(21), ui.dp(24), ui.dp(20) + ui.dp(22) - ui.dp(21));
+        column.addView(heading, wrap());
+        expandedRootTitle = heading;
+        updateCollapsingTitle(0);
+    }
+    private void updateExpandedRootSpacing(boolean pinned) {
+        if (!integratedHeader || expandedRootTitle == null) return;
+        // Fold the old unpainted clearance into the hero. Keeping its total height and total text
+        // padding unchanged relative to the space added also preserves the next row at large fonts.
+        int extraToolbarPadding = 2 * ui.dp(8) - titleBar.getPaddingTop() - titleBar.getPaddingBottom();
+        int unpaintedClearance = extraToolbarPadding;
+        if (!pinned) unpaintedClearance += titleBar.getMeasuredHeight() + pageRule.getLayoutParams().height;
+        int opening = Math.max(0, ui.dp(page.equals("tasks") ? 8 : 10) + unpaintedClearance);
+        if (expandedRootOpening == opening) return;
+        expandedRootOpening = opening;
+        int textInsets = ui.dp(20) + ui.dp(22) + opening;
+        expandedRootTitle.setMinHeight(ui.dp(108) + opening);
+        setVerticalPadding(expandedRootTitle, textInsets / 2, textInsets - textInsets / 2);
+    }
+    private void updateListTitle(ListView target) {
+        if (list != target || expandedRootTitle == null || target.getChildCount() == 0) return;
+        updateCollapsingTitle(target.getFirstVisiblePosition() == 0
+                ? firstListRowOffset(target) : Integer.MAX_VALUE);
+    }
+    private void settleCollapsingTitleBeforeDraw() {
+        final View heading = expandedRootTitle;
+        if (heading == null) return;
+        final ViewTreeObserver tree = stage.getViewTreeObserver();
+        tree.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                if (tree.isAlive()) tree.removeOnPreDrawListener(this);
+                else stage.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (expandedRootTitle == heading) {
+                    if (list != null) updateListTitle(list);
+                    else if (scroll != null) updateCollapsingTitle(scroll.getScrollY());
+                }
+                return true;
+            }
+        });
+    }
+    private static int firstListRowOffset(ListView target) {
+        View header = target.getChildAt(0);
+        return header == null ? 0 : Math.max(0, target.getPaddingTop() - header.getTop());
+    }
+    private void updateCollapsingTitle(int offset) {
+        if (expandedRootTitle == null || title == null) return;
+        int extent = expandedRootTitle.getHeight() - expandedRootOpening;
+        if (extent <= 0) extent = expandedRootTitle.getMinHeight() - expandedRootOpening;
+        float progress = Math.max(0f, Math.min(1f, offset / (float) Math.max(1, extent)));
+        boolean motion = ui.motionEnabled();
+        compactTitleAlpha = motion ? ramp(progress, .10f, .57f) : progress < .32f ? 0f : 1f;
+        expandedTitleAlpha = motion ? 1f - ramp(progress, .05f, .55f) : 1f - compactTitleAlpha;
+        updateIntegratedHeader();
+    }
+    private boolean headerNeedsClearance() {
+        return (taskSearchPanel != null && taskSearchPanel.getVisibility() == View.VISIBLE)
+                || headerMeta.getVisibility() == View.VISIBLE;
+    }
+    private void updateHeaderSurface() {
+        opaqueCompactHeader = ui.reducedTransparencyEnabled();
+        compactHeaderSurface = ui.compactHeaderMaterial(opaqueCompactHeader);
+        pageHeader.setBackground(compactHeaderSurface);
+        if (integratedHeader) updateIntegratedHeader();
+        systemBars.setColors(integratedHeader ? ui.bg : ui.headerTopColor(), ui.bg);
+    }
+    private void updateIntegratedHeader() {
+        if (!integratedHeader) return;
+        boolean pinned = headerNeedsClearance();
+        float chrome = pinned ? 1f : compactTitleAlpha;
+        boolean compactOwnsHeading = compactTitleAlpha >= .45f;
+        boolean compactOwnsControls = pinned || compactOwnsHeading;
+        // Keep the expanded hero clear; when compact controls take over, their opaque backdrop must not fade.
+        if (opaqueCompactHeader) chrome = compactOwnsControls ? 1f : 0f;
+        if (compactHeaderSurface != null) compactHeaderSurface.setAlpha(Math.round(chrome * 255f));
+        if (title != null) title.setAlpha(compactTitleAlpha);
+        pageRule.setAlpha(chrome);
+        pageRule.setVisibility(chrome > 0f ? View.VISIBLE : View.INVISIBLE);
+        // Make the active chrome a tap shield; at the expanded top the transparent overlay passes touches through.
+        pageHeader.setClickable(compactOwnsControls);
+        if (titleActions != null) {
+            // Fade the title and its surface without dimming the active search button.
+            titleActions.setVisibility(compactOwnsControls ? View.VISIBLE : View.INVISIBLE);
+        }
+        if (titleHeading != null) titleHeading.setImportantForAccessibility(compactOwnsHeading ? View.IMPORTANT_FOR_ACCESSIBILITY_YES : View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        if (expandedRootTitle != null) {
+            expandedRootTitle.setImportantForAccessibility(compactOwnsHeading ? View.IMPORTANT_FOR_ACCESSIBILITY_NO : View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            expandedRootTitle.setAlpha(expandedTitleAlpha);
+        }
+    }
+    private static float ramp(float value, float start, float end) {
+        float t = Math.max(0f, Math.min(1f, (value - start) / (end - start)));
+        return t * t * (3f - 2f * t);
+    }
+    /** Keep controls centered on the title, independently of connection messages. */
+    private void addTitleAction(View action) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48));
+        params.gravity = Gravity.CENTER_VERTICAL; (titleActions == null ? titleBar : titleActions).addView(action, params);
+    }
+    private String pageTitle() { String settings = NativeNavigationPolicy.settingsTitle(page); if (!settings.isEmpty()) return settings; switch (page) { case "tasks": return "工作台"; case "devices": return "我的电脑"; case "account": return "我的"; case "profile": return "个人资料"; case "sync": return "个人同步"; case "sessions": return "登录设备"; case "usage": return "用量"; case "pairing": return "添加电脑"; case "pairing-confirm": return "确认电脑"; case "device": return "电脑详情"; default: return "任务详情"; } }
     private void buildNavigation() {
-        bottomBar.setVisibility(View.VISIBLE); String selected = NativeNavigationPolicy.tabForPage(page, taskReturnDevice);
-        for (String key : NativeNavigationPolicy.rootPages()) {
-            LinearLayout item = ui.column(); item.setGravity(Gravity.CENTER); item.setPadding(ui.dp(6), ui.dp(6), ui.dp(6), ui.dp(6)); item.setMinimumHeight(ui.dp(52));
-            boolean active = selected.equals(key); item.setBackground(ui.ripple(active ? ui.surface : Color.TRANSPARENT, 18));
-            NativeUi.Icon icon = (NativeUi.Icon) ui.icon(key, 21); icon.setInk(active ? ui.accent : ui.muted); item.addView(icon); item.addView(ui.space(3));
-            TextView text = ui.text(key.equals("tasks") ? "任务" : key.equals("usage") ? "用量" : "我的", 12, active); text.setTextColor(active ? ui.accent : ui.muted); text.setGravity(Gravity.CENTER); item.addView(text);
-            item.setContentDescription(text.getText()); item.setSelected(active); item.setFocusable(true); item.setOnClickListener(v -> { if (!page.equals(key)) navigate(key, ""); });
-            item.setAccessibilityDelegate(NativeUi.buttonAccessibility()); ui.pressFeedback(item, .97f); bottomBar.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
+        bottomBar.setSelected(NativeNavigationPolicy.tabForPage(page, taskReturnDevice), true);
+        updateNavigationInsets();
+    }
+    private int navigationClearance() { return loadedToken.isEmpty() || imeVisible ? 0 : ui.dp(96); }
+    private void updateNavigationInsets() {
+        if (bottomBar == null) return;
+        boolean show = !loadedToken.isEmpty() && !imeVisible;
+        bottomBar.setVisibility(show ? View.VISIBLE : View.GONE);
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) bottomBar.getLayoutParams();
+        int available = stage.getWidth() > 0 ? stage.getWidth() : getResources().getDisplayMetrics().widthPixels;
+        int width = Math.min(ui.dp(320), Math.max(ui.dp(168), available - ui.dp(48)));
+        if (params.width != width) { params.width = width; bottomBar.setLayoutParams(params); }
+    }
+    private void updateContentPadding(int top) {
+        int clearance = navigationClearance();
+        if (scroll != null) setVerticalPadding(scroll, top, clearance);
+        if (fixedBottomAction != null) setVerticalPadding(fixedBottomAction, fixedBottomAction.getPaddingTop(), ui.dp(8) + clearance);
+        if (list != null) setVerticalPadding(list, top, listBaseBottomPadding + (fixedBottomAction == null ? clearance : 0));
+    }
+    private static void setVerticalPadding(View view, int top, int bottom) {
+        if (view.getPaddingTop() != top || view.getPaddingBottom() != bottom) {
+            view.setPadding(view.getPaddingLeft(), top, view.getPaddingRight(), bottom);
         }
     }
     private LinearLayout content() {
         ScrollView view = new ScrollView(this); view.setFillViewport(false); view.setClipToPadding(false); view.setVerticalScrollBarEnabled(false);
-        LinearLayout column = ui.column(); column.setPadding(ui.dp(18), ui.dp(10), ui.dp(18), ui.dp(22)); view.addView(column); body.addView(view, new FrameLayout.LayoutParams(-1, -1)); scroll = view; pageColumn = column; return column;
+        LinearLayout column = ui.column(); column.setPadding(ui.dp(20), ui.dp(overlayHeader && usesCollapsingTitle() ? 4 : overlayHeader ? 10 : 16), ui.dp(20), ui.dp(28)); view.addView(column); body.addView(view, new FrameLayout.LayoutParams(-1, -1)); scroll = view; pageColumn = column;
+        if (overlayHeader && usesCollapsingTitle()) {
+            addExpandedRootTitle(column);
+            view.setOnScrollChangeListener((v, x, y, oldX, oldY) -> { if (scroll == view) updateCollapsingTitle(y); });
+            view.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> { if (scroll == view) updateCollapsingTitle(view.getScrollY()); });
+        }
+        return column;
     }
     private void buildLogin() {
         bottomBar.setVisibility(View.GONE); title = ui.text("Monitor", 24, true); titleBar.addView(title);
-        LinearLayout column = content(); column.addView(ui.space(32)); column.addView(ui.monitorBrand(72)); column.addView(ui.space(20)); column.addView(ui.text("你的工作，\n随时在眼前。", 28, true)); column.addView(ui.space(28));
+        LinearLayout column = content(); column.addView(ui.space(32)); column.addView(ui.monitorBrand(72)); column.addView(ui.space(20)); column.addView(ui.text("你的工作，\n随时在眼前", 28, true)); column.addView(ui.space(28));
         loginStatus = ui.text("", 17, true); column.addView(loginStatus, wrap()); column.addView(ui.space(8));
         loginNote = ui.text("", 14, false); loginNote.setTextColor(ui.muted); column.addView(loginNote, wrap()); column.addView(ui.space(24));
         loginButton = ui.button("登录 Monitor", () -> {
@@ -421,22 +725,22 @@ public final class MainActivity extends Activity {
     private void updateLogin() {
         if (!loadedToken.isEmpty() || loginButton == null) return;
         if (ServerSettings.legacyConnection(this)) {
-            loginStatus.setText("旧连接需要重新设置"); loginNote.setText("先清除本机旧连接，再填写服务器地址。");
+            loginStatus.setText("旧连接需要重新设置"); loginNote.setText("先清除本机旧连接，再填写服务器地址");
             loginButton.setText("处理旧连接"); loginButton.setEnabled(true); loginButton.setAlpha(1f);
             loginCheckButton.setVisibility(View.GONE); return;
         }
         if (ServerSettings.requiresRestart(this)) {
-            loginStatus.setText("地址已保存"); loginNote.setText("关闭后重新打开 Monitor，即可使用新地址。");
+            loginStatus.setText("地址已保存"); loginNote.setText("关闭后重新打开 Monitor，即可使用新地址");
             loginButton.setText("完成服务器设置"); loginButton.setEnabled(true); loginButton.setAlpha(1f);
             loginCheckButton.setVisibility(View.GONE); return;
         }
         if (SessionStore.read(this).optBoolean("logout_pending")) {
-            loginStatus.setText("完成退出"); loginNote.setText("本机已退出，联网后完成撤销。");
+            loginStatus.setText("完成退出"); loginNote.setText("本机已退出，联网后完成撤销");
             loginButton.setText(logoutBusy ? "正在完成退出…" : "完成退出"); loginButton.setEnabled(!logoutBusy); loginButton.setAlpha(logoutBusy ? .5f : 1f);
             loginCheckButton.setVisibility(View.GONE); return;
         }
         if (!ServerSettings.configured(this)) {
-            loginStatus.setText("连接你的电脑"); loginNote.setText("先填写部署好的 HTTPS 服务器地址。");
+            loginStatus.setText("连接你的电脑"); loginNote.setText("先填写部署好的 HTTPS 服务器地址");
             loginButton.setText("设置服务器地址"); loginButton.setEnabled(true); loginButton.setAlpha(1f);
             loginCheckButton.setVisibility(View.GONE); return;
         }
@@ -452,15 +756,116 @@ public final class MainActivity extends Activity {
     private void buildTasks() {
         LinearLayout column = ui.column(); body.addView(column, new FrameLayout.LayoutParams(-1, -1));
         column.setFocusableInTouchMode(true);
-        LinearLayout filters = ui.column(); filters.setPadding(ui.dp(18), ui.dp(4), ui.dp(18), ui.dp(6));
-        toolSegments = new NativePages.Segments(ui, new String[]{"all", "claude", "codex"}, new String[]{"全部", "Claude Code", "Codex"}, key -> { tool = key; filterInitialized = true; saveFilters(); updateWorkspace(); if (list != null) list.setSelection(0); persistFilter(); }); toolSegments.select(tool); filters.addView(toolSegments.view(), wrap()); filters.addView(ui.space(8));
-        scopeSegments = new NativePages.Segments(ui, new String[]{"active", "all", "archived"}, new String[]{"进行中", "全部任务", "已归档"}, false, key -> { scope = key; saveFilters(); updateWorkspace(); if (list != null) list.setSelection(0); }); scopeSegments.select(scope); filters.addView(scopeSegments.view(), wrap());
-        buildTaskSearch(filters); column.addView(filters, wrap());
-        taskAdapter = new NativePages.TaskAdapter(ui, taskCallbacks()); list = NativePages.list(ui, taskAdapter); attachList(column);
+        LinearLayout filters = ui.column(); filters.setPadding(0, ui.dp(4), 0, ui.dp(6));
+        addExpandedRootTitle(filters);
+        addTaskSearchAffordance(filters);
+        LinearLayout choices = ui.row();
+        taskScopeFilter = taskFilterButton(false);
+        taskSourceFilter = taskFilterButton(true);
+        choices.addView(taskScopeFilter, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams sourceParams = new LinearLayout.LayoutParams(0, -2, 1);
+        sourceParams.setMarginStart(ui.dp(8));
+        choices.addView(taskSourceFilter, sourceParams);
+        filters.addView(choices, wrap());
+        updateTaskFilterLabels();
+        buildTaskSearch(filters);
+        taskAdapter = new NativePages.TaskAdapter(ui, taskCallbacks()); list = NativePages.list(ui, null);
+        list.setItemsCanFocus(true);
+        list.addHeaderView(filters, null, false);
+        attachList(column);
+        list.setAdapter(taskAdapter);
+        final ListView workbench = list;
+        workbench.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(AbsListView view, int state) { }
+            @Override public void onScroll(AbsListView view, int first, int visible, int total) { updateListTitle(workbench); }
+        });
+        workbench.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> updateListTitle(workbench));
         column.requestFocus();
     }
+    private void addTaskSearchAffordance(LinearLayout filters) {
+        LinearLayout action = ui.row();
+        action.setBackground(ui.bordered(ui.surface, 16));
+        action.setPaddingRelative(ui.dp(14), 0, ui.dp(14), 0);
+        action.setMinimumHeight(ui.dp(52));
+        View icon = ui.icon("search", 20);
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        action.addView(icon);
+        taskSearchAffordanceLabel = ui.text("搜索任务、项目或电脑", 15, false);
+        taskSearchAffordanceLabel.setSingleLine(true);
+        taskSearchAffordanceLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        taskSearchAffordanceLabel.setGravity(Gravity.CENTER_VERTICAL);
+        taskSearchAffordanceLabel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams label = new LinearLayout.LayoutParams(0, -2, 1);
+        label.setMarginStart(ui.dp(10)); action.addView(taskSearchAffordanceLabel, label);
+        action.setOnClickListener(v -> focusOrExpandTaskSearch());
+        action.setFocusable(true);
+        action.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        LinearLayout.LayoutParams row = wrap(); row.bottomMargin = ui.dp(10); filters.addView(action, row);
+        taskSearchAffordance = action;
+        updateSearchToggle();
+    }
+    private TextView taskFilterButton(boolean source) {
+        TextView button = ui.quietButton("", null);
+        button.setTextColor(ui.text);
+        button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        button.setPaddingRelative(ui.dp(8), ui.dp(8), ui.dp(8), ui.dp(8));
+        button.setOnClickListener(v -> showTaskFilterSheet(button, source));
+        return button;
+    }
+    private void updateTaskFilterLabels() {
+        if (taskScopeFilter == null || taskSourceFilter == null) return;
+        bindTaskFilterLabel(taskScopeFilter, "状态：" + TASK_SCOPE_LABELS[filterIndex(TASK_SCOPES, scope)]);
+        bindTaskFilterLabel(taskSourceFilter, "来源：" + NativeScreenPolicy.toolLabel(NativeScreenPolicy.tool(tool)));
+    }
+    private static int filterIndex(String[] keys, String selected) {
+        for (int i = 0; i < keys.length; i++) if (keys[i].equals(selected)) return i;
+        return 0;
+    }
+    private static void bindTaskFilterLabel(TextView button, String label) {
+        if (!android.text.TextUtils.equals(button.getContentDescription(), label)) {
+            button.setText(label + "\u00a0▾");
+            button.setContentDescription(label);
+        }
+    }
+    private void showTaskFilterSheet(TextView anchor, boolean source) {
+        if (!visible || isFinishing() || isDestroyed() || !page.equals("tasks") || loadedToken.isEmpty()
+                || anchor != (source ? taskSourceFilter : taskScopeFilter)) return;
+        dismissTaskFilterSheet();
+        final long requestedPage = pageEpoch;
+        String[] keys = source ? TASK_SOURCES : TASK_SCOPES;
+        int selected = filterIndex(keys, source ? tool : scope);
+        LivePresentationSheet dialog = new LivePresentationSheet(this, source ? "任务来源" : "任务状态", "关闭筛选");
+        taskFilterSheet = dialog;
+        for (int i = 0; i < keys.length; i++) {
+            final String key = keys[i];
+            String count = source && taskSourceCounts != null && i < taskSourceCounts.length
+                    ? Integer.toString(taskSourceCounts[i]) : "";
+            dialog.choice(source ? NativeScreenPolicy.toolLabel(key) : TASK_SCOPE_LABELS[i], count, i == selected, () -> {
+                if (!visible || !samePage(requestedPage) || taskFilterSheet != dialog
+                        || anchor != (source ? taskSourceFilter : taskScopeFilter)
+                        || key.equals(source ? tool : scope)) return;
+                if (source) { tool = key; filterInitialized = true; }
+                else scope = key;
+                saveFilters();
+                updateTaskFilterLabels();
+                updateWorkspace();
+                if (list != null) list.setSelection(0);
+                if (source) persistFilter();
+            });
+        }
+        dialog.setOnDismissListener(ignored -> { if (taskFilterSheet == dialog) taskFilterSheet = null; });
+        try { dialog.show(); }
+        catch (RuntimeException failure) { dismissTaskFilterSheet(); notice("暂时无法打开筛选，请重试"); }
+    }
+    private void dismissTaskFilterSheet() {
+        if (taskFilterSheet == null) return;
+        LivePresentationSheet dialog = taskFilterSheet;
+        taskFilterSheet = null;
+        dialog.dismiss();
+    }
     private void buildTaskSearch(LinearLayout filters) {
-        taskSearchPanel = ui.column(); taskSearchPanel.addView(ui.space(10));
+        taskSearchPanel = ui.column();
+        taskSearchPanel.setPadding(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(6));
         LinearLayout row = ui.row(); row.setBackground(ui.bordered(ui.surface, 16)); row.setPadding(ui.dp(4), 0, ui.dp(2), 0);
         View searchIcon = ui.icon("search", 20); LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)); iconParams.leftMargin = ui.dp(10); row.addView(searchIcon, iconParams);
         final EditText field = input("搜索任务、项目或电脑", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -473,11 +878,11 @@ public final class MainActivity extends Activity {
         row.addView(field, new LinearLayout.LayoutParams(0, -2, 1));
         taskSearchClear = ui.iconButton("close", "清空搜索", () -> { if (taskSearchInput == field) field.setText(""); });
         taskSearchClear.setVisibility(taskQuery.isEmpty() ? View.INVISIBLE : View.VISIBLE); row.addView(taskSearchClear);
-        taskSearchPanel.addView(row, wrap()); taskSearchPanel.setVisibility(taskSearchExpanded ? View.VISIBLE : View.GONE); filters.addView(taskSearchPanel, wrap());
+        taskSearchPanel.addView(row, wrap()); taskSearchPanel.setVisibility(taskSearchExpanded ? View.VISIBLE : View.GONE); pageHeader.addView(taskSearchPanel, pageHeader.indexOfChild(pageRule), wrap());
         taskSearchSummary = ui.text("", 12); taskSearchSummary.setTextColor(ui.muted);
         taskSearchSummary.setPadding(ui.dp(4), ui.dp(10), ui.dp(4), ui.dp(6)); taskSearchSummary.setSingleLine(true); taskSearchSummary.setEllipsize(android.text.TextUtils.TruncateAt.END);
         taskSearchSummary.setVisibility(View.GONE); taskSearchSummary.setMinHeight(ui.dp(48)); taskSearchSummary.setBackground(ui.ripple(Color.TRANSPARENT, 10));
-        taskSearchSummary.setOnClickListener(v -> setTaskSearchExpanded(true, true)); taskSearchSummary.setAccessibilityDelegate(NativeUi.buttonAccessibility()); filters.addView(taskSearchSummary, wrap());
+        taskSearchSummary.setOnClickListener(v -> focusOrExpandTaskSearch()); taskSearchSummary.setAccessibilityDelegate(NativeUi.buttonAccessibility()); filters.addView(taskSearchSummary, wrap());
         final long searchSession = sessionEpoch, searchPage = pageEpoch;
         field.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
@@ -489,7 +894,7 @@ public final class MainActivity extends Activity {
                 updateSearchToggle();
                 taskSearchClear.setVisibility(taskQuery.isEmpty() ? View.INVISIBLE : View.VISIBLE);
                 // Search owns only the displayed rows, never a network read or saved server preference.
-                listPositions.remove(pageKey()); updateWorkspace(); if (list != null) list.setSelection(0);
+                listPositions.remove(pageKey()); workbenchHeaderScroll = 0; updateWorkspace(); if (list != null) list.setSelection(0);
             }
         });
         field.setOnEditorActionListener((view, action, event) -> {
@@ -500,10 +905,29 @@ public final class MainActivity extends Activity {
     private void updateSearchToggle() {
         if (taskSearchToggle == null) return;
         boolean filtered = NativeTaskSearchPolicy.isSearching(taskQuery);
-        taskSearchToggle.setSelected(taskSearchExpanded || filtered);
-        taskSearchToggle.setBackground(ui.ripple(taskSearchExpanded || filtered ? ui.soft : Color.TRANSPARENT, 14));
-        taskSearchToggle.setContentDescription(taskSearchExpanded ? "收起搜索，保留当前关键词" : filtered ? "展开搜索，当前有搜索条件" : "展开搜索");
+        ui.setHeaderIconSelected(taskSearchToggle, taskSearchExpanded || filtered);
+        taskSearchToggle.setContentDescription(taskSearchExpanded ? "收起搜索，保留当前关键词"
+                : filtered ? "展开搜索，当前关键词：" + taskQuery : "展开搜索");
         if (Build.VERSION.SDK_INT >= 30) taskSearchToggle.setStateDescription(taskSearchExpanded ? "已展开" : "已收起");
+        if (taskSearchAffordance != null) {
+            // Keep the same ListView header size while the separate editor opens.
+            String label = taskSearchExpanded ? "回到搜索" : filtered ? taskQuery : "搜索任务、项目或电脑";
+            if (!android.text.TextUtils.equals(taskSearchAffordanceLabel.getText(), label)) taskSearchAffordanceLabel.setText(label);
+            taskSearchAffordanceLabel.setTextColor(filtered && !taskSearchExpanded ? ui.text : ui.muted);
+            taskSearchAffordance.setContentDescription(filtered && !taskSearchExpanded ? "编辑搜索，当前关键词：" + taskQuery : label);
+        }
+    }
+    private void focusOrExpandTaskSearch() {
+        if (taskSearchExpanded) focusTaskSearch(taskSearchInput);
+        else setTaskSearchExpanded(true, true);
+    }
+    private void focusTaskSearch(EditText field) {
+        if (field == null || taskSearchInput != field || !taskSearchExpanded || !visible || !field.requestFocus()) return;
+        field.post(() -> {
+            if (taskSearchInput != field || !taskSearchExpanded || !visible || !field.hasFocus()) return;
+            InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (keyboard != null) keyboard.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT);
+        });
     }
     private void cancelSearchAnimation() {
         if (taskSearchAnimation != null) { taskSearchAnimation.removeAllListeners(); taskSearchAnimation.removeAllUpdateListeners(); taskSearchAnimation.cancel(); taskSearchAnimation = null; }
@@ -516,16 +940,13 @@ public final class MainActivity extends Activity {
         if (!expanded) hideTaskSearchKeyboard();
         panel.setVisibility(View.VISIBLE);
         int width = ((View) panel.getParent()).getWidth() - ((View) panel.getParent()).getPaddingLeft() - ((View) panel.getParent()).getPaddingRight();
-        panel.measure(View.MeasureSpec.makeMeasureSpec(Math.max(0, width), View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        if (width > 0) panel.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int targetHeight = expanded ? panel.getMeasuredHeight() : 0;
         Runnable complete = () -> {
             if (taskSearchPanel != panel || taskSearchExpanded != expanded) return;
             panel.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT; panel.setAlpha(1f); panel.setVisibility(expanded ? View.VISIBLE : View.GONE); panel.requestLayout();
-            if (expanded && userAction && visible && field.requestFocus()) field.post(() -> {
-                if (taskSearchInput != field || !taskSearchExpanded || !visible || !field.hasFocus()) return;
-                InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-                if (keyboard != null) keyboard.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT);
-            });
+            updateIntegratedHeader();
+            if (expanded && userAction) focusTaskSearch(field);
         };
         if (!ui.motionEnabled() || width <= 0 || fromHeight == targetHeight) complete.run();
         else {
@@ -535,6 +956,7 @@ public final class MainActivity extends Activity {
             taskSearchAnimation.addListener(new android.animation.AnimatorListenerAdapter() { @Override public void onAnimationEnd(android.animation.Animator animation) { taskSearchAnimation = null; complete.run(); } });
             taskSearchAnimation.start();
         }
+        updateIntegratedHeader();
         updateWorkspace();
     }
     private void hideTaskSearchKeyboard() {
@@ -555,51 +977,121 @@ public final class MainActivity extends Activity {
     }
     private NativePages.TaskCallbacks taskCallbacks() { return new NativePages.TaskCallbacks() { public void open(JSONObject task) { navigate("task", task.optString("id")); } public void archive(JSONObject task) { MainActivity.this.archive(task); } }; }
     private void attachList(LinearLayout column) {
+        listBaseBottomPadding = list.getPaddingBottom();
         FrameLayout area = new FrameLayout(this); column.addView(area, new LinearLayout.LayoutParams(-1, 0, 1)); area.addView(list, new FrameLayout.LayoutParams(-1, -1));
-        emptyLabel = ui.text("正在读取", 17, false); emptyLabel.setTextColor(ui.muted); emptyLabel.setGravity(Gravity.CENTER); emptyLabel.setPadding(ui.dp(26), ui.dp(30), ui.dp(26), ui.dp(30)); area.addView(emptyLabel, new FrameLayout.LayoutParams(-1, -1)); list.setEmptyView(emptyLabel);
+        emptyLabel = ui.text("正在读取", 17, false); emptyLabel.setTextColor(ui.muted); emptyLabel.setGravity(Gravity.CENTER); emptyLabel.setPadding(ui.dp(16), ui.dp(30), ui.dp(16), ui.dp(30));
+        if (page.equals("tasks") || page.equals("device")) {
+            // A list footer keeps the filters or device identity visible when there are no tasks.
+            FrameLayout emptyRow = new FrameLayout(this);
+            emptyRow.addView(emptyLabel, new FrameLayout.LayoutParams(-1, -2));
+            list.addFooterView(emptyRow, null, false);
+        } else {
+            area.addView(emptyLabel, new FrameLayout.LayoutParams(-1, -1)); list.setEmptyView(emptyLabel);
+        }
         emptyLabel.setOnClickListener(v -> {
             if (page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null) return;
-            nextSnapshot = 0; fetchSnapshot();
+            if (!snapshotBusy) refreshWorkspaceNow();
         });
     }
     private void buildDevices() {
         LinearLayout column = ui.column(); body.addView(column, new FrameLayout.LayoutParams(-1, -1)); deviceAdapter = new NativePages.DeviceAdapter(ui, device -> navigate("device", device.optString("id"))); list = NativePages.list(ui, deviceAdapter); attachList(column);
-        LinearLayout action = ui.column(); action.setPadding(ui.dp(18), 0, ui.dp(18), ui.dp(8)); action.addView(ui.button("添加电脑", false, () -> navigate("pairing", "")), wrap()); column.addView(action, wrap());
+        LinearLayout action = ui.column(); action.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(8)); action.addView(ui.button("添加电脑", false, () -> navigate("pairing", "")), wrap()); column.addView(action, wrap()); fixedBottomAction = action;
     }
     private void buildTask() {
         LinearLayout column = content(); JSONObject task = findTask(selectedId), device = task == null ? null : findDevice(task.optString("device_id"));
         if (task == null) { placeholder(column, snapshot == null ? "正在读取任务" : "未找到这条任务"); return; }
-        LinearLayout heading = ui.row(); heading.setGravity(Gravity.TOP);
-        LinearLayout words = ui.column(); heading.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
-        taskHeadingTool = ui.toolBadge(task.optString("tool")); words.addView(taskHeadingTool); words.addView(ui.space(12));
-        taskHeadingTitle = ui.text(task.optString("title", "未命名任务"), 20, true); words.addView(taskHeadingTitle, wrap()); words.addView(ui.space(9));
-        taskHeadingComputer = ui.text(device == null ? "未知电脑" : device.optString("name"), 14, false); taskHeadingComputer.setTextColor(ui.muted); words.addView(taskHeadingComputer, wrap()); column.addView(heading, wrap()); column.addView(ui.space(24));
-        trackingButton = ui.button("开始跟踪", () -> { if (selectedId.equals(TrackingService.trackedId)) { TrackingService.requestStop(this, TrackingService.generation); updateTracking(); } else chooseTrackingDuration(selectedId, loadedToken, ++actionRevision); }); column.addView(trackingButton, wrap());
-        trackingNote = ui.text("", 13, false); trackingNote.setTextColor(ui.muted); trackingNote.setPadding(0, ui.dp(10), 0, ui.dp(20)); column.addView(trackingNote, wrap());
-        taskDetail = new NativePages.TaskDetail(ui); column.addView(taskDetail.view(), wrap()); column.addView(ui.space(20));
-        taskUsage = new NativeUsagePage.TaskCard(ui, this::showHelp); taskUsage.update(task); column.addView(taskUsage.view, wrap()); column.addView(ui.space(20));
+        taskHeadingTool = ui.taskIdentity(task.optString("tool"), device == null ? "未知电脑" : device.optString("name", "未知电脑"));
+        column.addView(taskHeadingTool, wrap());
+        column.addView(ui.space(12));
+        taskHeadingTitle = ui.heading(task.optString("title", "未命名任务"), 26);
+        taskHeadingTitle.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+        taskHeadingTitle.setLineSpacing(ui.dp(6), 1.08f);
+        column.addView(taskHeadingTitle, wrap());
+        column.addView(ui.space(16));
+        taskDetail = new NativePages.TaskDetail(ui);
+        column.addView(taskDetail.view(), wrap());
         final String resultTaskId = selectedId, resultToken = loadedToken; final long resultSession = sessionEpoch, resultPage = pageEpoch;
-        taskResults = new NativeTaskResults(ui, resultTaskId, resultToken, new NativeTaskResults.Host() {
+        final boolean interactive = NativeSessionControlPolicy.provider(task.optString("tool"));
+        taskResults = new NativeTaskResults(ui, resultTaskId, resultToken, interactive, new NativeTaskResults.Host() {
             public boolean connected() { return valid(resultToken, resultSession) && samePage(resultPage) && page.equals("task") && resultTaskId.equals(selectedId); }
             public boolean visible() { return MainActivity.this.visible; }
             public void failure(NativeApi.Failure failure) { if (failure.status == 401 || failure.status == 403) invalidate(resultToken); }
             public void notice(String message) { if (MainActivity.this.visible) MainActivity.this.notice(message); }
         }, taskResultsState); taskResultsState = null;
-        column.addView(taskResults.view, wrap()); column.addView(ui.space(24));
+        final NativeTaskResults results = taskResults;
+        LinearLayout.LayoutParams attentionSpace = wrap(); attentionSpace.topMargin = ui.dp(16); attentionSpace.bottomMargin = ui.dp(20);
+        if (interactive) column.addView(results.attentionView, attentionSpace);
+        column.addView(taskDetail.errorSection, wrap());
+        column.addView(ui.space(24));
+        column.addView(taskResults.view, wrap());
         taskResults.update(task, syncOutput());
         if (hasPendingDocumentResult) { hasPendingDocumentResult = false; taskResults.documentResult(pendingDocumentCode, pendingDocumentResult); pendingDocumentResult = null; }
-        archiveButton = ui.button("归档任务", false, () -> { JSONObject current = findTask(selectedId); if (current != null) archive(current); }); column.addView(archiveButton, wrap()); column.addView(ui.space(12));
-        if (device != null) column.addView(ui.button("查看电脑", false, () -> navigate("device", task.optString("device_id"))), wrap());
+        column.addView(ui.space(28));
+        View toolsDivider = new View(this); toolsDivider.setBackgroundColor(ui.line);
+        column.addView(toolsDivider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
+        column.addView(ui.space(18));
+        TextView toolsHeading = ui.text("任务工具", 13, true); toolsHeading.setTextColor(ui.muted);
+        if (Build.VERSION.SDK_INT >= 28) toolsHeading.setAccessibilityHeading(true);
+        column.addView(toolsHeading, wrap());
+        column.addView(ui.space(8));
+        if (interactive) column.addView(menu("settings", "模型设置", results::showModelSettings), wrap());
+        LinearLayout trackingSection = ui.column();
+        trackingSection.addView(ui.heading("实况跟踪", 16), wrap());
+        TextView trackingDescription = ui.text("在系统实况中查看这项任务的进度", 14);
+        trackingDescription.setTextColor(ui.muted);
+        LinearLayout.LayoutParams descriptionSpace = wrap(); descriptionSpace.topMargin = ui.dp(8);
+        trackingSection.addView(trackingDescription, descriptionSpace);
+        trackingButton = ui.button("开始跟踪", false, () -> {
+            if (selectedId.equals(TrackingService.trackedId)) {
+                TrackingService.requestStop(this, TrackingService.generation);
+                updateTracking();
+            } else chooseTrackingDuration(selectedId, loadedToken, ++actionRevision);
+        });
+        LinearLayout.LayoutParams follow = wrap(); follow.topMargin = ui.dp(14);
+        trackingSection.addView(trackingButton, follow);
+        trackingNote = ui.text("", 13);
+        trackingNote.setTextColor(ui.muted);
+        trackingNote.setPadding(0, ui.dp(10), 0, 0);
+        trackingSection.addView(trackingNote, wrap());
+        LinearLayout.LayoutParams trackingSpace = wrap(); trackingSpace.topMargin = ui.dp(18);
+        column.addView(trackingSection, trackingSpace);
+        column.addView(ui.space(28));
+        TextView informationHeading = ui.text("任务信息", 13, true); informationHeading.setTextColor(ui.muted);
+        if (Build.VERSION.SDK_INT >= 28) informationHeading.setAccessibilityHeading(true);
+        column.addView(informationHeading, wrap());
+        column.addView(ui.space(10));
+        LinearLayout.LayoutParams noteSpace = wrap(); noteSpace.bottomMargin = ui.dp(12);
+        column.addView(taskDetail.noteSection, noteSpace);
+        column.addView(taskDetail.projectRow, wrap());
+        if (interactive) {
+            taskUsage = new NativeUsagePage.TaskCard(ui, this::showHelp);
+            taskUsage.update(task);
+            column.addView(taskUsage.view, wrap());
+        }
+        if (device != null) {
+            column.addView(ui.space(8));
+            column.addView(menu("devices", "查看电脑", () -> navigate("device", task.optString("device_id"))), wrap());
+        }
+        column.addView(ui.space(8));
+        archiveButton = ui.button("归档任务", false, () -> { JSONObject current = findTask(selectedId); if (current != null) archive(current); });
+        archiveButton.setBackground(ui.ripple(ui.bg, 12));
+        archiveButton.setTextColor(ui.muted);
+        column.addView(archiveButton, wrap());
     }
     private void buildDevice() {
         JSONObject computer = findDevice(selectedId); if (computer == null) { placeholder(content(), snapshot == null ? "正在读取电脑" : "未找到这台电脑"); return; }
         LinearLayout column = ui.column(); body.addView(column, new FrameLayout.LayoutParams(-1, -1)); LinearLayout heading = ui.column(); heading.setPadding(ui.dp(18), ui.dp(10), ui.dp(18), ui.dp(12));
-        heading.addView(ui.text(computer.optString("name", "电脑"), 21, true), wrap()); heading.addView(ui.space(8)); deviceStatus = ui.text("", 14, false); deviceStatus.setTextColor(ui.muted); heading.addView(deviceStatus, wrap()); column.addView(heading, wrap());
-        taskAdapter = new NativePages.TaskAdapter(ui, taskCallbacks()); list = NativePages.list(ui, taskAdapter); attachList(column);
+        heading.addView(ui.text(computer.optString("name", "电脑"), 21, true), wrap()); heading.addView(ui.space(8)); deviceStatus = ui.text("", 14, false); deviceStatus.setTextColor(ui.muted); heading.addView(deviceStatus, wrap());
+        // Keep the device identity in the same scroll surface as its tasks, including the empty state.
+        taskAdapter = new NativePages.TaskAdapter(ui, taskCallbacks()); list = NativePages.list(ui, null);
+        heading.setPadding(0, ui.dp(10), 0, ui.dp(12));
+        list.addHeaderView(heading, null, false);
+        attachList(column);
+        list.setAdapter(taskAdapter);
         if (!computer.optBoolean("local")) {
             LinearLayout action = ui.column(); action.setPadding(ui.dp(18), 0, ui.dp(18), ui.dp(8));
-            TextView remove = ui.button("移除电脑", false, () -> confirm("移除这台电脑？", "移除后，这台电脑需重新配对。电脑上的任务不受影响。", "移除", () -> mutate("remove:" + computer.optString("id"), "DELETE", "/api/native/computers/" + computer.optString("id"), null, (value, revision) -> { if (samePage(revision)) navigate("devices", ""); })));
-            remove.setTextColor(ui.danger); action.addView(remove, wrap()); column.addView(action, wrap());
+            TextView remove = ui.button("移除电脑", false, () -> confirm("移除这台电脑？", "移除后，这台电脑需重新配对\n电脑上的任务不受影响", "移除", () -> mutate("remove:" + computer.optString("id"), "DELETE", "/api/native/computers/" + computer.optString("id"), null, (value, revision) -> { if (samePage(revision)) navigate("devices", ""); })));
+            remove.setTextColor(ui.danger); action.addView(remove, wrap()); column.addView(action, wrap()); fixedBottomAction = action;
         }
     }
     private boolean stale() { return NativeScreenPolicy.stale(lastSuccess, SystemClock.elapsedRealtime(), failed); }
@@ -619,25 +1111,33 @@ public final class MainActivity extends Activity {
                 JSONObject computer = findDevice(task.optString("device_id"));
                 if (taskHeadingTitle != null && !android.text.TextUtils.equals(taskHeadingTitle.getText(), task.optString("title", "未命名任务"))) taskHeadingTitle.setText(task.optString("title", "未命名任务"));
                 String computerName = computer == null ? "未知电脑" : computer.optString("name");
-                if (taskHeadingComputer != null && !android.text.TextUtils.equals(taskHeadingComputer.getText(), computerName)) taskHeadingComputer.setText(computerName);
-                if (taskHeadingTool != null) ui.bindToolBadge(taskHeadingTool, task.optString("tool"));
+                if (taskHeadingTool != null) ui.bindTaskIdentity(taskHeadingTool, task.optString("tool"), computerName);
                 taskDetail.update(task, computer, stale(), syncOutput()); if (taskUsage != null) taskUsage.update(task); if (taskResults != null) taskResults.update(task, syncOutput()); archiveButton.setText(task.optBoolean("archived") ? "恢复任务" : "归档任务");
             }
             updateTracking(); return;
         }
-        if (page.equals("device")) { JSONObject device = findDevice(selectedId); if (deviceStatus == null && device != null) { showPage(false); return; } if (deviceStatus != null && device != null) deviceStatus.setText(device.optString("platform", "电脑") + " · " + (stale() ? "状态未知" : device.optBoolean("online") ? "在线" : "离线")); }
+        if (page.equals("device")) {
+            JSONObject device = findDevice(selectedId);
+            if (deviceStatus == null && device != null) { showPage(false); return; }
+            if (deviceStatus != null && device != null) {
+                String sources = NativeListPresentation.availableSources(device.optJSONArray("sources"));
+                String status = device.optString("platform", "电脑") + " · " + (stale() ? "状态未知" : device.optBoolean("online") ? "在线" : "离线");
+                String label = sources.isEmpty() ? status : status + "\n任务来源：" + sources;
+                if (!android.text.TextUtils.equals(deviceStatus.getText(), label)) deviceStatus.setText(label);
+            }
+        }
         int uncertainSelectedTasks = 0;
         if (taskAdapter != null) {
             NativeTaskListModel.Result selected = NativeTaskListModel.select(tasks(), devices(), tool, scope,
                     page.equals("device") ? selectedId : null, taskQuery, stale());
             uncertainSelectedTasks = selected.uncertainSelectedTasks;
-            taskAdapter.update(selected.tasks, devices(), stale()); if (toolSegments != null) toolSegments.counts(selected.toolCounts);
+            taskAdapter.update(selected.tasks, devices(), stale()); taskSourceCounts = selected.toolCounts;
             if (taskSearchSummary != null) {
                 boolean searching = NativeTaskSearchPolicy.isSearching(taskQuery);
                 taskSearchSummary.setVisibility(searching ? View.VISIBLE : View.GONE);
                 if (searching) {
                     String matchCount = snapshot == null ? "等待读取" : "匹配 " + selected.tasks.length() + " 项";
-                    taskSearchSummary.setText(taskSearchExpanded ? "当前列表 · " + matchCount : "搜索：" + taskQuery + " · " + matchCount);
+                    taskSearchSummary.setText(matchCount);
                     taskSearchSummary.setContentDescription("搜索条件：" + taskQuery + "，" + matchCount + "，点按展开搜索");
                 }
             }
@@ -650,6 +1150,9 @@ public final class MainActivity extends Activity {
             boolean searching = page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null;
             if (searching && !(scope.equals("active") && (stale() || uncertainSelectedTasks > 0)))
                 emptyLabel.setText("没有匹配的任务\n试试其他关键词，或调整来源和状态筛选");
+            if (page.equals("tasks") || page.equals("device")) {
+                emptyLabel.setVisibility(taskAdapter.getCount() == 0 ? View.VISIBLE : View.GONE);
+            }
             emptyLabel.setClickable(!searching);
         }
     }
@@ -658,11 +1161,17 @@ public final class MainActivity extends Activity {
         boolean coolingDown = SystemClock.elapsedRealtime() < apiCooldownUntil;
         String message = NativeScreenPolicy.connectionMessage(stale(), failed, snapshotBusy, coolingDown);
         boolean show = !loadedToken.isEmpty() && workspacePage() && snapshot != null && !message.isEmpty();
-        connection.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
+        connection.setVisibility(show ? View.VISIBLE : View.GONE);
+        int warningVisibility = show ? View.VISIBLE : View.GONE;
+        if (headerMeta.getVisibility() != warningVisibility) {
+            headerMeta.setVisibility(warningVisibility);
+            updateIntegratedHeader();
+        }
         boolean retry = show && !snapshotBusy && !coolingDown;
-        titleHeading.setClickable(retry); titleHeading.setFocusable(retry);
+        titleHeading.setClickable(false); titleHeading.setFocusable(false);
+        connection.setClickable(retry); connection.setFocusable(retry); connection.setMinimumHeight(retry ? ui.dp(48) : 0);
         connection.setContentDescription(show ? message : null);
-        titleHeading.setContentDescription(title.getText() + (show ? "，" + message : ""));
+        titleHeading.setContentDescription(title.getText());
         if (show) {
             connection.setText(message);
             connection.setTextColor(coolingDown || failed && !snapshotBusy ? ui.warning : ui.muted);
@@ -687,28 +1196,88 @@ public final class MainActivity extends Activity {
     private void buildAccount() {
         LinearLayout column = content();
         // Keep the header and every menu mounted while account data arrives.
-        accountCard = ui.card(); accountCard.setOrientation(LinearLayout.HORIZONTAL); accountCard.setGravity(Gravity.CENTER_VERTICAL);
-        accountAvatar = avatar("", 52); accountCard.addView(accountAvatar);
-        accountName = ui.text("", 20, true); accountName.setMinLines(2); accountName.setMaxLines(2);
-        accountName.setGravity(Gravity.CENTER_VERTICAL); accountName.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1); params.setMargins(ui.dp(16), 0, ui.dp(6), 0); accountCard.addView(accountName, params);
+        accountCard = ui.row();
+        accountCard.setPaddingRelative(ui.dp(14), ui.dp(12), ui.dp(8), ui.dp(12));
+        accountCard.setMinimumHeight(ui.dp(78));
+        accountAvatar = avatar("", 48);
+        accountAvatar.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        accountCard.addView(accountAvatar);
+        LinearLayout identity = ui.column();
+        identity.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        accountName = ui.text("", 19, true);
+        accountName.setMaxLines(2);
+        ui.applyControlSpacing(accountName);
+        accountName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        identity.addView(accountName, wrap());
+        TextView profileLabel = ui.body("个人资料", 13);
+        ui.applyControlSpacing(profileLabel);
+        LinearLayout.LayoutParams profileParams = wrap();
+        profileParams.topMargin = ui.dp(3);
+        identity.addView(profileLabel, profileParams);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        params.setMarginStart(ui.dp(12)); params.setMarginEnd(ui.dp(4));
+        accountCard.addView(identity, params);
         FrameLayout action = new FrameLayout(this); action.setMinimumWidth(ui.dp(48)); action.setMinimumHeight(ui.dp(48));
-        accountChevron = ui.icon("chevron", 24); action.addView(accountChevron, new FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER));
+        accountChevron = ui.icon("chevron", 20);
+        accountChevron.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        action.addView(accountChevron, new FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER));
         accountRetry = ui.text("重试", 15, true); accountRetry.setGravity(Gravity.CENTER); accountRetry.setMinWidth(ui.dp(48)); accountRetry.setMinHeight(ui.dp(48));
         accountRetry.setPadding(ui.dp(4), 0, ui.dp(4), 0); accountRetry.setBackground(ui.ripple(Color.TRANSPARENT, 12)); accountRetry.setTextColor(ui.accent);
         accountRetry.setContentDescription("重试读取账号"); accountRetry.setAccessibilityDelegate(NativeUi.buttonAccessibility()); accountRetry.setOnClickListener(v -> fetchAccount());
         // INVISIBLE reserves the same measured retry target at every font scale.
         action.addView(accountRetry, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER)); accountCard.addView(action, new LinearLayout.LayoutParams(-2, -2));
-        accountCard.setBackground(ui.ripple(ui.surface, 20)); accountCard.setOnClickListener(v -> navigate("profile", "")); accountCard.setFocusable(true);
-        accountCard.setAccessibilityDelegate(NativeUi.buttonAccessibility()); column.addView(accountCard, wrap()); column.addView(ui.space(20));
+        accountCard.setBackground(ui.ripple(ui.soft, 24));
+        accountCard.setOnClickListener(v -> navigate("profile", ""));
+        accountCard.setFocusable(true);
+        accountCard.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        column.addView(accountCard, wrap());
         updateAccountHeader();
-        column.addView(menu("devices", "我的电脑", () -> navigate("devices", "")), wrap()); column.addView(ui.space(10));
-        column.addView(menu("cloud", "个人同步", () -> navigate("sync", "")), wrap()); column.addView(ui.space(10));
-        column.addView(menu("shield", "登录设备", () -> navigate("sessions", "")), wrap()); column.addView(ui.space(10));
-        column.addView(menu("bell", "系统实况设置", () -> liveSettings.show()), wrap());
-        column.addView(ui.space(10)); column.addView(menu("refresh", "应用更新", () -> startActivity(new Intent(this, NativeUpdateActivity.class))), wrap());
-        if (!TrackingService.trackedId.isEmpty()) { column.addView(ui.space(10)); column.addView(menu("close", "停止跟踪", () -> { TrackingService.requestStop(this, TrackingService.generation); showPage(false); }), wrap()); }
-        column.addView(ui.space(24)); column.addView(ui.button("退出登录", false, () -> confirm("退出 Monitor？", "这台手机会断开账号连接，并结束当前实况。电脑上的任务不受影响。", "退出", this::logout)), wrap());
+        addAccountSection(column, "设备与同步", menuGroup(
+                accountMenu("devices", "我的电脑", () -> navigate("devices", "")),
+                accountMenu("cloud", "个人同步", () -> navigate("sync", "")),
+                accountMenu("shield", "登录设备", () -> navigate("sessions", ""))));
+        addAccountSection(column, "应用", menuGroup(
+                accountMenu("settings", "设置", () -> navigate("settings", ""))));
+        if (!TrackingService.trackedId.isEmpty()) {
+            View stop = accountMenu("close", "停止跟踪", () -> {
+                TrackingService.requestStop(this, TrackingService.generation);
+                savePosition(); showPage(false);
+            });
+            addAccountSection(column, "实况跟踪", menuGroup(stop));
+        }
+    }
+    private void addAccountSection(LinearLayout column, String label, View group) {
+        TextView heading = ui.heading(label, 13);
+        heading.setTextColor(ui.muted);
+        heading.setPaddingRelative(ui.dp(4), 0, ui.dp(4), 0);
+        LinearLayout.LayoutParams section = wrap();
+        section.topMargin = ui.dp(16); section.bottomMargin = ui.dp(8);
+        column.addView(heading, section);
+        column.addView(group, wrap());
+    }
+    private View accountMenu(String icon, String label, Runnable action) {
+        LinearLayout row = ui.row();
+        row.setPaddingRelative(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+        row.setMinimumHeight(ui.dp(56));
+        FrameLayout badge = new FrameLayout(this);
+        badge.setBackground(ui.rounded(ui.soft, 12));
+        badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        badge.addView(ui.icon(icon, 20), new FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.CENTER));
+        row.addView(badge, new LinearLayout.LayoutParams(ui.dp(34), ui.dp(34)));
+        TextView name = ui.text(label, 16, false);
+        ui.applyControlSpacing(name);
+        name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, -2, 1);
+        textParams.setMarginStart(ui.dp(12)); textParams.setMarginEnd(ui.dp(8));
+        row.addView(name, textParams);
+        View chevron = ui.icon("chevron", 18);
+        chevron.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(chevron);
+        row.setFocusable(true);
+        row.setContentDescription(label);
+        row.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        row.setOnClickListener(v -> action.run());
+        return row;
     }
     private void updateAccountHeader() {
         if (!page.equals("account") || accountCard == null) return;
@@ -722,13 +1291,122 @@ public final class MainActivity extends Activity {
         accountChevron.setVisibility(retry ? View.INVISIBLE : View.VISIBLE);
     }
     private View menu(String icon, String label, Runnable action) {
-        LinearLayout row = ui.row(); row.setPadding(ui.dp(16), ui.dp(12), ui.dp(12), ui.dp(12)); row.setMinimumHeight(ui.dp(56)); row.setBackground(ui.ripple(ui.surface, 20)); row.addView(ui.icon(icon, 22));
-        TextView text = ui.text(label, 15, false); LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1); params.setMargins(ui.dp(14), 0, 0, 0); row.addView(text, params); row.addView(ui.icon("chevron", 22));
+        LinearLayout row = ui.row(); row.setPadding(ui.dp(16), ui.dp(14), ui.dp(14), ui.dp(14)); row.setMinimumHeight(ui.dp(60)); row.setBackground(ui.ripple(ui.surface, 20)); row.addView(ui.icon(icon, 22));
+        TextView text = ui.text(label, 16, false); LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1); params.setMargins(ui.dp(14), 0, ui.dp(10), 0); row.addView(text, params); row.addView(ui.icon("chevron", 20));
         row.setFocusable(true); row.setContentDescription(label); row.setAccessibilityDelegate(NativeUi.buttonAccessibility()); row.setOnClickListener(v -> action.run()); return row;
+    }
+    private LinearLayout menuGroup(View... rows) {
+        LinearLayout group = ui.column(); group.setBackground(ui.rounded(ui.surface, 22)); group.setClipToOutline(true);
+        for (int i = 0; i < rows.length; i++) {
+            if (i > 0) {
+                View separator = new View(this); separator.setBackgroundColor(ui.line); separator.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                LinearLayout.LayoutParams line = new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(.5f))); line.leftMargin = ui.dp(52); line.rightMargin = ui.dp(16); group.addView(separator, line);
+            }
+            rows[i].setBackground(ui.ripple(Color.TRANSPARENT, 0)); group.addView(rows[i], wrap());
+        }
+        return group;
     }
     private void buildUsage() {
         LinearLayout column = content(); nativeUsage = new NativeUsagePage(ui, this::showHelp, () -> { nextUsage = 0; fetchUsage(); }, () -> UsageAlerts.showSettings(this));
         nativeUsage.restoreState(usagePageState); nativeUsage.update(usageSummary, usageBusy, usageFailed); column.addView(nativeUsage.view, wrap());
+    }
+    private void buildSettings() {
+        LinearLayout column = content();
+        switch (page) {
+            case "settings-background":
+                appearancePage = new NativeAppearancePage(ui, mode -> {
+                    if (!visible || !page.equals("settings-background") || isFinishing() || isDestroyed()) return;
+                    NativeAppearancePreferences.setMode(this, mode);
+                    savePosition(); recreate();
+                });
+                column.addView(appearancePage.view, wrap());
+                if (wallpaperResult != null) appearancePage.show(wallpaperResult);
+                break;
+            case "settings-appearance":
+                settingsSection(column, "应用外观");
+                column.addView(menuGroup(menu("image", "应用背景", () -> navigate("settings-background", ""))), wrap());
+                column.addView(ui.space(24));
+                settingsSection(column, "实况展示");
+                column.addView(menuGroup(
+                        menu("bell", "显示内容与样式", () -> showSettingsSheet("display")),
+                        menu("shield", "锁屏隐私", () -> showSettingsSheet("privacy"))), wrap());
+                if (Build.VERSION.SDK_INT >= 36) {
+                    column.addView(ui.space(20));
+                    column.addView(menuGroup(menu("settings", "系统实况设置", () -> liveSettings.openPromotionSettings())), wrap());
+                }
+                settingsNote(column, "显示内容与锁屏隐私分别保存\n保留原来的选择");
+                break;
+            case "settings-notifications":
+                settingsSection(column, "通知与运行");
+                column.addView(menuGroup(
+                        menu("bell", "通知权限与实况", () -> showSettingsSheet("notifications")),
+                        menu("refresh", "后台运行", () -> showSettingsSheet("background"))), wrap());
+                column.addView(ui.space(20)); settingsSection(column, "用量");
+                column.addView(menuGroup(menu("usage", "用量提醒", () -> showSettingsSheet("alerts"))), wrap());
+                break;
+            case "settings-support":
+                settingsSection(column, "连接");
+                column.addView(menuGroup(menu("link", "服务器地址", this::showServerSettings)), wrap());
+                column.addView(ui.space(20)); settingsSection(column, "应用");
+                column.addView(menuGroup(
+                        menu("devices", "系统适配与帮助", () -> showSettingsSheet("system-help")),
+                        menu("refresh", "应用更新", () -> startActivity(new Intent(this, NativeUpdateActivity.class)))), wrap());
+                break;
+            case "settings-security":
+                settingsSection(column, "当前手机");
+                column.addView(menuGroup(menu("close", "退出登录", () -> confirm("退出 Monitor？", "这台手机会断开账号连接，并结束当前实况\n电脑上的任务不受影响", "退出", this::logout))), wrap());
+                settingsNote(column, "退出会断开这台手机并结束当前实况\n电脑上的任务不受影响");
+                break;
+            default:
+                column.addView(menuGroup(
+                        menu("bell", "显示与隐私", () -> navigate("settings-appearance", "")),
+                        menu("usage", "通知与提醒", () -> navigate("settings-notifications", "")),
+                        menu("link", "连接与适配", () -> navigate("settings-support", "")),
+                        menu("shield", "账号与安全", () -> navigate("settings-security", ""))), wrap());
+                break;
+        }
+    }
+    private void settingsNote(LinearLayout column, String value) {
+        TextView note = ui.body(value.trim(), 13); note.setTextColor(ui.muted);
+        LinearLayout.LayoutParams params = wrap(); params.topMargin = ui.dp(14); params.leftMargin = ui.dp(4); params.rightMargin = ui.dp(4); column.addView(note, params);
+    }
+    private void refreshWallpaper() {
+        if (!"bing".equals(ui.backgroundMode) || !visible || isFinishing() || isDestroyed()) return;
+        if (bingWallpaper == null) bingWallpaper = new NativeBingWallpaper(getApplicationContext());
+        bingWallpaper.load(result -> {
+            if (!visible || isFinishing() || isDestroyed() || !"bing".equals(ui.backgroundMode)) return;
+            wallpaperResult = result;
+            root.setBackground(new NativeAppBackground(ui.bg, ui.dark, result.bitmap));
+            if (bottomBar != null) bottomBar.refreshBackdrop();
+            if (appearancePage != null) appearancePage.show(result);
+        });
+    }
+    private void showSettingsSheet(String key) {
+        if (!visible || loadedToken.isEmpty() || !page.equals(NativeNavigationPolicy.settingsSheetParent(key))) return;
+        currentSettingsSheet = key; settingsSheetDialog = null;
+        switch (key) {
+            case "display": liveSettings.showPresentation(); break;
+            case "privacy": liveSettings.showPrivacySettings(); break;
+            case "notifications": liveSettings.showNotificationSettings(); break;
+            case "background": liveSettings.showBackgroundHelp(); break;
+            case "alerts": settingsSheetDialog = UsageAlerts.showSettings(this); break;
+            case "system-help": liveSettings.showSystemHelp(); break;
+            default: currentSettingsSheet = ""; break;
+        }
+    }
+    private String showingSettingsSheet() {
+        boolean showing = settingsSheetDialog != null && settingsSheetDialog.isShowing() || liveSettings.isShowing();
+        return showing && page.equals(NativeNavigationPolicy.settingsSheetParent(currentSettingsSheet)) ? currentSettingsSheet : "";
+    }
+    private void restoreSettingsSheet() {
+        if (pendingSettingsSheet.isEmpty()) return;
+        final String key = pendingSettingsSheet; pendingSettingsSheet = "";
+        final long revision = pageEpoch;
+        handler.post(() -> { if (visible && samePage(revision)) showSettingsSheet(key); });
+    }
+    private void settingsSection(LinearLayout column, String label) {
+        TextView heading = ui.text(label, 12, true); heading.setTextColor(ui.muted);
+        heading.setPadding(ui.dp(4), 0, 0, 0); column.addView(heading, wrap()); column.addView(ui.space(10));
     }
     private ImageView avatar(String value, int size) {
         ImageView image = new ImageView(this); image.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(size), ui.dp(size))); image.setScaleType(ImageView.ScaleType.CENTER_CROP); image.setBackground(ui.rounded(ui.soft, size / 2f)); image.setClipToOutline(true); image.setContentDescription("头像"); bindAvatar(image, value); return image;
@@ -774,10 +1452,10 @@ public final class MainActivity extends Activity {
             Runnable save = () -> mutate("sync", "PATCH", "/api/native/preferences", json("sync_output", checked), (result, revision) -> {
                 applyOutputPreference(checked); if (samePage(revision) && outputSwitch != null) { updatingSwitch = true; outputSwitch.setChecked(checked); updatingSwitch = false; }
             });
-            if (checked) confirm("同步最终结果？", "开启后，可在已登录设备查看最终结果和下载配套文件。", "开启", save); else save.run();
+            if (checked) confirm("同步最终结果？", "开启后，可在已登录设备查看最终结果和下载配套文件", "开启", save); else save.run();
         });
         card.addView(outputSwitch, wrap()); column.addView(card, wrap()); column.addView(ui.space(20));
-        TextView state = ui.text("任务状态和已连接电脑会随账号同步。", 15, false); state.setTextColor(ui.muted); column.addView(state, wrap());
+        TextView state = ui.text("任务状态和已连接电脑会随账号同步", 15, false); state.setTextColor(ui.muted); column.addView(state, wrap());
     }
     private void applyOutputPreference(boolean enabled) {
         try {
@@ -808,7 +1486,7 @@ public final class MainActivity extends Activity {
         LinearLayout card = ui.card(); card.addView(ui.text(name, 16, true), wrap()); card.addView(ui.space(8));
         TextView detail = ui.text(current ? "当前设备" : parent ? "授权了这台手机" : NativePages.relative(device.optString("last_seen")), 13, false); detail.setTextColor(ui.muted); card.addView(detail, wrap()); card.addView(ui.space(16));
         card.addView(ui.button(current && nativeDevice ? "退出这台手机" : "退出此设备", false, () -> {
-            String message = parent || current ? "这项操作也会让当前手机退出登录，并结束实况。" : "退出后，该设备需要重新登录。";
+            String message = parent || current ? "这项操作也会让当前手机退出登录，并结束实况" : "退出后，该设备需要重新登录";
             confirm("退出「" + name + "」？", message, "退出", () -> {
                 if (nativeDevice && current) { logout(); return; }
                 final String token = loadedToken;
@@ -825,45 +1503,204 @@ public final class MainActivity extends Activity {
     }
 
     private void buildPairing() {
-        LinearLayout column = content(); column.addView(menu("scan", "扫码配对", () -> {
-            pickerToken = loadedToken; pickerPage = pageKey(); pickerEpoch = pageEpoch;
-            try { startActivityForResult(new Intent(this, NativeQrScanner.class), 23); } catch (Exception failure) { notice("暂时无法打开相机"); }
-        }), wrap()); column.addView(ui.space(12));
-        column.addView(menu("link", "输入配对链接", this::pastePairing), wrap()); column.addView(ui.space(28));
-        column.addView(ui.text("使用配对码", 18, true), wrap()); column.addView(ui.space(12));
-        if (!pairingCode.isEmpty() && NativeApi.time(pairingExpires) > System.currentTimeMillis()) {
-            LinearLayout card = ui.card(); TextView code = ui.text(pairingCode, 24, true); code.setLetterSpacing(.09f); code.setGravity(Gravity.CENTER); code.setTextIsSelectable(true); card.addView(code, wrap()); card.addView(ui.space(16));
-            card.addView(ui.button("复制配对码", false, () -> { ClipboardManager manager = getSystemService(ClipboardManager.class); if (manager != null) { manager.setPrimaryClip(ClipData.newPlainText("Monitor 配对码", pairingCode)); notice("配对码已复制"); } }), wrap()); column.addView(card, wrap()); column.addView(ui.space(14));
-        }
-        column.addView(ui.button(pairingCode.isEmpty() ? "生成配对码" : "重新生成", false, () -> mutate("pairing-code", "POST", "/api/native/computers/pairing", null, (value, revision) -> {
-            String code = value.optString("code"), expires = value.optString("expires_at");
-            if (!code.matches("[A-F0-9]{12}") || NativeApi.time(expires) <= System.currentTimeMillis()) { if (samePage(revision)) notice("返回的配对码无效，请重试"); return; }
-            pairingCode = code; pairingExpires = expires; if (samePage(revision)) { savePosition(); showPage(false); }
-        })), wrap());
+        LinearLayout column = content();
+        TextView hint = ui.body("在电脑端打开配对二维码", 15);
+        column.addView(hint, wrap()); column.addView(ui.space(12));
+        column.addView(ui.button("扫码连接", this::scanComputerPairing), wrap());
+        column.addView(ui.space(8));
+
+        LinearLayout alternatives = ui.column();
+        alternatives.setVisibility(activePairingCode() ? View.VISIBLE : View.GONE);
+        TextView otherWays = ui.quietButton("其他方式", null);
+        otherWays.setOnClickListener(view -> {
+            boolean opening = alternatives.getVisibility() != View.VISIBLE;
+            boolean hideEditor = !opening && alternatives.findFocus() instanceof EditText;
+            alternatives.setVisibility(opening ? View.VISIBLE : View.GONE);
+            if (hideEditor) {
+                InputMethodManager keyboard = getSystemService(InputMethodManager.class);
+                if (keyboard != null) keyboard.hideSoftInputFromWindow(alternatives.getWindowToken(), 0);
+                otherWays.requestFocus();
+            }
+            setPairingDisclosure(otherWays, opening);
+        });
+        setPairingDisclosure(otherWays, alternatives.getVisibility() == View.VISIBLE);
+        column.addView(otherWays, wrap()); column.addView(alternatives, wrap());
+
+        EditText link = input("电脑端生成的配对链接", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        link.setSingleLine(true); link.setSaveEnabled(false);
+        link.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
+        link.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        link.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(1024)});
+        link.setContentDescription("电脑端生成的配对链接");
+        LinearLayout manualLink = ui.column(); manualLink.setVisibility(View.GONE);
+        Runnable enterLink = () -> {
+            manualLink.setVisibility(View.VISIBLE);
+            if (link.requestFocus()) link.post(() -> {
+                if (!visible || !link.isShown() || !link.hasFocus()) return;
+                InputMethodManager keyboard = getSystemService(InputMethodManager.class);
+                if (keyboard != null) keyboard.showSoftInput(link, InputMethodManager.SHOW_IMPLICIT);
+            });
+        };
+        Runnable checkLink = () -> {
+            if (!openComputerPairing(link.getText().toString(), false)) link.setError("请使用当前个人服务生成的电脑配对链接");
+        };
+        link.setOnEditorActionListener((view, action, event) -> {
+            if (action != EditorInfo.IME_ACTION_GO) return false;
+            checkLink.run(); return true;
+        });
+        alternatives.addView(ui.button("粘贴配对链接并核对", false, () -> {
+            if (!openComputerPairing(pasteComputerPairingLink(), false)) {
+                enterLink.run(); link.setError("剪贴板中没有当前个人服务的配对链接");
+            }
+        }), wrap());
+        alternatives.addView(ui.quietButton("手动输入链接", enterLink), wrap());
+        manualLink.addView(link, wrap()); manualLink.addView(ui.quietButton("核对电脑", checkLink), wrap());
+        alternatives.addView(manualLink, wrap());
+        alternatives.addView(ui.space(14));
+        alternatives.addView(ui.heading("在电脑上输入配对码", 16), wrap());
+        alternatives.addView(ui.body("配对码 10 分钟内有效，仅限使用一次", 13), wrap());
+        alternatives.addView(ui.space(8));
+        pairingCodeArea = ui.column(); alternatives.addView(pairingCodeArea, wrap());
+        renderPairingCode();
     }
-    private void pastePairing() {
-        EditText field = input("粘贴电脑上的配对链接", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI); field.setMaxLines(4);
-        LinearLayout area = ui.column(); area.setPadding(ui.dp(18), ui.dp(10), ui.dp(18), ui.dp(10)); area.addView(field, wrap());
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("输入配对链接").setView(area).setNegativeButton("取消", null).setPositiveButton("继续", null).create();
-        dialog.setOnShowListener(target -> { ui.applyFont(dialog.getWindow().getDecorView()); dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-            String id = NativeScreenPolicy.pairingId(field.getText().toString()); if (id == null) { field.setError("请使用这台个人服务生成的配对链接"); return; } dialog.dismiss(); navigate("pairing-confirm", id);
-        }); }); dialog.show();
+    private void setPairingDisclosure(TextView toggle, boolean expanded) {
+        toggle.setText(expanded ? "其他方式  ▴" : "其他方式  ▾");
+        toggle.setContentDescription(Build.VERSION.SDK_INT >= 30 ? "其他方式" : expanded ? "其他方式，已展开" : "其他方式，已收起");
+        if (Build.VERSION.SDK_INT >= 30) toggle.setStateDescription(expanded ? "已展开" : "已收起");
+    }
+    private void scanComputerPairing() {
+        pickerToken = loadedToken; pickerPage = pageKey(); pickerEpoch = pageEpoch;
+        try { startActivityForResult(new Intent(this, NativeQrScanner.class), 23); }
+        catch (Exception failure) { notice("暂时无法打开相机"); }
+    }
+    /** Inspect only an explicitly requested, plain-text clipboard item. */
+    private String pasteComputerPairingLink() {
+        if (!visible || !page.equals("pairing")) return null;
+        ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+        if (clipboard == null) return null;
+        try {
+            ClipData clip = clipboard.getPrimaryClip();
+            if (clip == null || clip.getItemCount() != 1 || !clip.getDescription().hasMimeType("text/plain")) return null;
+            ClipData.Item item = clip.getItemAt(0);
+            CharSequence text = item.getText();
+            return item.getIntent() == null && item.getUri() == null && text != null && text.length() <= 1024 ? text.toString() : null;
+        } catch (RuntimeException unavailable) { return null; }
+    }
+    private boolean openComputerPairing(String text, boolean scannerResult) {
+        // Activity results may arrive before onResume; the scanner callback already checks token, page and epoch.
+        if ((!visible && !scannerResult) || isFinishing() || isDestroyed() || !page.equals("pairing")
+                || loadedToken.isEmpty() || text == null || text.length() > 1024) return false;
+        String requestId = NativeScreenPolicy.pairingId(text);
+        if (requestId == null) return false;
+        View focused = getCurrentFocus();
+        if (focused instanceof EditText) {
+            InputMethodManager keyboard = getSystemService(InputMethodManager.class);
+            if (keyboard != null) keyboard.hideSoftInputFromWindow(focused.getWindowToken(), 0);
+        }
+        navigate("pairing-confirm", requestId);
+        return true;
+    }
+    private boolean activePairingCode() {
+        return !pairingCode.isEmpty() && NativeApi.time(pairingExpires) > System.currentTimeMillis();
+    }
+    private void updatePairingCodeExpiry() {
+        if (pairingCode.isEmpty() || activePairingCode()) return;
+        pairingCode = ""; pairingExpires = "";
+        if (pairingCodeArea != null) renderPairingCode();
+    }
+    private void renderPairingCode() {
+        if (pairingCodeArea == null || !page.equals("pairing")) return;
+        pairingCodeArea.removeAllViews();
+        boolean active = activePairingCode();
+        if (active) {
+            LinearLayout card = ui.card(); TextView code = ui.heading(pairingCode, 22);
+            code.setLetterSpacing(.07f); code.setGravity(Gravity.CENTER); card.addView(code, wrap());
+            card.addView(ui.quietButton("复制配对码", this::copyComputerPairingCode), wrap());
+            pairingCodeArea.addView(card, wrap()); pairingCodeArea.addView(ui.space(6));
+        }
+        pairingCodeArea.addView(ui.button(active ? "重新生成配对码" : "生成配对码", false, () ->
+                mutate("pairing-code", "POST", "/api/native/computers/pairing", null, (value, revision) -> {
+                    String code = value.optString("code"), expires = value.optString("expires_at");
+                    if (!code.matches("[A-F0-9]{12}") || NativeApi.time(expires) <= System.currentTimeMillis()) {
+                        if (visible && samePage(revision)) notice("返回的配对码无效，请重试");
+                        return;
+                    }
+                    pairingCode = code; pairingExpires = expires;
+                    if (pairingCodeArea != null) renderPairingCode();
+                })), wrap());
+    }
+    private void copyComputerPairingCode() {
+        if (!visible || !page.equals("pairing")) return;
+        if (!activePairingCode()) { updatePairingCodeExpiry(); notice("配对码已过期，请重新生成"); return; }
+        ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+        if (clipboard == null) return;
+        ClipData clip = ClipData.newPlainText("Monitor 配对码", pairingCode);
+        android.os.PersistableBundle extras = new android.os.PersistableBundle();
+        extras.putBoolean("android.content.extra.IS_SENSITIVE", true); clip.getDescription().setExtras(extras);
+        try { clipboard.setPrimaryClip(clip); notice("配对码已复制"); }
+        catch (RuntimeException unavailable) { notice("暂时无法复制配对码"); }
     }
     private void buildPairingConfirm() {
         LinearLayout column = content(); if (!NativeApi.validId(selectedId)) { placeholder(column, "配对链接无效"); return; }
         placeholder(column, "正在读取电脑信息"); String requestId = selectedId;
         request("GET", "/api/native/computers/pairing/" + requestId, null, (result, revision) -> {
             if (!samePage(revision)) return; column.removeAllViews();
-            if (result == null) { placeholder(column, "暂时无法读取配对请求"); column.addView(ui.button("重试", false, () -> showPage(false)), wrap()); return; }
+            if (result == null || !requestId.equals(result.optString("request_id"))) {
+                placeholder(column, "暂时无法读取配对请求。若二维码已过期，请在电脑端重新生成。");
+                column.addView(ui.button("重试", false, () -> showPage(false)), wrap()); return;
+            }
             String status = result.optString("status"), name = result.optString("name", "新电脑"), platform = result.optString("platform", "电脑"), expires = result.optString("expires_at");
-            LinearLayout card = ui.card(); card.addView(ui.icon("monitor", 34)); card.addView(ui.space(20)); card.addView(ui.text(name, 20, true), wrap()); card.addView(ui.space(10)); TextView label = ui.text(platform, 15, false); label.setTextColor(ui.muted); card.addView(label, wrap()); column.addView(card, wrap()); column.addView(ui.space(24));
-            if (!status.equals("pending") || NativeApi.time(expires) <= System.currentTimeMillis()) { placeholder(column, status.equals("approved") ? "这台电脑已配对" : "配对请求已失效"); return; }
-            column.addView(ui.button("连接这台电脑", () -> {
-                if (NativeApi.time(expires) <= System.currentTimeMillis()) { notice("配对请求已过期，请在电脑重新发起"); return; }
-                mutate("approve:" + requestId, "POST", "/api/native/computers/pairing/" + requestId + "/approve", null, (value, actionPage) -> { if (samePage(actionPage)) { notice("电脑已连接"); navigate("devices", ""); } });
-            }), wrap()); column.addView(ui.space(12));
-            column.addView(ui.button("拒绝", false, () -> mutate("reject:" + requestId, "POST", "/api/native/computers/pairing/" + requestId + "/reject", null, (value, actionPage) -> { if (samePage(actionPage)) navigate("pairing", ""); })), wrap());
+            LinearLayout card = ui.card(); card.addView(ui.icon("monitor", 28)); card.addView(ui.space(10));
+            card.addView(ui.heading(name, 20), wrap()); card.addView(ui.body(platform, 15), wrap());
+            column.addView(card, wrap()); column.addView(ui.space(14));
+            if (!status.equals("pending") || NativeApi.time(expires) <= System.currentTimeMillis()) {
+                if (status.equals("approved") || status.equals("consumed")) {
+                    placeholder(column, status.equals("approved") ? "已确认，电脑端将完成连接" : "这台电脑已配对");
+                    column.addView(ui.button("查看电脑", false, () -> navigate("devices", "")), wrap());
+                } else {
+                    placeholder(column, status.equals("denied") ? "已拒绝此配对请求" : "配对已过期，请在电脑端重新发起");
+                    column.addView(ui.button("返回添加电脑", false, () -> navigate("pairing", "")), wrap());
+                }
+                return;
+            }
+            column.addView(ui.body("仅连接你认得的电脑。确认后，这台电脑可以向个人服务同步任务。", 14), wrap());
+            column.addView(ui.space(12));
+            TextView approve = ui.button("连接这台电脑", null), reject = ui.quietButton("拒绝", null);
+            approve.setOnClickListener(v -> decideComputerPairing(requestId, expires, true, approve, reject));
+            reject.setOnClickListener(v -> decideComputerPairing(requestId, expires, false, approve, reject));
+            boolean ready = !mutations.contains("pairing-decision:" + requestId);
+            approve.setEnabled(ready); reject.setEnabled(ready);
+            column.addView(approve, wrap()); column.addView(reject, wrap());
         });
+    }
+    private void decideComputerPairing(String requestId, String expires, boolean approved, TextView approve, TextView reject) {
+        if (!visible || !page.equals("pairing-confirm") || !requestId.equals(selectedId) || loadedToken.isEmpty()) return;
+        if (NativeApi.time(expires) <= System.currentTimeMillis()) { notice("配对已过期，请在电脑端重新发起"); return; }
+        String key = "pairing-decision:" + requestId;
+        if (!mutations.add(key)) return;
+        approve.setEnabled(false); reject.setEnabled(false);
+        (approved ? approve : reject).setText(approved ? "正在确认…" : "正在拒绝…");
+        boolean handled = request("POST", "/api/native/computers/pairing/" + requestId + (approved ? "/approve" : "/reject"), null, (result, revision) -> {
+            mutations.remove(key);
+            if (!samePage(revision)) {
+                if (visible && page.equals("pairing-confirm") && requestId.equals(selectedId)) showPage(false);
+                return;
+            }
+            if (result != null && result.optBoolean("ok") && result.optString("status").equals(approved ? "approved" : "denied")) {
+                if (approved) { nextSnapshot = 0; if (visible) notice("已确认，电脑端将完成连接"); }
+                navigate(approved ? "devices" : "pairing", "");
+                return;
+            }
+            resetPairingDecision(approve, reject);
+        });
+        if (!handled) {
+            mutations.remove(key);
+            resetPairingDecision(approve, reject);
+        }
+    }
+    private void resetPairingDecision(TextView approve, TextView reject) {
+        approve.setText("连接这台电脑"); reject.setText("拒绝");
+        approve.setEnabled(true); reject.setEnabled(true);
     }
     private void external(String url) {
         if (!(url.equals(NativeApi.ORIGIN + "/#/profile") || url.matches(java.util.regex.Pattern.quote(NativeApi.ORIGIN) + "/#/native-connect/[A-Za-z0-9_-]{32}"))) return;
@@ -880,23 +1717,6 @@ public final class MainActivity extends Activity {
     private void confirm(String title, String message, String positive, Runnable action) {
         final long revision = pageEpoch, epoch = sessionEpoch; final String token = loadedToken;
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle(title).setMessage(message).setNegativeButton("取消", null).setPositiveButton(positive, (target, which) -> { if (samePage(revision) && valid(token, epoch)) action.run(); }).create(); dialog.show(); ui.applyFont(dialog.getWindow().getDecorView());
-    }
-    private void help() {
-        if (!visible || isFinishing() || isDestroyed() || helpDialog != null) return;
-        String message;
-        switch (page) {
-            case "tasks": message = "先选工具来源，再按状态筛选。右上角可展开或收起搜索，查找任务名称、项目或电脑名称。收起后保留关键词，搜索摘要会继续提示当前条件；清空后恢复当前筛选。\n\n搜索只在已加载的列表中进行，多个关键词用空格分开。“进行中”包括执行、等待批准和出错的任务，离线记录不会显示为正在执行。"; break;
-            case "task": message = "查看任务状态和最终结果，也可下载文件或继续回复。\n\n开始跟踪后，进度会显示在系统实况中。展示方式由系统通知设置决定。"; break;
-            case "devices": case "device": message = "已连接的电脑随账号同步。\n\n电脑保持开机、采集端运行时，任务状态会自动更新。"; break;
-            case "pairing": message = "扫描电脑采集端的二维码，或生成配对码后在电脑端输入。\n\n配对码 10 分钟内有效，只能使用一次。"; break;
-            case "pairing-confirm": message = "确认电脑名称和平台后连接。\n\n这台电脑随后可向你的个人服务同步任务。"; break;
-            case "profile": message = "头像和昵称随账号同步。\n\n连接 Google 账号时，会打开浏览器完成验证。"; break;
-            case "sessions": message = "退出设备会撤销它的登录权限。\n\n退出曾授权当前手机的浏览器，也会让这台手机退出。"; break;
-            case "sync": message = "开启后，同步最终结果与配套文件。\n\n关闭后，清除服务中的结果副本，仅保留任务状态。"; break;
-            case "usage": message = NativeUsagePage.HELP; break;
-            default: message = "管理个人账号、登录设备和系统实况。\n\nCodex 与 Claude Code 的账号由各台电脑管理。";
-        }
-        showHelp(pageTitle(), message);
     }
     private void showHelp(String heading, String message) {
         if (!visible || isFinishing() || isDestroyed() || helpDialog != null || loadedToken.isEmpty()) return;
@@ -921,7 +1741,10 @@ public final class MainActivity extends Activity {
             long minutes = Math.max(1, (TrackingService.endsAt - SystemClock.elapsedRealtime() + 59999) / 60000);
             detail = "剩余 " + (minutes >= 60 ? (minutes / 60) + " 小时" + (minutes % 60 > 0 ? " " + (minutes % 60) + " 分钟" : "") : minutes + " 分钟");
         }
-        if (trackingNote != null && !android.text.TextUtils.equals(trackingNote.getText(), detail)) trackingNote.setText(detail);
+        if (trackingNote != null) {
+            if (!android.text.TextUtils.equals(trackingNote.getText(), detail)) trackingNote.setText(detail);
+            trackingNote.setVisibility(detail.isEmpty() ? View.GONE : View.VISIBLE);
+        }
     }
     private boolean canTrack(String token, long revision, String expectedPage) { return visible && revision == actionRevision && pageKey().equals(expectedPage) && page.equals("task") && valid(token, sessionEpoch); }
     private void chooseTrackingDuration(String id, String token, long revision) {
@@ -988,7 +1811,7 @@ public final class MainActivity extends Activity {
         if (!ServerSettings.legacyConnection(this)) { updateLogin(); return; }
         LivePresentationSheet confirmation = new LivePresentationSheet(this, "清除本机旧连接？");
         serverSettingsDialog = confirmation;
-        confirmation.note("这会退出本机旧登录、停止跟踪和用量提醒，并关闭应用。重新打开后可设置服务器地址。\n\n原服务器上的连接不会被远程撤销，请到原服务的设备管理中移除旧设备。");
+        confirmation.note("这会退出本机旧登录、停止跟踪和用量提醒，并关闭应用\n重新打开后可设置服务器地址\n\n原服务器上的连接不会被远程撤销，请到原服务的设备管理中移除旧设备");
         confirmation.action("清除并关闭应用", this::clearLegacyConnection);
         confirmation.action("取消", () -> { });
         confirmation.show();
@@ -998,13 +1821,13 @@ public final class MainActivity extends Activity {
         // Never enqueue revocation or associate those credentials with the next server.
         if (!ServerSettings.legacyConnection(this)) { updateLogin(); return; }
         try { SessionStore.write(this, new JSONObject()); }
-        catch (Exception failure) { notice("未能清除旧连接，请重试。"); return; }
-        visible = false; handler.removeCallbacks(heartbeat);
+        catch (Exception failure) { notice("未能清除旧连接，请重试"); return; }
+        visible = false; handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace);
         TrackingService.requestStop(this, TrackingService.generation); UsageAlerts.sync(this);
         sessionEpoch++; pageEpoch++; actionRevision++; loadedToken = ""; invalidToken = "";
         snapshot = null; account = null; usageSummary = null; profileDraft = false; taskQuery = "";
         draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = "";
-        mutations.clear(); listPositions.clear(); scrollPositions.clear(); clearNotificationRequest();
+        mutations.clear(); listPositions.clear(); scrollPositions.clear(); workbenchHeaderScroll = 0; clearNotificationRequest();
         if (taskResults != null) { taskResults.dispose(); taskResults = null; }
         // Wait for the cookie store's durable clear before ending this process and its old workers.
         WebSessionCookies.clear(() -> ServerSettings.closeForRestart(this));
@@ -1025,7 +1848,7 @@ public final class MainActivity extends Activity {
             handler.post(() -> {
                 logoutBusy = false; if (isDestroyed()) return; JSONObject current = SessionStore.read(this); if (!token.equals(current.optString("reader_token")) || !current.optBoolean("logout_pending")) return;
                 if (error == null) { try { NativeConnection.finishLogout(this, token); showPage(false); } catch (Exception failureSaving) { notice("已撤销连接，请再点一次完成退出"); } }
-                else if (visible) notice("本机已退出，连接尚未在服务端撤销。联网后请点「完成退出」。");
+                else if (visible) notice("本机已退出，连接尚未在服务端撤销\n联网后请点「完成退出」");
             });
         });
     }
@@ -1037,7 +1860,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (resultCode != RESULT_OK || data == null || !pickerToken.equals(loadedToken) || !pageKey().equals(pickerPage) || pageEpoch != pickerEpoch) return;
-        if (requestCode == 23) { String id = NativeScreenPolicy.pairingId(data.getStringExtra(NativeQrScanner.EXTRA_TEXT)); if (id == null) notice("这个二维码不是当前服务的配对链接"); else navigate("pairing-confirm", id); return; }
+        if (requestCode == 23) { if (!openComputerPairing(data.getStringExtra(NativeQrScanner.EXTRA_TEXT), true)) notice("这个二维码不是当前个人服务的电脑配对链接"); return; }
         if (requestCode != 22 || !page.equals("profile")) return;
         Uri uri = data.getData(); if (uri == null || !"content".equals(uri.getScheme()) || (data.getClipData() != null && data.getClipData().getItemCount() != 1)) { notice("请选择一张图片"); return; }
         readAvatar(uri);
@@ -1088,11 +1911,13 @@ public final class MainActivity extends Activity {
         if (target == null) finish(); else navigate(target.page, target.id);
     }
     @Override public void onBackPressed() { back(); }
-    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); savePosition(); captureDraft(); dismissHelp(); setIntent(intent); if (openNotification(intent)) { cancelDuration(); clearNotificationRequest(); showPage(false); loadCurrentPage(); } else handleReturn(intent); }
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); savePosition(); captureDraft(); dismissTaskFilterSheet(); dismissHelp(); setIntent(intent); if (openNotification(intent)) { cancelDuration(); clearNotificationRequest(); showPage(false); loadCurrentPage(); } else handleReturn(intent); }
     @Override protected void onSaveInstanceState(Bundle saved) {
         if (taskResults != null) saved.putBundle("task_results", taskResults.saveState());
         if (nativeUsage != null) usagePageState = nativeUsage.saveState();
         if (!loadedToken.isEmpty() && usagePageState != null) saved.putBundle("usage_page_state", usagePageState);
+        String settingsSheet = showingSettingsSheet();
+        saved.putString("settings_sheet", settingsSheet.isEmpty() ? pendingSettingsSheet : settingsSheet);
         captureDraft(); saved.putString("page", page); saved.putString("id", selectedId); saved.putString("tool", tool); saved.putString("scope", scope);
         saved.putString("task_query", loadedToken.isEmpty() ? "" : NativeTaskSearchPolicy.boundedQuery(taskQuery));
         saved.putBoolean("task_search_expanded", !loadedToken.isEmpty() && taskSearchExpanded);
@@ -1104,24 +1929,28 @@ public final class MainActivity extends Activity {
             saved.putInt("task_search_selection_end", taskSearchInput.getSelectionEnd());
         }
         if (profileDraft) { saved.putBoolean("profile_draft", true); saved.putString("draft_name", draftName); saved.putString("draft_avatar", draftAvatar); }
-        if (list != null) saved.putParcelable("list_position", list.onSaveInstanceState()); if (scroll != null) saved.putInt("scroll_y", scroll.getScrollY());
-        saved.putString("pairing_code", pairingCode); saved.putString("pairing_expires", pairingExpires);
+        if (list != null) saved.putParcelable("list_position", list.onSaveInstanceState());
+        if (page.equals("tasks")) saved.putInt("workbench_header_scroll", currentWorkbenchHeaderScroll());
+        if (scroll != null) saved.putInt("scroll_y", scroll.getScrollY());
         saved.putLong("page_epoch", pageEpoch); saved.putString("picker_fingerprint", tokenFingerprint(pickerToken)); saved.putString("picker_page", pickerPage); saved.putLong("picker_epoch", pickerEpoch);
         saved.putString("task_return_device", taskReturnDevice); saved.putString("avatar_uri", pendingAvatarUri); saved.putString("state_fingerprint", tokenFingerprint(loadedToken)); super.onSaveInstanceState(saved);
     }
     @Override protected void onResume() {
         super.onResume(); visible = true; reconcileConnection(); updateLogin(); resumeNotificationRequest(); handler.removeCallbacks(heartbeat); loadCurrentPage(); handler.post(heartbeat);
+        refreshWallpaper();
         UsageAlerts.sync(this);
         if (!pendingAvatarUri.isEmpty() && !avatarBusy && !loadedToken.isEmpty() && page.equals("profile")) readAvatar(Uri.parse(pendingAvatarUri));
-        restoreTaskSearchFocus();
+        restoreTaskSearchFocus(); restoreSettingsSheet();
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && systemBars != null) updateHeaderSurface();
         if (hasFocus) restoreTaskSearchFocus();
     }
-    @Override protected void onPause() { visible = false; if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); super.onPause(); }
+    @Override protected void onPause() { pendingSettingsSheet = showingSettingsSheet(); visible = false; dismissTaskFilterSheet(); if (bingWallpaper != null) bingWallpaper.cancel(); if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace); super.onPause(); }
     @Override protected void onDestroy() {
-        visible = false; cancelSearchAnimation(); if (taskResults != null) { taskResults.dispose(); taskResults = null; } sessionEpoch++; pageEpoch++; actionRevision++; dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); clearNotificationRequest(); handler.removeCallbacksAndMessages(null); worker.shutdown();
+        if (bingWallpaper != null) bingWallpaper.close();
+        visible = false; dismissTaskFilterSheet(); cancelSearchAnimation(); if (taskResults != null) { taskResults.dispose(); taskResults = null; } sessionEpoch++; pageEpoch++; actionRevision++; dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); clearNotificationRequest(); handler.removeCallbacksAndMessages(null); workbenchReader.shutdown(); worker.shutdown();
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy();
     }
     private static String tokenFingerprint(String token) {

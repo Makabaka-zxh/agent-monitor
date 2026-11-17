@@ -13,6 +13,8 @@ import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.hardware.display.DisplayManager;
@@ -25,6 +27,7 @@ import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -48,12 +51,15 @@ import java.util.Arrays;
 public final class NativeQrScanner extends Activity implements TextureView.SurfaceTextureListener {
     public static final String EXTRA_TEXT = "com.agentmonitor.live.QR_TEXT";
     private static final int CAMERA_PERMISSION = 81, PICK_IMAGE = 82;
+    private static final int SCANNER_BACKGROUND = 0xFF11171F;
     private static final String DEFAULT_HINT = "将电脑上的配对二维码放入框内";
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Object imageLock = new Object();
     private TextureView preview;
     private TextView status;
     private Button permissionButton, torchButton, imageButton;
+    private LinearLayout pageHeader;
+    private NativeUi chrome;
     private Typeface font;
     private HandlerThread analysisThread;
     private Handler analysis;
@@ -82,30 +88,33 @@ public final class NativeQrScanner extends Activity implements TextureView.Surfa
         super.onCreate(saved);
         setResult(RESULT_CANCELED);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        getWindow().setStatusBarColor(Color.rgb(17, 23, 31));
-        getWindow().setNavigationBarColor(Color.rgb(17, 23, 31));
+        getWindow().setStatusBarColor(SCANNER_BACKGROUND);
+        getWindow().setNavigationBarColor(SCANNER_BACKGROUND);
         getWindow().getDecorView().setSystemUiVisibility(0);
         try { font = Typeface.createFromAsset(getAssets(), "fonts/MiSans-Regular.ttf"); }
         catch (RuntimeException ignored) { font = Typeface.DEFAULT; }
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(17, 23, 31));
+        root.setBackgroundColor(SCANNER_BACKGROUND);
         root.setPadding(dp(24), dp(16), dp(24), dp(20));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             view.setPadding(dp(24) + insets.getSystemWindowInsetLeft(), dp(16) + insets.getSystemWindowInsetTop(),
                     dp(24) + insets.getSystemWindowInsetRight(), dp(20) + insets.getSystemWindowInsetBottom());
             return insets.consumeSystemWindowInsets();
         });
-        LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.CENTER_VERTICAL);
+        chrome = new NativeUi(this);
+        pageHeader = new LinearLayout(this);
+        pageHeader.setGravity(Gravity.CENTER_VERTICAL);
+        pageHeader.setBackground(scannerHeaderMaterial());
         Button back = button("返回");
         back.setContentDescription("返回添加电脑");
         back.setOnClickListener(v -> finish());
-        header.addView(back, new LinearLayout.LayoutParams(dp(64), dp(48)));
+        pageHeader.addView(back, new LinearLayout.LayoutParams(dp(64), dp(48)));
         TextView title = text("扫一扫", 24, Color.WHITE);
+        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
         title.setPadding(dp(16), 0, 0, 0);
-        header.addView(title, new LinearLayout.LayoutParams(0, dp(56), 1));
-        root.addView(header);
+        pageHeader.addView(title, new LinearLayout.LayoutParams(0, dp(56), 1));
+        root.addView(pageHeader);
 
         FrameLayout cameraFrame = new FrameLayout(this);
         GradientDrawable frameBackground = shape(Color.BLACK, 28);
@@ -175,6 +184,17 @@ public final class NativeQrScanner extends Activity implements TextureView.Surfa
             String pending = saved.getString("pending_image");
             if (pending != null && pending.length() <= 4096) decodeImage(Uri.parse(pending));
         }
+    }
+
+    private Drawable scannerHeaderMaterial() {
+        if (chrome.reducedTransparencyEnabled()) return new ColorDrawable(0xFF202C38);
+        // The camera and crop guide stay in their original frame; only the app's own dark surface shows through.
+        return new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xE8283846, 0xD923303C, 0xA81A2530});
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused && pageHeader != null) pageHeader.setBackground(scannerHeaderMaterial());
     }
 
     @Override protected void onResume() {

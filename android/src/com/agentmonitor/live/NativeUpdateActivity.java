@@ -6,7 +6,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -16,6 +15,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -31,6 +31,7 @@ public final class NativeUpdateActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor(action -> new Thread(action, "MonitorUpdate"));
     private final Handler main = new Handler(Looper.getMainLooper());
     private NativeUi ui;
+    private LinearLayout pageHeader;
     private LinearLayout content;
     private TextView progressView;
     private TextView retryView;
@@ -42,30 +43,48 @@ public final class NativeUpdateActivity extends Activity {
     private UpdateRecoveryPolicy.Candidate candidate;
     private UpdateClient.Operation operation;
     private State state = State.IDLE;
-    private String message = "检查 GitHub 上的最新正式版本。";
+    private String message = "检查 GitHub 上的最新正式版本";
     private long generation;
     private boolean resumed, awaitingPermission;
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved); ui = new NativeUi(this);
-        LinearLayout root = ui.column(); root.setBackground(ui.background());
-        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
-        getWindow().setStatusBarColor(Color.TRANSPARENT); getWindow().setNavigationBarColor(ui.bg);
-        if (!ui.dark) root.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        pageHeader = ui.row();
+        pageHeader.setPadding(ui.dp(6), ui.dp(6), ui.dp(18), ui.dp(4));
+        pageHeader.setBackground(ui.compactHeaderMaterial());
+        pageHeader.setClickable(true);
+        pageHeader.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        pageHeader.addView(ui.iconButton("back", "返回", this::finish));
+        pageHeader.addView(ui.heading("应用更新", 22));
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        scroll.setVerticalScrollBarEnabled(false);
+        // Measure clearance in the first pass so larger text never starts below stale padding.
+        FrameLayout root = new FrameLayout(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                measureChildWithMargins(pageHeader, widthSpec, 0, heightSpec, 0);
+                int clearance = pageHeader.getMeasuredHeight();
+                if (scroll.getPaddingTop() != clearance) scroll.setPadding(0, clearance, 0, 0);
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        root.setBackground(ui.background());
+        NativeSystemBars bars = NativeSystemBars.attach(getWindow(), root, ui.headerTopColor(), ui.bg);
         root.setOnApplyWindowInsetsListener((view, insets) -> {
+            bars.onInsets(insets);
             if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
             } else view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             return insets;
         });
-        LinearLayout heading = ui.row(); heading.setPadding(ui.dp(6), ui.dp(6), ui.dp(18), ui.dp(4));
-        heading.addView(ui.iconButton("back", "返回", this::finish)); heading.addView(ui.text("应用更新", 22, true)); root.addView(heading);
-        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.setVerticalScrollBarEnabled(false);
         content = ui.column(); content.setPadding(ui.dp(18), ui.dp(16), ui.dp(18), ui.dp(24)); scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1)); setContentView(root); root.requestApplyInsets();
+        root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(pageHeader, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+        setContentView(root); root.requestApplyInsets();
         try { installed = UpdatePackage.installed(this); }
-        catch (Exception unavailable) { state = State.ERROR; message = "无法读取当前版本，请重新打开页面。"; }
+        catch (Exception unavailable) { state = State.ERROR; message = "无法读取当前版本，请重新打开页面"; }
         if (saved != null) {
             try { candidate = UpdateRecoveryPolicy.decode(saved.getStringArray("update_candidate")); }
             catch (RuntimeException invalid) { candidate = null; }
@@ -73,6 +92,10 @@ public final class NativeUpdateActivity extends Activity {
         }
         Context app = getApplicationContext(); worker.execute(() -> UpdateInstallProvider.prune(app));
         render();
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused && pageHeader != null) pageHeader.setBackground(ui.compactHeaderMaterial());
     }
     private void render() {
         if (content == null || ui == null) return;
@@ -103,15 +126,15 @@ public final class NativeUpdateActivity extends Activity {
             notes.addView(ui.text("版本 " + release.manifest.versionName, 19, true)); notes.addView(ui.space(12));
             TextView body = ui.text(release.notes, 16); body.setTextIsSelectable(true); notes.addView(body, wrap()); content.addView(notes, wrap());
         }
-        content.addView(ui.space(18)); TextView detail = ui.text("更新来自项目的 GitHub 正式发布。安装由系统确认；不会自动安装。", 15);
+        content.addView(ui.space(18)); TextView detail = ui.text("更新来自项目的 GitHub 正式发布\n安装由系统确认；不会自动安装", 15);
         detail.setTextColor(ui.muted); content.addView(detail, wrap());
         content.addView(ui.space(18));
-        TextView license = ui.text("本应用使用 MiSans 字体，由小米提供，按 MiSans 字体知识产权许可协议授权。Monitor 源码采用 MIT；第三方组件和商标遵循各自条款。", 15);
+        TextView license = ui.text("本应用使用 MiSans 字体，由小米提供，按 MiSans 字体知识产权许可协议授权\nMonitor 源码采用 MIT；第三方组件和商标遵循各自条款", 15);
         license.setTextColor(ui.muted); content.addView(license, wrap()); content.addView(ui.space(12));
         addButton("开源与许可", false, () -> {
             try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Makabaka-zxh/agent-monitor/blob/main/THIRD_PARTY_NOTICES.md"))
                     .addCategory(Intent.CATEGORY_BROWSABLE)); }
-            catch (RuntimeException unavailable) { message = "暂时无法打开浏览器。"; render(); }
+            catch (RuntimeException unavailable) { message = "暂时无法打开浏览器"; render(); }
         });
         refreshRetryControls();
     }
@@ -132,7 +155,7 @@ public final class NativeUpdateActivity extends Activity {
         }
         boolean show = waiting && !networkButtons.isEmpty();
         retryView.setVisibility(show ? View.VISIBLE : View.GONE);
-        if (show) retryView.setText("更新服务暂时限制请求，请等待 " + ((remaining + 999) / 1000) + " 秒后重试。");
+        if (show) retryView.setText("更新服务暂时限制请求，请等待 " + ((remaining + 999) / 1000) + " 秒后重试");
         // Update only the countdown and controls: keep focus, selection and scroll stable.
         // Reaching zero enables an explicit retry; it never sends a request itself.
         if (resumed && show) main.postDelayed(retryTick, Math.min(1000L, remaining));
@@ -156,8 +179,8 @@ public final class NativeUpdateActivity extends Activity {
                 if (found == null) { page.state = State.ERROR; page.message = problem; }
                 else {
                     page.release = found;
-                    if (!found.manifest.newerThan(page.installed.code)) { page.state = State.CURRENT; page.message = "当前版本已包含最新正式发布的更新。"; }
-                    else if (!found.manifest.supportsSdk(Build.VERSION.SDK_INT)) { page.state = State.UNSUPPORTED; page.message = "当前手机系统暂不支持此版本。升级手机系统后可重新检查。"; }
+                    if (!found.manifest.newerThan(page.installed.code)) { page.state = State.CURRENT; page.message = "当前版本已包含最新正式发布的更新"; }
+                    else if (!found.manifest.supportsSdk(Build.VERSION.SDK_INT)) { page.state = State.UNSUPPORTED; page.message = "当前手机系统暂不支持此版本\n升级手机系统后可重新检查"; }
                     else { page.state = State.AVAILABLE; page.message = "版本 " + found.manifest.versionName + " · " + size(found.manifest.size); }
                 }
                 page.render();
@@ -167,7 +190,7 @@ public final class NativeUpdateActivity extends Activity {
     private void download() {
         if (!resumed || release == null || installed == null || busy() || !release.manifest.eligible(installed.code, Build.VERSION.SDK_INT)) return;
         if (UpdateClient.retryRemainingMillis() > 0) { render(); return; }
-        discardReady(); state = State.DOWNLOADING; message = "正在下载，离开此页面会取消。";
+        discardReady(); state = State.DOWNLOADING; message = "正在下载，离开此页面会取消";
         UpdateClient.Operation task = start(5 * 60 * 1000L); long id = generation;
         Context app = getApplicationContext(); UpdateClient.Release selected = release;
         WeakReference<NativeUpdateActivity> target = new WeakReference<>(this); Handler delivery = main;
@@ -188,7 +211,7 @@ public final class NativeUpdateActivity extends Activity {
                 if (page == null) { if (result != null) result.file.delete(); return; }
                 page.operation = null; page.ready = result; page.state = result == null ? State.ERROR : State.READY;
                 if (result != null) page.candidate = UpdateRecoveryPolicy.capture(result.file.getName(), result.manifest, System.currentTimeMillis());
-                page.message = result == null ? problem : "下载完成，文件和应用签名已校验。"; page.render();
+                page.message = result == null ? problem : "下载完成，文件和应用签名已校验"; page.render();
             });
         });
     }
@@ -200,10 +223,10 @@ public final class NativeUpdateActivity extends Activity {
         if (action != UpdateRecoveryPolicy.ResumeAction.VERIFY) {
             discardReady();
             if (action == UpdateRecoveryPolicy.ResumeAction.ALREADY_INSTALLED) {
-                release = null; state = State.INSTALLED; message = "当前安装版本已包含这次更新。";
+                release = null; state = State.INSTALLED; message = "当前安装版本已包含这次更新";
             } else if (action == UpdateRecoveryPolicy.ResumeAction.UNSUPPORTED) {
-                state = State.UNSUPPORTED; message = "此更新暂不支持当前手机系统。";
-            } else { state = State.ERROR; message = "下载的更新已过期，请重新检查。"; }
+                state = State.UNSUPPORTED; message = "此更新暂不支持当前手机系统";
+            } else { state = State.ERROR; message = "下载的更新已过期，请重新检查"; }
             render(); return;
         }
         state = State.VERIFYING; message = "正在恢复并重新校验已下载的更新…";
@@ -221,9 +244,9 @@ public final class NativeUpdateActivity extends Activity {
                 if (verified == null) { page.discardReady(); page.state = State.ERROR; page.message = problem; }
                 else {
                     page.ready = verified; page.state = State.READY;
-                    page.message = "版本 " + verified.manifest.versionName + " 已恢复并重新校验。"
-                            + (page.awaitingPermission ? page.canInstall() ? "已允许安装，请点安装更新继续。" : "安装权限尚未开启，可以稍后再试。"
-                            : "请点安装更新继续。");
+                    page.message = "版本 " + verified.manifest.versionName + " 已恢复并重新校验"
+                            + (page.awaitingPermission ? page.canInstall() ? "已允许安装，请点安装更新继续" : "安装权限尚未开启，可以稍后再试"
+                            : "请点安装更新继续");
                     page.awaitingPermission = false;
                 }
                 // Restoring an Activity never launches the installer or the permission page.
@@ -234,12 +257,12 @@ public final class NativeUpdateActivity extends Activity {
     private void install() {
         if (!resumed || ready == null || busy()) return;
         if (candidate == null || !candidate.fresh(System.currentTimeMillis())) {
-            discardReady(); state = State.ERROR; message = "下载的更新已过期，请重新检查。"; render(); return;
+            discardReady(); state = State.ERROR; message = "下载的更新已过期，请重新检查"; render(); return;
         }
         if (!canInstall()) {
             awaitingPermission = true;
             try { startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()))); }
-            catch (RuntimeException unavailable) { awaitingPermission = false; message = "请在系统设置中允许 Monitor 安装应用，然后返回重试。"; render(); }
+            catch (RuntimeException unavailable) { awaitingPermission = false; message = "请在系统设置中允许 Monitor 安装应用，然后返回重试"; render(); }
             return;
         }
         state = State.VERIFYING; message = "再次核对安装文件…"; UpdateClient.Operation task = start(45000); long id = generation;
@@ -259,7 +282,7 @@ public final class NativeUpdateActivity extends Activity {
         });
     }
     private void launchInstaller() {
-        if (!resumed || ready == null || !canInstall()) { message = "请确认安装权限后，再点安装更新。"; render(); return; }
+        if (!resumed || ready == null || !canInstall()) { message = "请确认安装权限后，再点安装更新"; render(); return; }
         try {
             Uri uri = UpdateInstallProvider.grant(this, ready);
             Intent install = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
@@ -270,8 +293,8 @@ public final class NativeUpdateActivity extends Activity {
             if (system == null || system.activityInfo == null) throw new IllegalStateException();
             install.setClassName(system.activityInfo.packageName, system.activityInfo.name);
             startActivity(install);
-            message = "请在系统界面确认安装。若取消，可返回后再试。";
-        } catch (Exception unavailable) { message = "暂时无法打开系统安装界面，请稍后重试。"; }
+            message = "请在系统界面确认安装\n若取消，可返回后再试";
+        } catch (Exception unavailable) { message = "暂时无法打开系统安装界面，请稍后重试"; }
         render();
     }
     private UpdateClient.Operation start(long budget) {
@@ -284,7 +307,7 @@ public final class NativeUpdateActivity extends Activity {
         if (!busy()) return; cancelOperation();
         if (ready == null && candidate != null) discardReady();
         state = ready != null ? State.READY : release != null ? State.AVAILABLE : State.IDLE;
-        message = "操作已取消，可以随时重试。"; render();
+        message = "操作已取消，可以随时重试"; render();
     }
     private void discardReady() {
         // A recreated Activity has no trustworthy handoff flag. The provider owns
@@ -301,7 +324,7 @@ public final class NativeUpdateActivity extends Activity {
     }
     private static String failure(Exception error) {
         // Transport exception text can include remote URLs. Only our own fixed messages are shown.
-        if (error instanceof UpdateClient.RateLimitedException) return "更新请求较多，请等待后重试。";
+        if (error instanceof UpdateClient.RateLimitedException) return "更新请求较多，请等待后重试";
         String message = error.getMessage();
         if (error.getClass() == java.io.IOException.class && message != null) switch (message) {
             case "请求超时，请重试": case "操作已取消": case "当前没有可用的正式版本":
@@ -316,7 +339,7 @@ public final class NativeUpdateActivity extends Activity {
             case "安装包版本或应用身份不一致": case "安装包签名与当前应用不一致": case "应用版本无效": return message;
             default: break;
         }
-        return "网络或更新文件暂不可用，请重试。";
+        return "网络或更新文件暂不可用，请重试";
     }
     private static String size(long bytes) { return String.format(java.util.Locale.ROOT, "%.1f MB", bytes / 1048576.0); }
     @Override protected void onResume() {
@@ -327,11 +350,11 @@ public final class NativeUpdateActivity extends Activity {
             ready = null; state = State.IDLE;
             try { installed = UpdatePackage.installed(this); }
             catch (Exception unavailable) {
-                installed = null; state = State.ERROR; message = "无法读取当前版本，请重新打开页面。"; render(); return;
+                installed = null; state = State.ERROR; message = "无法读取当前版本，请重新打开页面"; render(); return;
             }
             restoreCandidate(); return;
         }
-        if (awaitingPermission) { awaitingPermission = false; message = canInstall() ? "已允许安装。请点安装更新继续。" : "安装权限尚未开启，可以稍后再试。"; }
+        if (awaitingPermission) { awaitingPermission = false; message = canInstall() ? "已允许安装\n请点安装更新继续" : "安装权限尚未开启，可以稍后再试"; }
         render();
     }
     @Override protected void onSaveInstanceState(Bundle saved) {
@@ -342,7 +365,7 @@ public final class NativeUpdateActivity extends Activity {
     }
     @Override protected void onPause() {
         resumed = false; main.removeCallbacks(retryTick);
-        if (busy()) { cancelOperation(); state = ready != null ? State.READY : release != null ? State.AVAILABLE : State.IDLE; message = "操作已暂停，返回后可重试。"; }
+        if (busy()) { cancelOperation(); state = ready != null ? State.READY : release != null ? State.AVAILABLE : State.IDLE; message = "操作已暂停，返回后可重试"; }
         super.onPause();
     }
     @Override protected void onDestroy() {

@@ -48,7 +48,7 @@ public final class NativeConnection {
         JSONObject store = SessionStore.read(context), pairing = store.optJSONObject("pairing");
         boolean working = busy && operationRevision == REVISION.get();
         if (working && "start".equals(operation))
-            return new LoginState("opening", "正在打开登录", "稍后会打开浏览器。", "正在打开登录…", false, "", false);
+            return new LoginState("opening", "正在打开登录", "稍后会打开浏览器", "正在打开登录…", false, "", false);
         String phase = pairing == null ? "" : pairing.optString("phase"), id = request(pairing);
         boolean claimed = "native_claimed".equals(phase) || "claimed".equals(phase) || "exchanging".equals(phase);
         boolean pending = "pending".equals(phase) && NativeApi.validId(id)
@@ -62,21 +62,21 @@ public final class NativeConnection {
         long startWait = nextStart - SystemClock.elapsedRealtime();
         boolean needsStart = expired || !pending && !claimed;
         if (needsStart && startWait > 0)
-            return new LoginState("limited", "登录请求较多", "请等待 " + ((startWait + 999) / 1000) + " 秒后重试。", "稍后重试登录", false, "", false);
-        if (needsStart && "start_limited".equals(problem)) return new LoginState("retry", "可以重新发起登录", "等待已结束，请重新发起登录。", "重试登录", !busy, "", false);
-        if ("start_failed".equals(problem)) return new LoginState("retry", "暂时无法打开登录", "请检查网络后重试。", "重试登录", !busy, "", false);
-        if (expired || "expired".equals(problem)) return new LoginState("expired", "确认链接已过期", "重新发起后，请在浏览器确认连接这台设备。", "重新发起登录", !busy, "", false);
+            return new LoginState("limited", "登录请求较多", "请等待 " + ((startWait + 999) / 1000) + " 秒后重试", "稍后重试登录", false, "", false);
+        if (needsStart && "start_limited".equals(problem)) return new LoginState("retry", "可以重新发起登录", "等待已结束，请重新发起登录", "重试登录", !busy, "", false);
+        if ("start_failed".equals(problem)) return new LoginState("retry", "暂时无法打开登录", "请检查网络后重试", "重试登录", !busy, "", false);
+        if (expired || "expired".equals(problem)) return new LoginState("expired", "确认链接已过期", "重新发起后，请在浏览器确认连接这台设备", "重新发起登录", !busy, "", false);
         if (pairing == null || !pending && !claimed) {
-            if ("rejected".equals(problem)) return new LoginState("rejected", "本次连接未获允许", "可以重新发起，在浏览器再次确认。", "重新发起登录", !busy, "", false);
-            if ("reauthorize".equals(problem)) return new LoginState("reauthorize", "需要重新确认连接", "上次连接已失效，或未能在本机完成。", "重新发起登录", !busy, "", false);
-            return new LoginState("idle", "登录 Monitor", "在浏览器登录后，还需确认连接这台设备。", "登录 Monitor", !busy, "", false);
+            if ("rejected".equals(problem)) return new LoginState("rejected", "本次连接未获允许", "可以重新发起，在浏览器再次确认", "重新发起登录", !busy, "", false);
+            if ("reauthorize".equals(problem)) return new LoginState("reauthorize", "需要重新确认连接", "上次连接已失效，或未能在本机完成", "重新发起登录", !busy, "", false);
+            return new LoginState("idle", "登录 Monitor", "在浏览器登录后，还需确认连接这台设备", "登录 Monitor", !busy, "", false);
         }
         if (claimed) return new LoginState(working ? "completing" : "retry", working ? "正在完成连接" : "连接尚未完成",
-                working ? "正在验证并保存本机连接。" : "已收到确认，等待连接恢复后继续。", working ? "正在完成连接…" : "重试完成连接", canCheck, "", false);
-        if (working) return new LoginState("checking", "正在检查浏览器确认", "若尚未确认，可继续打开原来的确认页。", "继续确认", true, "正在检查连接…", false);
+                working ? "正在验证并保存本机连接" : "已收到确认，等待连接恢复后继续", working ? "正在完成连接…" : "重试完成连接", canCheck, "", false);
+        if (working) return new LoginState("checking", "正在检查浏览器确认", "若尚未确认，可继续打开原来的确认页", "继续确认", true, "正在检查连接…", false);
         if ("network".equals(problem) || "limited".equals(problem)) return new LoginState("retry", "暂时无法检查连接",
-                "limited".equals(problem) ? "请求较多，稍后会自动再检查。" : "会自动重试，也可稍后手动检查。", "继续确认", true, "重试检查连接", canCheck);
-        return new LoginState("waiting", "等待浏览器确认", "登录后点「连接这台设备」，再返回 Monitor。", "继续确认", true, "我已确认，检查连接", canCheck);
+                "limited".equals(problem) ? "请求较多，稍后会自动再检查" : "会自动重试，也可稍后手动检查", "继续确认", true, "重试检查连接", canCheck);
+        return new LoginState("waiting", "等待浏览器确认", "登录后点「连接这台设备」，再返回 Monitor", "继续确认", true, "我已确认，检查连接", canCheck);
     }
     /** Same single-flight gate and server cooldown as automatic checks. Never force a second claim. */
     public static void check(Context context) { tick(context); }

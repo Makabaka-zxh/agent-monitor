@@ -4,16 +4,16 @@
 
 **在手机上，看到每台电脑的 AI 编程任务。**
 
-Monitor 是面向个人部署的开源工作台，将多台 Windows / Mac 上的 Codex 与 Claude Code 任务汇总到原生 Android App、原生 macOS 客户端和浏览器。离开电脑后，可以查看进行中的任务、最终结果、附件和用量，并在已授权的会话中继续回复。
+Monitor 是面向个人部署的开源工作台，将多台 Windows / Mac 上的 Codex、Claude Code 与 Antigravity 桌面任务汇总到原生 Android App、原生 macOS 客户端和浏览器。离开电脑后，可以查看任务状态和可同步的结果，并在已支持且授权的会话中继续回复。
 
 [下载 Android](https://github.com/Makabaka-zxh/agent-monitor/releases/latest) · [部署](docs/DEPLOYMENT.md) · [构建](docs/BUILDING.md) · [App 内更新](docs/UPDATES.md) · [English](README.en.md)
 
 ## 可以做什么
 
-- **多电脑工作台**：按 Codex / Claude Code 筛选，区分进行中、需要关注和归档任务。
+- **多电脑工作台**：按 Codex、Claude Code 或 Antigravity 筛选，区分进行中、需要关注和归档任务。[Antigravity 桌面会话](docs/CONNECTORS.md#antigravity-桌面会话)支持只读状态和可确认的最终回复文本。
 - **任务搜索（1.0.4 起）**：Android 支持按任务名称、项目或电脑名称搜索已加载的列表，多个关键词用空格分开，并与现有筛选组合；不搜索正文，也不上传搜索词。
 - **结果与附件**：查看最终答复，下载 TXT 和明确关联的配套文件；按设备授权结果同步和同会话回复。
-- **用量与提醒**：查看可采集的当日 Token、每周趋势、会话用量、套餐窗口与重置倒计时。数据不可得时显示未知，不把它当成零。
+- **用量与提醒**：查看可采集的当日 Token、每周趋势、会话用量，以及各模型占本地已采集 Token 的比例。官方额度另行显示账号实际提供的窗口和已用百分比，不按套餐名称猜测；无有效读数或已到重置时间的窗口隐藏，真实的 0% 保留。未过期的旧读数会标明“上次已用”，不当作当前额度。两种比例含义不同，Token 统计不代替官方额度。
 - **原生 Android**：MiSans 字体、原生导航、扫码配对、账号资料、跟踪时长滚轮和“直至任务结束”。
 - **实况内容自定义**：简洁／均衡／丰富预设，六项独立开关，Claude Code / Codex 的展开与锁屏预览。
 - **App 内更新**：读取本仓库的正式 GitHub Release，显示说明与进度，校验安装包后交给 Android 确认安装。
@@ -31,7 +31,7 @@ flowchart LR
   G[本仓库 GitHub Release] -->|匿名读取 · 校验 APK| P
 ```
 
-连接器读取本机可用的会话与生命周期信息。账号、配对和同步权限由你自己的 Monitor 服务管理；Codex / Claude Code 的账号仍由各台电脑管理。
+连接器读取本机可用的会话与生命周期信息。Monitor 的账号、配对和同步权限由自建服务管理，各 AI 工具的账号仍由各台电脑管理。
 
 ## 快速开始
 
