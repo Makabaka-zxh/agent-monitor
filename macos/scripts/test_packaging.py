@@ -56,10 +56,13 @@ class PackagingTests(unittest.TestCase):
         info = plistlib.loads(plistlib.dumps(app.app_info()))
         self.assertEqual(info["CFBundleExecutable"], "Monitor")
         self.assertEqual(info["CFBundleIdentifier"], "com.agentmonitor.mac")
-        self.assertEqual(info["CFBundleShortVersionString"], "1.0.5")
-        self.assertEqual(info["CFBundleVersion"], "7")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.0.7")
+        self.assertEqual(info["CFBundleVersion"], "8")
         self.assertEqual(info["LSMinimumSystemVersion"], "14.0")
         self.assertEqual(info["CFBundleURLTypes"][0]["CFBundleURLSchemes"], ["agentmonitor"])
+        resources = Path(__file__).resolve().parents[1] / "Sources" / "Monitor" / "Resources"
+        for icon in ("AppIcon.png", "Claude.png", "Codex.png", "Antigravity.png"):
+            self.assertTrue((resources / icon).is_file(), icon)
 
 
 if __name__ == "__main__":

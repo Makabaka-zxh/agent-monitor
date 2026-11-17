@@ -7,7 +7,9 @@ import org.json.JSONObject;
 
 /** Fail-closed wire validation. No provider options or approvals are inferred from output text. */
 public final class NativeSessionControlPolicy {
-    public static boolean provider(String value) { return "codex".equals(value) || "claude".equals(value); }
+    public static boolean provider(String value) {
+        return "codex".equals(value) || "claude".equals(value) || "antigravity".equals(value);
+    }
     /** Android's JSON null sentinel may stringify as "null"; it is never display text. */
     public static String nullableText(JSONObject value, String key) {
         Object field = value == null ? null : value.opt(key);

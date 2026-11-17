@@ -8,10 +8,14 @@ public final class XiaomiLiveNotificationTest {
         XiaomiLiveCapabilities enabled = capabilities(3, true, true);
         String codex = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "codex", true);
         String claude = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "claude", true);
-        check(codex != null && claude != null, "both supported providers produce a minimal candidate");
-        check(codex.contains("\"aodTitle\":\"Codex · 执行中\"") && claude.contains("\"aodTitle\":\"Claude Code · 执行中\""),
+        String antigravity = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "antigravity", true);
+        check(codex != null && claude != null, "both legacy providers produce a minimal candidate");
+        check(antigravity != null, "Antigravity produces a minimal candidate");
+        check(codex.contains("\"aodTitle\":\"Codex · 执行中\"") && claude.contains("\"aodTitle\":\"Claude Code · 执行中\"")
+                && antigravity.contains("\"aodTitle\":\"Antigravity · 执行中\""),
                 "always-on content identifies provider and confirmed running state");
-        check(codex.replace("Codex", "Claude Code").equals(claude), "provider is the only variable default payload text");
+        check(codex.replace("Codex", "Claude Code").equals(claude)
+                && codex.replace("Codex", "Antigravity").equals(antigravity), "provider is the only variable default payload text");
         check(codex.contains("\"content\":\"执行中\""), "island and expanded content carry useful running state");
         for (String summary : new String[]{"执行中", "执行中 · 已跟踪 不足1分", "执行中 · 已跟踪 2分", "执行中 · 已跟踪 1时25分", "执行中 · 已跟踪 2天3时"}) {
             String value = XiaomiLiveNotification.payload(DeviceBrand.XIAOMI, enabled, "codex", true, summary);

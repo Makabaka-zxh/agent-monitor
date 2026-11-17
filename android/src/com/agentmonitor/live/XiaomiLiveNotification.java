@@ -41,7 +41,8 @@ final class XiaomiLiveNotification {
         try {
             // Only bundled provider artwork is accepted; caller-supplied bitmaps could contain data.
             Icon icon = Icon.createWithResource(context,
-                    "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : R.drawable.monitor_brand);
+                    "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex
+                    : "antigravity".equals(tool) ? R.drawable.antigravity : R.drawable.monitor_brand);
             Bundle pictures = new Bundle();
             pictures.putParcelable(TOOL_ICON, icon);
             attach(notification, payload, pictures);
@@ -77,6 +78,7 @@ final class XiaomiLiveNotification {
         final String label;
         if ("codex".equals(tool)) label = "Codex";
         else if ("claude".equals(tool)) label = "Claude Code";
+        else if ("antigravity".equals(tool)) label = "Antigravity";
         else return null;
         // Do not let a task title or arbitrary runtime message enter public OEM surfaces.
         // This adapter is only attached while the caller has confirmed running, never

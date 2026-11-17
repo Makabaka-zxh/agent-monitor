@@ -21,8 +21,7 @@ private struct BrandIcon: View {
     var size: CGFloat = 32
     var body: some View {
         Group {
-            if tool == "antigravity" { Image(systemName: "a.square.fill").resizable().scaledToFit().foregroundStyle(Color.accentColor) }
-            else if let image = MonitorResources.image(tool == "claude" ? "Claude" : tool == "codex" ? "Codex" : "AppIcon") { Image(nsImage: image).resizable().scaledToFit() }
+            if let image = MonitorResources.image(tool == "claude" ? "Claude" : tool == "codex" ? "Codex" : tool == "antigravity" ? "Antigravity" : "AppIcon") { Image(nsImage: image).resizable().scaledToFit() }
             else { Image(systemName: "terminal").resizable().scaledToFit() }
         }.frame(width: size, height: size).accessibilityLabel(MonitorTask.brand(for: tool))
     }
@@ -164,7 +163,7 @@ private struct LoginView: View {
             VStack(spacing: 24) {
                 if let image = MonitorResources.image("AppIcon") { Image(nsImage: image).resizable().scaledToFit().frame(width: 76, height: 76) }
                 Text("工作，尽在眼前").font(.custom("MiSans-Regular", size: 32)).fontWeight(.semibold)
-                Text(MonitorAPI.origin.isEmpty ? "先配置自建服务器地址，再重新打开 Monitor。" : store.pendingLogin ? "在浏览器确认后，自动回到这里" : "查看每台电脑上的 Claude Code 与 Codex").foregroundStyle(.secondary)
+                Text(MonitorAPI.origin.isEmpty ? "先配置自建服务器地址，再重新打开 Monitor。" : store.pendingLogin ? "在浏览器确认后，自动回到这里" : "查看每台电脑上的 Claude Code、Codex 与 Antigravity").foregroundStyle(.secondary)
                 Button { Task { await store.beginLogin() } } label: {
                     HStack { if store.loginBusy { ProgressView().controlSize(.small) }; Text(store.pendingLogin ? "继续登录" : "登录 Monitor") }.frame(width: 190)
                 }.buttonStyle(.borderedProminent).controlSize(.large).disabled(store.loginBusy || MonitorAPI.origin.isEmpty)

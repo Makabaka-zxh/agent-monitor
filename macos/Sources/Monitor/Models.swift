@@ -29,7 +29,7 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
         return source.title
     }
     var brand: String { Self.brand(for: tool) }
-    var supportsReply: Bool { tool == "claude" || tool == "codex" }
+    var supportsReply: Bool { tool == "claude" || tool == "codex" || tool == "antigravity" }
     var statusTitle: String {
         switch status {
         case "running": "进行中"

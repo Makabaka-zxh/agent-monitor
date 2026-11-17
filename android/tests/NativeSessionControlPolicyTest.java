@@ -141,8 +141,21 @@ public final class NativeSessionControlPolicyTest {
         check(NativeSessionControlPolicy.stagePlan(base, selected, false, NOW) == null, "malformed mode capability is not advertised");
         check(!NativeSessionControlPolicy.selection(selection().put("collaboration_mode", "plan"), base, NOW), "revoked catalog capability blocks Plan");
     }
-    public static void main(String[] args) {
-        check(!NativeSessionControlPolicy.provider("antigravity"), "read-only Antigravity tasks must never mount session controls");
+    private static void testAntigravityProvider() throws Exception {
+        check(NativeSessionControlPolicy.provider("antigravity"), "Antigravity ACP sessions mount native controls");
+        check(!NativeSessionControlPolicy.provider("unknown"), "unrecognized tools remain non-interactive");
+        JSONObject agCatalog = catalog().put("provider", "antigravity");
+        check(NativeSessionControlPolicy.catalog(agCatalog, NOW), "Antigravity catalog validated");
+        check(!NativeSessionControlPolicy.advertisesPlan(agCatalog), "Codex collaboration mode stays off for Antigravity");
+        check(NativeSessionControlPolicy.fastModel(agCatalog, null, false, NOW) == null, "Codex fast tier stays off for Antigravity");
+        JSONObject agSelected = selection().put("provider", "antigravity");
+        check(NativeSessionControlPolicy.selection(agSelected, agCatalog, NOW), "Antigravity model and effort selection accepted");
+        check(!NativeSessionControlPolicy.selectionSnapshot(agSelected.put("service_tier", "priority")), "Antigravity snapshot rejects service tier");
+        JSONObject agApproval = approval().put("provider", "antigravity");
+        check(NativeSessionControlPolicy.request(agApproval), "Antigravity single-turn approval validated");
+    }
+    public static void main(String[] args) throws Exception {
+        testAntigravityProvider();
         testFastMode();
         testPlanMode();
         testModelPickerStates();
