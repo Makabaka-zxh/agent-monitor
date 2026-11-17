@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_serializer, model_validator
 
-Provider = Literal["codex", "claude"]
+Provider = Literal["codex", "claude", "antigravity"]
 QuickServiceTier = Literal["priority"]
 QUICK_SERVICE_TIER: QuickServiceTier = "priority"
 CollaborationMode = Literal["plan"]

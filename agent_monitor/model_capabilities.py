@@ -8,8 +8,63 @@ import time
 from .session_controls import QUICK_SERVICE_TIER, ModelCatalog, ModelOption, ModelSelection, validate_selection
 
 
+def antigravity_catalog_rows(payload):
+    """Extract explicit model and per-model thinking levels from ACP session metadata."""
+    if not isinstance(payload, dict):
+        raise ValueError("unsupported model catalog")
+    config_options = payload.get("configOptions")
+    if not isinstance(config_options, list):
+        raise ValueError("unsupported model catalog")
+    model_opt = next((o for o in config_options if isinstance(o, dict)
+                      and (o.get("id") == "model" or o.get("category") == "model")), None)
+    if not isinstance(model_opt, dict) or not isinstance(model_opt.get("options"), list) or not model_opt["options"]:
+        raise ValueError("unsupported model catalog")
+    thought_opt = next((o for o in config_options if isinstance(o, dict)
+                        and (o.get("id") == "thought_level" or o.get("category") == "thought_level")), None)
+    current_model = model_opt.get("currentValue") if isinstance(model_opt.get("currentValue"), str) else None
+    current_effort = (thought_opt.get("currentValue")
+                      if isinstance(thought_opt, dict) and isinstance(thought_opt.get("currentValue"), str) else None)
+    active_efforts = []
+    if isinstance(thought_opt, dict) and isinstance(thought_opt.get("options"), list):
+        for item in thought_opt["options"]:
+            if not isinstance(item, dict) or not isinstance(item.get("value"), str):
+                raise ValueError("unsupported effort catalog")
+            active_efforts.append(item["value"])
+    models_block = payload.get("models")
+    available = models_block.get("availableModels") if isinstance(models_block, dict) else None
+    base_ids = set()
+    for opt in model_opt["options"]:
+        if not isinstance(opt, dict) or not isinstance(opt.get("value"), str) or not isinstance(opt.get("name"), str):
+            raise ValueError("unsupported model catalog")
+        base_ids.add(opt["value"])
+    rows = []
+    if isinstance(available, list) and available:
+        advertised_ids = []
+        for item in available:
+            if not isinstance(item, dict) or not isinstance(item.get("modelId"), str):
+                raise ValueError("unsupported model catalog")
+            advertised_ids.append(item["modelId"])
+        for opt in model_opt["options"]:
+            base_id = opt["value"]
+            efforts = []
+            for mid in advertised_ids:
+                if mid not in base_ids and mid.startswith(base_id + "-"):
+                    suffix = mid[len(base_id) + 1:]
+                    if suffix and suffix not in efforts:
+                        efforts.append(suffix)
+            rows.append({"value": base_id, "displayName": opt["name"],
+                         "supportsEffort": bool(efforts), "supportedEffortLevels": efforts})
+    else:
+        for opt in model_opt["options"]:
+            base_id = opt["value"]
+            efforts = list(active_efforts) if base_id == current_model and active_efforts else []
+            rows.append({"value": base_id, "displayName": opt["name"],
+                         "supportsEffort": bool(efforts), "supportedEffortLevels": efforts})
+    return rows, current_model, current_effort
+
+
 def normalize_catalog(provider, rows, *, current_model=None, current_effort=None, now=None, collaboration_modes=()):
-    if provider not in {"codex", "claude"} or not isinstance(rows, list) or not 0 < len(rows) <= 256:
+    if provider not in {"codex", "claude", "antigravity"} or not isinstance(rows, list) or not 0 < len(rows) <= 256:
         raise ValueError("unsupported model catalog")
     models = []
     for row in rows:
@@ -30,6 +85,12 @@ def normalize_catalog(provider, rows, *, current_model=None, current_effort=None
             if not isinstance(efforts, list): raise ValueError("unsupported effort catalog")
         models.append(ModelOption(id=identity, label=label, efforts=tuple(efforts), service_tiers=service_tiers))
     models.sort(key=lambda item: item.id)
+    if provider == "antigravity" and isinstance(current_model, str) and all(m.id != current_model for m in models):
+        matches = [(m.id, eff) for m in models for eff in m.efforts if current_model == f"{m.id}-{eff}"]
+        if len(matches) == 1:
+            current_model = matches[0][0]
+            if current_effort is None:
+                current_effort = matches[0][1]
     payload = [model.model_dump(mode="json") for model in models]
     capability = {"provider": provider, "models": payload}
     if collaboration_modes:

@@ -58,6 +58,20 @@ def failure_code_for_claude(error_type) -> str:
     return _CLAUDE.get(error_type, "") if isinstance(error_type, str) else ""
 
 
+def failure_code_for_antigravity(error_obj) -> str:
+    """Map documented ACP JSON-RPC error codes without inspecting raw messages."""
+    if not isinstance(error_obj, dict):
+        return ""
+    code = error_obj.get("code")
+    if type(code) is not int:
+        return ""
+    if code == -32000:
+        return "authentication_failed"
+    if code == -32602:
+        return "invalid_request"
+    return ""
+
+
 def _http_code(details) -> str:
     if not isinstance(details, dict):
         return "network_error"

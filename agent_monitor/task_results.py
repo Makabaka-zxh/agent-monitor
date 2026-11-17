@@ -156,12 +156,22 @@ def _read_extra_codex_head(path, base):
         return collector._json_lines(handle.read(collector.HEAD_BYTES))
 
 
-def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *, require_workspace=True) -> LocalSession | None:
+def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *,
+                          antigravity_home=None, require_workspace=True) -> LocalSession | None:
     if not isinstance(source_id, str) or len(source_id) > 200:
         return None
     tool, _, wanted = source_id.partition(":")
-    if tool not in {"codex", "claude"} or not wanted or any(c in wanted for c in "/\\\x00"):
+    if tool not in {"codex", "claude", "antigravity"} or not wanted or any(c in wanted for c in "/\\\x00"):
         return None
+    if tool == "antigravity":
+        from .antigravity import resolve_antigravity_session
+        resolved = resolve_antigravity_session(wanted, base=antigravity_home)
+        if resolved is None:
+            return None
+        path, root = resolved
+        if not _unlinked(path) or (require_workspace and (not root.is_dir() or not _unlinked(root))):
+            return None
+        return LocalSession(path, root, wanted, tool, source_id)
     home = (Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))) if tool == "codex" else (
         Path(claude_home) if claude_home is not None else Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))))
     base = home / ("sessions" if tool == "codex" else "projects")
@@ -305,7 +315,8 @@ class LocalResults:
     def resolve(self, source_id):
         # Final text remains readable after a workspace was moved or removed;
         # file opening still enforces a real, unlinked, contained workspace.
-        return resolve_local_session(source_id, self.codex_home, self.claude_home, require_workspace=False)
+        return resolve_local_session(source_id, self.codex_home, self.claude_home,
+                                     antigravity_home=self.antigravity_home, require_workspace=False)
 
     def read(self, source_id: str) -> dict | None:
         if source_id.startswith("antigravity:"):

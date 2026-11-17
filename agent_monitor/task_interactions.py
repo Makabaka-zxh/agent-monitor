@@ -16,7 +16,7 @@ from typing import Literal
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
-from .session_controls import Answer, ModelCatalog, ModelSelection, Question, validate_answers, validate_selection
+from .session_controls import Answer, ModelCatalog, ModelSelection, Provider, Question, validate_answers, validate_selection
 from .store import ONLINE_SECONDS
 
 UUID = r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
@@ -63,7 +63,7 @@ class PendingInput(Input):
     id: str = Field(min_length=1, max_length=128)
     revision: str = Field(min_length=1, max_length=128)
     kind: Literal["question", "approval"]
-    provider: Literal["codex", "claude"]
+    provider: Provider
     session_id: str = Field(min_length=1, max_length=200)
     turn_id: str = Field(min_length=1, max_length=200)
     title: str = Field(min_length=1, max_length=240)

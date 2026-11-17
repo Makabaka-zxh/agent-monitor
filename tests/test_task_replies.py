@@ -270,13 +270,20 @@ def test_invalid_inputs(hub,field,value):
     assert result.status_code == 422
 
 
-def test_antigravity_metadata_is_read_only_even_on_a_reply_enabled_computer(hub):
+def test_antigravity_replies_follow_local_inspector_and_remote_capabilities(hub):
     app, client, headers, task_id, task, starts, _ = hub
     device_id = task_id.partition(':')[0]
     source_id = 'antigravity:' + SESSION
-    app.state.store.ingest(device_id, [dict(task, id=source_id, tool='antigravity')], [])
+    app.state.store.ingest(device_id, [dict(task, id=source_id, tool='antigravity', status='idle')], [])
     new_id = device_id + ':' + source_id
-    status = client.get('/api/native/tasks/reply', headers=headers, params={'task_id':new_id})
-    assert status.status_code == 200 and status.json()['available'] is False
-    _, post = send(hub, task_id=new_id)
-    assert post.status_code == 409 and not starts
+    status = client.get('/api/native/tasks/reply', headers=headers, params={'task_id': new_id})
+    assert status.status_code == 200 and status.json()['available'] is True
+    app.state.task_replies.inspector = lambda _: {'available': False, 'reason': '此会话暂时不能续接'}
+    blocked = client.get('/api/native/tasks/reply', headers=headers, params={'task_id': new_id})
+    assert blocked.status_code == 200 and blocked.json()['available'] is False
+    # Unknown future tools still fail closed even when local replies are enabled.
+    app.state.task_replies.inspector = lambda _: {'available': True}
+    app.state.store.db.execute("UPDATE tasks SET payload=? WHERE device_id=? AND source_id=?",
+                               (json.dumps(dict(task, id='unknown:' + SESSION, tool='unknown')), device_id, source_id))
+    unknown = client.get('/api/native/tasks/reply', headers=headers, params={'task_id': new_id})
+    assert unknown.status_code == 200 and unknown.json()['available'] is False

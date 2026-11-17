@@ -23,8 +23,11 @@ import uuid
 
 from . import collector
 from .task_results import resolve_local_session, _unlinked
-from .failure_reasons import FAILURE_LABELS, failure_code_for_codex, failure_code_for_claude, has_codex_error_info
-from .model_capabilities import normalize_catalog, selected_settings
+from .failure_reasons import (
+    FAILURE_LABELS, failure_code_for_antigravity, failure_code_for_claude,
+    failure_code_for_codex, has_codex_error_info,
+)
+from .model_capabilities import antigravity_catalog_rows, normalize_catalog, selected_settings
 from .provider_controls import normalize_request, UnsupportedControl
 from .session_controls import ModelSelection, reply_fingerprint
 
@@ -165,20 +168,32 @@ def _windows_exe(path: Path) -> str | None:
 
 def find_executable(tool: str) -> str | None:
     """Resolve native executables, never execute a Windows shell/npm shim."""
-    if tool not in {"codex", "claude"}:
+    if tool not in {"codex", "claude", "antigravity"}:
         return None
+    binary = "agy" if tool == "antigravity" else tool
     entries = [p for p in os.environ.get("PATH", "").split(os.pathsep)
                if p and Path(p).is_absolute() and not _same_path(p, Path.cwd())]
     search = os.pathsep.join(entries)
     if os.name != "nt":
-        found = shutil.which(tool, path=search)
-        return str(Path(found).resolve()) if found and Path(found).is_file() else None
+        found = shutil.which(binary, path=search)
+        if found and Path(found).is_file():
+            return str(Path(found).resolve())
+        if tool == "antigravity":
+            local_bin = Path.home() / ".local" / "bin" / "agy"
+            if _unlinked(local_bin) and local_bin.is_file() and os.access(local_bin, os.X_OK):
+                return str(local_bin.resolve())
+        return None
     # shutil.which("codex.exe") on Windows may append PATHEXT and return
     # codex.exe.cmd, or prepend the current directory. Only probe exact names.
     for directory in entries:
-        found = _windows_exe(Path(directory) / (tool + ".exe"))
+        found = _windows_exe(Path(directory) / (binary + ".exe"))
         if found:
             return found
+    if tool == "antigravity":
+        appdata = os.environ.get("LOCALAPPDATA", "")
+        if appdata and Path(appdata).is_absolute() and _unlinked(Path(appdata)):
+            return _windows_exe(Path(appdata) / "agy" / "bin" / "agy.exe")
+        return None
     shim = shutil.which(tool, path=search)
     if shim and Path(shim).is_absolute() and not _same_path(Path(shim).parent, Path.cwd()):
         base = Path(shim).parent
@@ -196,7 +211,7 @@ def find_executable(tool: str) -> str | None:
 
 
 def supported_tools() -> list[str]:
-    return [tool for tool in ("codex", "claude") if find_executable(tool)]
+    return [tool for tool in ("codex", "claude", "antigravity") if find_executable(tool)]
 
 
 def _permission_profile(context: dict, cwd: Path) -> dict:
@@ -379,11 +394,40 @@ def _codex_resume_metadata(target, fresh, checkpoint, resumed):
         return False
 
 
+def _antigravity_base_dir(path: Path) -> Path:
+    return path.parents[1] if len(path.parents) >= 2 and path.parent.name == "conversations" else path.parent
+
+
+def _antigravity_locked(base_dir: Path, session_id: str, conv_db: Path) -> bool:
+    """Detect active Desktop/CLI writers via SQLite sidecars or presence lock."""
+    for suffix in ("-wal", "-shm", "-journal"):
+        if conv_db.with_name(conv_db.name + suffix).exists():
+            return True
+    lock_path = base_dir / "presence" / f"{session_id}.lock"
+    if not lock_path.exists():
+        return False
+    if not _unlinked(lock_path) or not lock_path.is_file():
+        return True
+    try:
+        with lock_path.open("r+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+
+
 def _resolve_target(source_id, resolver):
     if not isinstance(source_id, str) or len(source_id) > 200:
         raise ExecutionIssue("invalid")
     resolved = resolver(source_id)
-    if resolved is None or resolved.source_id != source_id or resolved.tool not in {"codex", "claude"}:
+    if resolved is None or resolved.source_id != source_id or resolved.tool not in {"codex", "claude", "antigravity"}:
         raise ExecutionIssue("unavailable")
     try:
         if str(uuid.UUID(resolved.session_id)) != resolved.session_id.lower() or source_id != resolved.tool + ":" + resolved.session_id:
@@ -399,10 +443,18 @@ def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, e
     resolved = _resolve_target(source_id, resolver)
     try:
         before = _stamp(resolved.path)
+        if resolved.tool == "antigravity":
+            base_dir = _antigravity_base_dir(resolved.path)
+            if _antigravity_locked(base_dir, resolved.session_id, resolved.path):
+                raise ExecutionIssue("busy")
         if status_reader:
             task = status_reader(resolved)
         elif resolved.tool == "codex":
             task = collector.parse_codex_session(resolved.path, include_output=False)
+        elif resolved.tool == "antigravity":
+            from .antigravity import scan_antigravity
+            scanned = scan_antigravity(base=_antigravity_base_dir(resolved.path), limit=100)
+            task = next((t for t in (scanned or []) if t.get("id") == source_id), None)
         else:
             snapshot = collector.collect_snapshot(include_output=False)
             task = next((t for t in snapshot["tasks"] if t["id"] == source_id and t.get("status_source") == "hook"), None)
@@ -423,6 +475,10 @@ def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, e
             effort = contexts[-1].get("effort")
             if effort not in {None, "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
                 raise ExecutionIssue("permissions")
+        elif resolved.tool == "antigravity":
+            model, effort = _catalog_observation(resolved)
+            if _antigravity_locked(_antigravity_base_dir(resolved.path), resolved.session_id, resolved.path):
+                raise ExecutionIssue("busy")
         else:
             _, rows, _ = collector._read_window(resolved.path, max_bytes=1024 * 1024)
             modes = [row["permissionMode"] for row in rows if "permissionMode" in row]
@@ -478,6 +534,10 @@ def _toml(value) -> str:
 
 
 def _command(target: _Target, *, interactive=False, settings=None) -> tuple[list[str], str | None]:
+    if target.tool == "antigravity":
+        base_dir = _antigravity_base_dir(target.path)
+        return [target.executable, "acp", "--gemini-dir", str(base_dir.parent),
+                "--app-data-dir", base_dir.name, "--cli_dir_name", "antigravity-cli", "--disable-telemetry"], None
     if target.tool == "claude":
         mode = target.claude_original_mode if interactive else target.claude_mode
         if mode not in ({"default", "plan", "dontAsk", "acceptEdits"} if interactive else {"plan", "dontAsk"}):
@@ -684,19 +744,25 @@ def _reject_request(transport, message):
     if "id" not in message or not isinstance(method, str) or not method:
         return False
     response = {"id": message["id"]}
+    if "jsonrpc" in message:
+        response["jsonrpc"] = "2.0"
     if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
         response["result"] = {"decision": "cancel"}
     elif method == "item/permissions/requestApproval":
         response["result"] = {"permissions": {}, "scope": "turn"}
     elif method == "mcpServer/elicitation/request":
         response["result"] = {"action": "cancel", "content": None}
+    elif method == "session/request_permission":
+        response["result"] = {"outcome": {"outcome": "cancelled"}}
+    elif method == "elicitation/create":
+        response["result"] = {"action": "cancel"}
     else:
         response["error"] = {"code": -32601, "message": "Interactive requests require the desktop client"}
     transport.send(response)
     raise ExecutionIssue("approval")
 
 
-def _rpc_response(transport, wanted, pending=None):
+def _rpc_response(transport, wanted, pending=None, *, error_mapper=None):
     while True:
         message = transport.next()
         if pending is not None and "id" in message and isinstance(message.get("method"), str):
@@ -705,7 +771,9 @@ def _rpc_response(transport, wanted, pending=None):
             continue
         _reject_request(transport, message)
         if message.get("id") == wanted:
-            if "error" in message: raise ExecutionIssue("failed", "failed")
+            if "error" in message:
+                code = error_mapper(message.get("error")) if error_mapper else ""
+                raise ExecutionIssue(code or "failed", "failed")
             if not isinstance(message.get("result"), dict): raise ExecutionIssue("protocol", "uncertain")
             return message["result"]
         if pending is not None and isinstance(message.get("method"), str):
@@ -820,6 +888,7 @@ class LocalReplyExecutor:
             transport = _Transport(process, run.cancelled, self.timeout)
             self._emit(self._result(run))
             if target.tool == "codex": self._codex(transport, target, profile_name, prompt, run, settings)
+            elif target.tool == "antigravity": self._antigravity(transport, target, prompt, run, settings)
             elif interactive: self._claude_controlled(transport, target, prompt, run, settings)
             else: self._claude(transport, target, prompt)
             state, reason, code = "succeeded", "", ""
@@ -980,7 +1049,7 @@ class LocalReplyExecutor:
             except Exception: pass  # A lost acknowledgement must not replay an action.
 
     def _interactive(self, transport, target, run, turn_id, message, pending, seen, *, file_preview=None,
-                     codex_local_command=False):
+                     codex_local_command=False, prompt_rpc_id=None):
         request = None
         canceled = threading.Event()
         acknowledged = False
@@ -992,7 +1061,7 @@ class LocalReplyExecutor:
             if key in seen or len(seen) >= 128: raise UnsupportedControl("duplicate provider request")
             seen[key] = request.public["revision"]
         except (UnsupportedControl, ValueError, TypeError):
-            if target.tool == "codex": _reject_request(transport, message)
+            if target.tool in {"codex", "antigravity"}: _reject_request(transport, message)
             transport.send({"type": "control_response", "response": {"subtype": "error",
                 "request_id": message.get("request_id"), "error": "Request requires the desktop client"}})
             raise ExecutionIssue("approval")
@@ -1016,7 +1085,9 @@ class LocalReplyExecutor:
                     resolved = resolved or (target.tool == "claude" and incoming.get("type") == "control_cancel_request"
                         and incoming.get("request_id") == request.wire_id)
                     ended = ((target.tool == "codex" and incoming.get("method") == "turn/completed") or
-                             (target.tool == "claude" and incoming.get("type") == "result"))
+                             (target.tool == "claude" and incoming.get("type") == "result") or
+                             (target.tool == "antigravity" and prompt_rpc_id is not None
+                              and incoming.get("id") == prompt_rpc_id and "method" not in incoming))
                     if resolved: return
                     if len(pending) >= 64: raise ExecutionIssue("protocol", "uncertain")
                     pending.append(incoming)
@@ -1035,11 +1106,86 @@ class LocalReplyExecutor:
                 # Writing the original channel proves forwarding, not provider
                 # acceptance and certainly not successful tool execution.
                 self._resolve_control(request, "forwarded")
-                return target.tool == "codex" and response.get("result", {}).get("decision") == "cancel"
+                return ((target.tool == "codex" and response.get("result", {}).get("decision") == "cancel") or
+                        (target.tool == "antigravity" and decision.get("decision") == "deny"))
         finally:
             pending.extend(queued)
             canceled.set()
             if not acknowledged: self._resolve_control(request, "cancelled")
+
+    def _antigravity(self, transport, target, prompt, run, settings=None):
+        capabilities = {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
+        if self.interaction_handler:
+            capabilities["elicitation"] = {"form": {}}
+        transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": 1, "clientInfo": {"name": "agent_monitor_local_reply", "version": "1"},
+            "clientCapabilities": capabilities}})
+        _rpc_response(transport, 1, error_mapper=failure_code_for_antigravity)
+        transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/resume", "params": {
+            "sessionId": target.session_id, "cwd": str(target.cwd), "mcpServers": []}})
+        resumed = _rpc_response(transport, 2, error_mapper=failure_code_for_antigravity)
+        if resumed.get("sessionId") != target.session_id:
+            raise ExecutionIssue("protocol", "uncertain")
+        modes = resumed.get("modes")
+        mode = modes.get("currentModeId") if isinstance(modes, dict) else None
+        if mode not in {"default", "accept-edits", "plan"}:
+            raise ExecutionIssue("permissions")
+        if settings:
+            try:
+                rows, cur_model, cur_effort = antigravity_catalog_rows(resumed)
+                current = normalize_catalog("antigravity", rows, current_model=cur_model, current_effort=cur_effort)
+                settings = selected_settings(run.selection, current, provider="antigravity", session_id=target.session_id)
+            except (ValueError, KeyError, TypeError):
+                raise ExecutionIssue("changed")
+        self._fresh(target)
+        rpc_id = 3
+        if not self.interaction_handler and mode == "accept-edits":
+            _antigravity_set_config(transport, rpc_id, target.session_id, "mode", "default")
+            rpc_id += 1
+        if settings:
+            _antigravity_set_config(transport, rpc_id, target.session_id, "model", settings["model"])
+            rpc_id += 1
+            if "effort" in settings:
+                _antigravity_set_config(transport, rpc_id, target.session_id, "thought_level", settings["effort"])
+                rpc_id += 1
+        self._directory_current(target)
+        prompt_id = rpc_id
+        transport.send({"jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt", "params": {
+            "sessionId": target.session_id, "prompt": [{"type": "text", "text": prompt}]}})
+        pending, seen = [], {}
+        stopped_by_phone = False
+        while True:
+            message = pending.pop(0) if pending else transport.next()
+            if "id" in message and isinstance(message.get("method"), str):
+                if not self.interaction_handler:
+                    _reject_request(transport, message)
+                stopped_by_phone = self._interactive(transport, target, run, run.command_id, message, pending, seen,
+                    prompt_rpc_id=prompt_id) or stopped_by_phone
+                continue
+            if isinstance(message.get("method"), str):
+                mp = message.get("params")
+                if isinstance(mp, dict) and mp.get("sessionId") not in {None, target.session_id}:
+                    raise ExecutionIssue("protocol", "uncertain")
+                continue
+            if message.get("id") != prompt_id:
+                continue
+            if "error" in message:
+                code = failure_code_for_antigravity(message.get("error"))
+                raise ExecutionIssue(code or "failed", "failed")
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise ExecutionIssue("protocol", "uncertain")
+            stop_reason = result.get("stopReason")
+            try:
+                transport.send({"jsonrpc": "2.0", "id": prompt_id + 1, "method": "session/close",
+                                "params": {"sessionId": target.session_id}})
+            except ExecutionIssue:
+                pass
+            if stop_reason == "end_turn":
+                return
+            if stopped_by_phone and stop_reason in {"cancelled", "refusal"}:
+                raise ExecutionIssue("declined", "failed")
+            raise ExecutionIssue("failed", "failed")
 
     def _claude_controlled(self, transport, target, prompt, run, settings):
         initialized = _claude_initialize(transport)
@@ -1145,29 +1291,56 @@ def _codex_collaboration_modes(transport):
     return ()
 
 
+def _antigravity_set_config(transport, rpc_id, session_id, config_id, value):
+    transport.send({"jsonrpc": "2.0", "id": rpc_id, "method": "session/set_config_option",
+                    "params": {"sessionId": session_id, "configId": config_id, "value": value}})
+    result = _rpc_response(transport, rpc_id, error_mapper=failure_code_for_antigravity)
+    options = result.get("configOptions")
+    if not isinstance(options, list):
+        raise ExecutionIssue("protocol", "uncertain")
+    matched = next((o for o in options if isinstance(o, dict) and o.get("id") == config_id), None)
+    if not isinstance(matched, dict) or matched.get("currentValue") != value:
+        raise ExecutionIssue("changed")
+
+
 def _catalog_observation(resolved):
     """A missing or changing observation cannot invalidate the provider's list."""
     try:
-        before = _stamp(resolved.path)
-        _, rows, _ = collector._read_window(resolved.path, max_bytes=1024 * 1024)
         model = effort = None
-        if resolved.tool == "codex":
+        if resolved.tool == "antigravity":
+            transcript = (_antigravity_base_dir(resolved.path) / "brain" / resolved.session_id
+                          / ".system_generated" / "logs" / "transcript.jsonl")
+            if not _unlinked(transcript) or not transcript.is_file():
+                return None, None
+            before = _stamp(transcript)
+            _, rows, _ = collector._read_window(transcript, max_bytes=256 * 1024)
             for row in reversed(rows):
-                context = row.get("payload")
-                if row.get("type") == "turn_context" and isinstance(context, dict):
-                    if isinstance(context.get("cwd"), str) and _same_path(context["cwd"], resolved.cwd):
-                        model, effort = context.get("model"), context.get("effort")
+                if row.get("type") == "PLANNER_RESPONSE" and row.get("source") == "MODEL" and isinstance(row.get("model"), str):
+                    model = row["model"]
                     break
+            if before != _stamp(transcript):
+                return None, None
         else:
-            for row in reversed(rows):
-                message = row.get("message")
-                if row.get("sessionId") == resolved.session_id and not row.get("isSidechain") and isinstance(message, dict) and message.get("model"):
-                    model = message["model"]
-                    break
-        if before == _stamp(resolved.path):
-            valid_model = isinstance(model, str) and len(model) <= 120 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]+\])?", model)
-            valid_effort = isinstance(effort, str) and re.fullmatch(r"[a-z0-9_]{1,32}", effort)
-            return model if valid_model else None, effort if valid_model and valid_effort else None
+            before = _stamp(resolved.path)
+            _, rows, _ = collector._read_window(resolved.path, max_bytes=1024 * 1024)
+            if resolved.tool == "codex":
+                for row in reversed(rows):
+                    context = row.get("payload")
+                    if row.get("type") == "turn_context" and isinstance(context, dict):
+                        if isinstance(context.get("cwd"), str) and _same_path(context["cwd"], resolved.cwd):
+                            model, effort = context.get("model"), context.get("effort")
+                        break
+            else:
+                for row in reversed(rows):
+                    message = row.get("message")
+                    if row.get("sessionId") == resolved.session_id and not row.get("isSidechain") and isinstance(message, dict) and message.get("model"):
+                        model = message["model"]
+                        break
+            if before != _stamp(resolved.path):
+                return None, None
+        valid_model = isinstance(model, str) and len(model) <= 120 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]+\])?", model)
+        valid_effort = isinstance(effort, str) and re.fullmatch(r"[a-z0-9_]{1,32}", effort)
+        return model if valid_model else None, effort if valid_model and valid_effort else None
     except (OSError, ValueError, TypeError):
         pass
     return None, None
@@ -1189,6 +1362,10 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
         # Listing capabilities does not open the live session or send a turn.
         if target.tool == "codex":
             argv = [executable, "app-server", "--stdio"]
+        elif target.tool == "antigravity":
+            base_dir = _antigravity_base_dir(target.path)
+            argv = [executable, "acp", "--gemini-dir", str(base_dir.parent),
+                    "--app-data-dir", base_dir.name, "--cli_dir_name", "antigravity-cli", "--disable-telemetry"]
         else:
             argv = [executable, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
                     "--verbose", "--no-session-persistence", "--permission-mode", "dontAsk", "--tools", "",
@@ -1196,6 +1373,7 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
         process = process_factory(argv, target.cwd)
         transport = _Transport(process, cancelled or threading.Event(), min(30, max(.05, timeout_seconds)))
         modes = ()
+        reported_model = reported_effort = None
         if target.tool == "codex":
             transport.send({"id": 1, "method": "initialize", "params": {
                 "clientInfo": {"name": "agent_monitor_capabilities", "version": "1"}, "capabilities": {"experimentalApi": True}}})
@@ -1203,9 +1381,27 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
             transport.send({"method": "initialized", "params": {}})
             rows = _codex_model_rows(transport)
             modes = _codex_collaboration_modes(transport)
+        elif target.tool == "antigravity":
+            transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": 1, "clientInfo": {"name": "agent_monitor_capabilities", "version": "1"},
+                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}}})
+            _rpc_response(transport, 1)
+            transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/resume", "params": {
+                "sessionId": target.session_id, "cwd": str(target.cwd), "mcpServers": []}})
+            resumed = _rpc_response(transport, 2)
+            if resumed.get("sessionId") != target.session_id:
+                return None
+            rows, reported_model, reported_effort = antigravity_catalog_rows(resumed)
+            try:
+                transport.send({"jsonrpc": "2.0", "id": 3, "method": "session/close",
+                                "params": {"sessionId": target.session_id}})
+            except ExecutionIssue:
+                pass
         else:
             rows = _claude_initialize(transport).get("models")
         model, effort = _catalog_observation(target)
+        if target.tool == "antigravity" and model is None:
+            model, effort = reported_model, reported_effort
         return normalize_catalog(target.tool, rows, current_model=model, current_effort=effort,
                                  collaboration_modes=modes)
     except Exception:

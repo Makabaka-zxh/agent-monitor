@@ -53,9 +53,15 @@ _SELECT_RESULT = """
     WHERE conversation_id = ? AND parent_conversation_id = '' AND nesting_depth = 0
     LIMIT 2
 """
+_SELECT_SESSION = """
+    SELECT substr(workspace_uris, 1, 8193), substr(source, 1, 80), killed
+    FROM main.conversation_summaries
+    WHERE conversation_id = ? AND parent_conversation_id = '' AND nesting_depth = 0
+    LIMIT 2
+"""
 _TEXT_STEP_FIELDS = frozenset({
     "step_index", "source", "type", "status", "created_at", "content", "thinking", "tool_calls",
-    "input_tokens", "cache_read_tokens", "output_tokens", "truncated_fields",
+    "input_tokens", "cache_read_tokens", "output_tokens", "truncated_fields", "model",
 })
 
 
@@ -107,7 +113,7 @@ def _allow_index_columns(action, first, second, database, _origin):
     return sqlite3.SQLITE_DENY
 
 
-def _read(base, limit: int, *, session_id: str | None = None) -> list[tuple]:
+def _read(base, limit: int, *, session_id: str | None = None, query: str | None = None) -> list[tuple]:
     path = _plain_directory(_base(base)) / "conversation_summaries.db"
     first = _file(path)
     with path.open("rb") as file:
@@ -137,7 +143,7 @@ def _read(base, limit: int, *, session_id: str | None = None) -> list[tuple]:
             raise ValueError("unexpected Antigravity index schema")
         connection.set_authorizer(_allow_index_columns)
         rows = connection.execute(_SELECT, (limit,)).fetchall() if session_id is None else (
-            connection.execute(_SELECT_RESULT, (session_id,)).fetchall())
+            connection.execute(query or _SELECT_RESULT, (session_id,)).fetchall())
     after = _file(path)
     if not os.path.samestat(first, after):
         raise ValueError("Antigravity index replaced during scan")
@@ -154,31 +160,75 @@ def _display(value, cap: int) -> str:
     return " ".join(visible.split())[:cap]
 
 
-def _project(raw) -> str:
+def _workspace_posix(raw) -> PurePosixPath | None:
     if not isinstance(raw, str) or len(raw) > _MAX_WORKSPACE_CHARS:
-        return ""
+        return None
     try:
         values = json.loads(raw)
         if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str):
-            return ""
-        # Only publish the local workspace's last component. Remote URI hosts,
-        # query data, decoded separators and ambiguous relative paths do not
-        # supply a project label.
+            return None
+        # Only accept a single local file:/// URI. Remote URI hosts, query data,
+        # decoded separators and ambiguous relative paths are rejected.
         uri = values[0]
         if not uri.startswith("file:///") or any(ord(ch) < 32 for ch in uri):
-            return ""
+            return None
         parts = urlsplit(uri)
         if parts.netloc or parts.query or parts.fragment or re.search(r"%(?:2f|5c)", parts.path, re.IGNORECASE):
-            return ""
+            return None
         decoded = unquote(parts.path, errors="strict")
         if decoded.startswith("//") or "\\" in decoded or any(ord(ch) < 32 for ch in decoded):
-            return ""
+            return None
         path = PurePosixPath(decoded)
         if ".." in path.parts or (len(path.parts) == 2 and re.fullmatch(r"[a-zA-Z]:", path.name)):
-            return ""
-        return _display(path.name, 80)
+            return None
+        return path
     except (ValueError, UnicodeError, RecursionError):
-        return ""
+        return None
+
+
+def _project(raw) -> str:
+    path = _workspace_posix(raw)
+    return _display(path.name, 80) if path is not None else ""
+
+
+def resolve_antigravity_workspace(raw) -> Path | None:
+    posix = _workspace_posix(raw)
+    if posix is None:
+        return None
+    text = str(posix)
+    if os.name == "nt":
+        if not re.match(r"^/[a-zA-Z]:/.+", text):
+            return None
+        candidate = Path(text[1:])
+    else:
+        if not text.startswith("/") or len(posix.parts) < 2 or re.match(r"^/[a-zA-Z]:(?:/|$)", text):
+            return None
+        candidate = Path(text)
+    if not candidate.is_absolute() or ".." in candidate.parts or candidate.anchor.startswith(("\\\\", "//")):
+        return None
+    return candidate
+
+
+def resolve_antigravity_session(session_id: str, *, base: Path | str | None = None) -> tuple[Path, Path] | None:
+    """Resolve an indexed, top-level local Antigravity trajectory and its workspace."""
+    try:
+        if not isinstance(session_id, str) or len(session_id) != 36 or str(UUID(session_id)) != session_id:
+            return None
+        rows = _read(base, 0, session_id=session_id, query=_SELECT_SESSION)
+        if len(rows) != 1:
+            return None
+        workspace, source, killed = rows[0]
+        if source not in _LOCAL_SOURCES or type(killed) is not int or killed != 0:
+            return None
+        cwd = resolve_antigravity_workspace(workspace)
+        if cwd is None:
+            return None
+        conversations = _plain_directory(_base(base) / "conversations")
+        path = conversations / f"{session_id}.db"
+        _file(path, size_limit=2**63 - 1)
+        return path, cwd
+    except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+        return None
 
 
 def _status(native, not_idle, killed, updated, now, stale_seconds):
@@ -324,6 +374,7 @@ def read_antigravity_result(session_id: str, *, base: Path | str | None = None) 
         if (not isinstance(step, dict) or set(step) - _TEXT_STEP_FIELDS
                 or step.get("type") != "PLANNER_RESPONSE" or step.get("source") != "MODEL"
                 or step.get("status") != "DONE" or step.get("tool_calls", []) != []
+                or ("model" in step and not isinstance(step["model"], str))
                 or type(step.get("step_index")) is not int or step["step_index"] != count - 1
                 or step["step_index"] <= user_step):
             return None

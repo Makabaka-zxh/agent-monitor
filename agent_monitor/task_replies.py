@@ -29,6 +29,7 @@ REASONS = {
     "reply_not_ready": "回复连接尚未就绪，请检查电脑端的回复设置与连接",
     "codex_missing": "电脑连接器未找到 Codex 命令程序，请在电脑上安装或配置后重试",
     "claude_missing": "电脑连接器未找到 Claude Code 命令程序，请在电脑上安装或配置后重试",
+    "antigravity_missing": "电脑连接器未找到 Antigravity 命令程序，请在电脑上安装或配置后重试",
     "unavailable": "此会话暂时不能续接", "expired": "发送已过期，请确认任务后重新发送",
     "revoked": "账号连接已失效，本次回复已停止", "restarted": "服务曾中断，请核对任务后再发送",
     # Local continuation reports only these fixed diagnostics; never pass through
@@ -60,7 +61,7 @@ class ReplyInput(BaseModel):
 
 class AgentPoll(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    supported_tools: list[Literal["codex", "claude"]] = Field(default_factory=list, max_length=2)
+    supported_tools: list[Literal["codex", "claude", "antigravity"]] = Field(default_factory=list, max_length=3)
 
 
 class AgentUpdate(BaseModel):
@@ -137,7 +138,7 @@ class TaskReplies:
     def _base_capability(self, task_id, *, for_catalog=False):
         device_id, source_id, row, task = self._task(task_id)
         reason = ""
-        if task.get("tool") not in {"codex", "claude"}:
+        if task.get("tool") not in {"codex", "claude", "antigravity"}:
             reason = "unsupported"
         elif row["archived"]:
             reason = "archived"
@@ -155,7 +156,8 @@ class TaskReplies:
             if time.time() - stamp >= ONLINE_SECONDS:
                 reason = "reply_not_ready"
             elif task.get("tool") not in supported:
-                reason = {"codex": "codex_missing", "claude": "claude_missing"}.get(task.get("tool"), "unsupported")
+                reason = {"codex": "codex_missing", "claude": "claude_missing",
+                          "antigravity": "antigravity_missing"}.get(task.get("tool"), "unsupported")
         return device_id, source_id, row, task, reason
 
     def get(self, reader, task_id, request_id=None):
