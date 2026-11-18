@@ -27,7 +27,7 @@ python -m agent_monitor.remote_agent pair --server https://monitor.example.com -
 
 新版连接器自动查找当前系统用户的 `~/.gemini/antigravity` 会话索引。索引可读时，桌面主会话会以「Antigravity」为来源出现在工作台，可按工具和电脑筛选。超过状态有效期的运行会话、正在取消或尚未完全空闲的会话，不能以这份数据认定为已完成。当前在 Windows 桌面版 2.32.1 上核对了真实会话；索引缺失或格式不兼容时会跳过这个来源。
 
-开启结果同步后，Monitor 只读取能与最新一轮确认对应的最终答复文本。远程连接器每次检查最近 8 条已空闲的 Antigravity 会话；本机服务可在打开详情时读取其他已收录会话的结果。关闭结果同步或使用 `--status-only` 时不读取正文。当前不支持附件、用量、手机回复、审批或模型设置。Google 的 [Antigravity CLI ACP 接口](https://antigravity.google/docs/ide/extensions/acp/) 是独立的会话入口，现有桌面会话不会因此自动变成可远程操作。
+开启结果同步后，Monitor 只读取能与最新一轮确认对应的最终答复文本。远程连接器每次检查最近 8 条已空闲的 Antigravity 会话；本机服务可在打开详情时读取其他已收录会话的结果。关闭结果同步或使用 `--status-only` 时不读取正文。当所在电脑已安装并登录官方 `agy` CLI（`v1.5+`）且显式启用回复能力时，Monitor 可通过 `agy acp` 续接已空闲且未被桌面窗口或 CLI 占用的本地工作区会话，在原生 Android 客户端支持模型与思考强度选择、表单式提问回答（`elicitation/create`）以及单次命令或工具批准（`session/request_permission`）；桌面窗口正在占用同一会话、缺少安全工作区或处于自动扩权模式时拒绝续接并提示回电脑处理。当前仍不支持 Antigravity 结果附件同步与用量账本统计。
 
 需要同时更新 Monitor 服务和电脑连接器。连接器遇到仍不识别 Antigravity 的旧服务时，照常同步已有的 Codex 和 Claude Code 任务。
 

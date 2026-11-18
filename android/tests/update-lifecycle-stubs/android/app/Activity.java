@@ -10,6 +10,8 @@ public class Activity extends Context {
     private final Window window=new Window();
     public void onCreate(Bundle b) {
     }
+    public void onWindowFocusChanged(boolean focused) {
+    }
     protected void onResume() {
     }
     protected void onPause() {

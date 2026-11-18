@@ -5,6 +5,8 @@ public class ScrollView extends LinearLayout {
     }
     public void setFillViewport(boolean b) {
     }
+    public void setClipToPadding(boolean b) {
+    }
     public void setVerticalScrollBarEnabled(boolean b) {
     }
 }

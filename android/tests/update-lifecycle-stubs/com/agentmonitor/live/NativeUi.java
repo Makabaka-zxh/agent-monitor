@@ -20,6 +20,15 @@ class NativeUi {
     Object background() {
         return new Object();
     }
+    Object compactHeaderMaterial() {
+        return new Object();
+    }
+    int headerTopColor() {
+        return bg;
+    }
+    TextView heading(String s,int n) {
+        return new TextView(s);
+    }
     int dp(int n) {
         return n;
     }
