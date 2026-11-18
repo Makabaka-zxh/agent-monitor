@@ -15,7 +15,10 @@ import re
 import shutil
 import signal
 import stat
+import struct
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from typing import Callable
@@ -398,10 +401,69 @@ def _antigravity_base_dir(path: Path) -> Path:
     return path.parents[1] if len(path.parents) >= 2 and path.parent.name == "conversations" else path.parent
 
 
+def _win_file_in_use(path: Path) -> bool:
+    import ctypes
+    from ctypes import wintypes as w
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE]
+    kernel32.CreateFileW.restype = w.HANDLE
+    kernel32.CloseHandle.argtypes = [w.HANDLE]
+    kernel32.CloseHandle.restype = w.BOOL
+    invalid = w.HANDLE(-1).value
+    for attempt in range(4):
+        if not path.exists():
+            return False
+        handle = kernel32.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+        if handle != invalid and handle is not None:
+            kernel32.CloseHandle(handle)
+            return False
+        err = ctypes.get_last_error()
+        if err == 2:
+            return False
+        if err != 32:
+            return True
+        if attempt < 3:
+            time.sleep(0.02)
+    return True
+
+
+def _posix_sqlite_locked(path: Path, offset: int, length: int) -> bool:
+    import fcntl
+    if not path.exists():
+        return False
+    if not _unlinked(path) or not path.is_file():
+        return True
+    try:
+        with path.open("rb") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                return True
+            if sys.platform == "darwin":
+                probe = struct.pack("qqihh", offset, length, 0, fcntl.F_WRLCK, os.SEEK_SET)
+                res = fcntl.fcntl(handle.fileno(), fcntl.F_GETLK, probe)
+                _, _, _, lock_type, _ = struct.unpack("qqihh", res)
+            else:
+                probe = struct.pack("hhqqI", fcntl.F_WRLCK, os.SEEK_SET, offset, length, 0)
+                res = fcntl.fcntl(handle.fileno(), fcntl.F_GETLK, probe)
+                lock_type, _, _, _, _ = struct.unpack("hhqqI", res)
+            return lock_type != fcntl.F_UNLCK
+    except OSError:
+        return True
+
+
 def _antigravity_locked(base_dir: Path, session_id: str, conv_db: Path) -> bool:
-    """Detect active Desktop/CLI writers via SQLite sidecars or presence lock."""
-    for suffix in ("-wal", "-shm", "-journal"):
-        if conv_db.with_name(conv_db.name + suffix).exists():
+    """Detect active Desktop/CLI writers via OS open handles, SQLite locks, or presence lock."""
+    if conv_db.with_name(conv_db.name + "-journal").exists():
+        return True
+    if os.name == "nt":
+        for candidate in (conv_db, conv_db.with_name(conv_db.name + "-wal"), conv_db.with_name(conv_db.name + "-shm")):
+            if _win_file_in_use(candidate):
+                return True
+    else:
+        if (_posix_sqlite_locked(conv_db, 1073741824, 512)
+                or _posix_sqlite_locked(conv_db.with_name(conv_db.name + "-shm"), 0, 128)):
             return True
     lock_path = base_dir / "presence" / f"{session_id}.lock"
     if not lock_path.exists():
@@ -868,6 +930,20 @@ class LocalReplyExecutor:
         self._fresh(target)
         return target
 
+    def _fresh_after_antigravity_resume(self, target, transcript_stamp):
+        """Verify workspace and session identity while our owned ACP process holds conv_db."""
+        self._directory_current(target)
+        try:
+            if not _unlinked(target.path) or _stamp(target.path)[:2] != target.stamp[:2]:
+                raise ExecutionIssue("changed")
+            transcript = (_antigravity_base_dir(target.path) / "brain" / target.session_id
+                          / ".system_generated" / "logs" / "transcript.jsonl")
+            current_tr = _stamp(transcript) if transcript.exists() else None
+            if current_tr != transcript_stamp:
+                raise ExecutionIssue("changed")
+        except OSError:
+            raise ExecutionIssue("changed") from None
+
     def _execute(self, run, target, prompt):
         process = transport = None
         state, reason, code = "uncertain", REASONS["protocol"], "protocol"
@@ -875,7 +951,7 @@ class LocalReplyExecutor:
             self._fresh(target)
             if run.cancelled.is_set(): raise ExecutionIssue("cancelled", "uncertain")
             settings = None
-            if run.selection:
+            if run.selection and (self.catalog_provider is not None or target.tool != "antigravity"):
                 catalog = (self.catalog_provider(target.source_id) if self.catalog_provider else
                            discover_reply_catalog(target.source_id, process_factory=self.process_factory, **self.inspect_options))
                 try: settings = selected_settings(run.selection, catalog, provider=target.tool, session_id=target.session_id)
@@ -900,7 +976,7 @@ class LocalReplyExecutor:
         finally:
             if transport: transport.done.set()
             if process:
-                try: process.close(graceful=state == "succeeded")
+                try: process.close(graceful=state == "succeeded" or target.tool == "antigravity")
                 except (OSError, ValueError, subprocess.TimeoutExpired): state, reason, code = "uncertain", REASONS["protocol"], "protocol"
             with self.lock: run.state, run.reason, run.error_code = state, reason, code
             self._emit(self._result(run))
@@ -1114,6 +1190,12 @@ class LocalReplyExecutor:
             if not acknowledged: self._resolve_control(request, "cancelled")
 
     def _antigravity(self, transport, target, prompt, run, settings=None):
+        transcript = (_antigravity_base_dir(target.path) / "brain" / target.session_id
+                      / ".system_generated" / "logs" / "transcript.jsonl")
+        try:
+            transcript_stamp = _stamp(transcript) if transcript.exists() else None
+        except OSError:
+            raise ExecutionIssue("changed") from None
         capabilities = {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
         if self.interaction_handler:
             capabilities["elicitation"] = {"form": {}}
@@ -1130,14 +1212,14 @@ class LocalReplyExecutor:
         mode = modes.get("currentModeId") if isinstance(modes, dict) else None
         if mode not in {"default", "accept-edits", "plan"}:
             raise ExecutionIssue("permissions")
-        if settings:
+        if run.selection:
             try:
                 rows, cur_model, cur_effort = antigravity_catalog_rows(resumed)
                 current = normalize_catalog("antigravity", rows, current_model=cur_model, current_effort=cur_effort)
                 settings = selected_settings(run.selection, current, provider="antigravity", session_id=target.session_id)
             except (ValueError, KeyError, TypeError):
                 raise ExecutionIssue("changed")
-        self._fresh(target)
+        self._fresh_after_antigravity_resume(target, transcript_stamp)
         rpc_id = 3
         if not self.interaction_handler and mode == "accept-edits":
             _antigravity_set_config(transport, rpc_id, target.session_id, "mode", "default")
@@ -1154,38 +1236,47 @@ class LocalReplyExecutor:
             "sessionId": target.session_id, "prompt": [{"type": "text", "text": prompt}]}})
         pending, seen = [], {}
         stopped_by_phone = False
-        while True:
-            message = pending.pop(0) if pending else transport.next()
-            if "id" in message and isinstance(message.get("method"), str):
-                if not self.interaction_handler:
-                    _reject_request(transport, message)
-                stopped_by_phone = self._interactive(transport, target, run, run.command_id, message, pending, seen,
-                    prompt_rpc_id=prompt_id) or stopped_by_phone
-                continue
-            if isinstance(message.get("method"), str):
-                mp = message.get("params")
-                if isinstance(mp, dict) and mp.get("sessionId") not in {None, target.session_id}:
+        session_closed = False
+        try:
+            while True:
+                message = pending.pop(0) if pending else transport.next()
+                if "id" in message and isinstance(message.get("method"), str):
+                    if not self.interaction_handler:
+                        _reject_request(transport, message)
+                    stopped_by_phone = self._interactive(transport, target, run, run.command_id, message, pending, seen,
+                        prompt_rpc_id=prompt_id) or stopped_by_phone
+                    continue
+                if isinstance(message.get("method"), str):
+                    mp = message.get("params")
+                    if isinstance(mp, dict) and mp.get("sessionId") not in {None, target.session_id}:
+                        raise ExecutionIssue("protocol", "uncertain")
+                    continue
+                if message.get("id") != prompt_id:
+                    continue
+                if "error" in message:
+                    code = failure_code_for_antigravity(message.get("error"))
+                    raise ExecutionIssue(code or "failed", "failed")
+                result = message.get("result")
+                if not isinstance(result, dict):
                     raise ExecutionIssue("protocol", "uncertain")
-                continue
-            if message.get("id") != prompt_id:
-                continue
-            if "error" in message:
-                code = failure_code_for_antigravity(message.get("error"))
-                raise ExecutionIssue(code or "failed", "failed")
-            result = message.get("result")
-            if not isinstance(result, dict):
-                raise ExecutionIssue("protocol", "uncertain")
-            stop_reason = result.get("stopReason")
-            try:
-                transport.send({"jsonrpc": "2.0", "id": prompt_id + 1, "method": "session/close",
-                                "params": {"sessionId": target.session_id}})
-            except ExecutionIssue:
-                pass
-            if stop_reason == "end_turn":
-                return
-            if stopped_by_phone and stop_reason in {"cancelled", "refusal"}:
-                raise ExecutionIssue("declined", "failed")
-            raise ExecutionIssue("failed", "failed")
+                stop_reason = result.get("stopReason")
+                try:
+                    transport.send({"jsonrpc": "2.0", "id": prompt_id + 1, "method": "session/close",
+                                    "params": {"sessionId": target.session_id}})
+                    _rpc_response(transport, prompt_id + 1)
+                    session_closed = True
+                except ExecutionIssue:
+                    pass
+                if stop_reason == "end_turn":
+                    if stopped_by_phone and _antigravity_ended_on_denial(transcript):
+                        raise ExecutionIssue("declined", "failed")
+                    return
+                if stopped_by_phone and stop_reason in {"cancelled", "refusal"}:
+                    raise ExecutionIssue("declined", "failed")
+                raise ExecutionIssue("failed", "failed")
+        finally:
+            if not session_closed:
+                _antigravity_abort_session(transport, target.session_id, prompt_id + 2)
 
     def _claude_controlled(self, transport, target, prompt, run, settings):
         initialized = _claude_initialize(transport)
@@ -1291,6 +1382,45 @@ def _codex_collaboration_modes(transport):
     return ()
 
 
+def _antigravity_ended_on_denial(transcript: Path) -> bool:
+    """Return True when ACP ended a turn after phone denial without a new planner text reply."""
+    try:
+        if not _unlinked(transcript) or not transcript.is_file():
+            return False
+        _, rows, _ = collector._read_window(transcript, max_bytes=64 * 1024)
+        if not rows:
+            return False
+        last = rows[-1]
+        has_final_text = (
+            last.get("type") == "PLANNER_RESPONSE"
+            and last.get("status") == "DONE"
+            and not last.get("tool_calls")
+            and isinstance(last.get("content"), str)
+            and bool(last.get("content").strip())
+        )
+        return not has_final_text
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _antigravity_abort_session(transport, session_id: str, close_id: int) -> None:
+    """Best-effort session/cancel + session/close so index.sqlite returns to IDLE."""
+    orig_cancelled, orig_deadline = transport.cancelled, transport.deadline
+    transport.cancelled = threading.Event()
+    transport.deadline = time.monotonic() + 2.5
+    try:
+        transport.send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}})
+        transport.send({"jsonrpc": "2.0", "id": close_id, "method": "session/close", "params": {"sessionId": session_id}})
+        while True:
+            msg = transport.next()
+            if msg.get("id") == close_id:
+                break
+    except Exception:
+        pass
+    finally:
+        transport.cancelled, transport.deadline = orig_cancelled, orig_deadline
+
+
 def _antigravity_set_config(transport, rpc_id, session_id, config_id, value):
     transport.send({"jsonrpc": "2.0", "id": rpc_id, "method": "session/set_config_option",
                     "params": {"sessionId": session_id, "configId": config_id, "value": value}})
@@ -1346,6 +1476,25 @@ def _catalog_observation(resolved):
     return None, None
 
 
+def _cleanup_antigravity_probe(cli_root: Path, session_id: str | None) -> None:
+    if not session_id or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session_id):
+        return
+    for candidate in (
+        cli_root / "conversations" / f"{session_id}.db",
+        cli_root / "conversations" / f"{session_id}.db-wal",
+        cli_root / "conversations" / f"{session_id}.db-shm",
+        cli_root / "conversations" / f"{session_id}.db-journal",
+        cli_root / "presence" / f"{session_id}.lock",
+    ):
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
+    brain = cli_root / "brain" / session_id
+    if brain.exists():
+        shutil.rmtree(brain, ignore_errors=True)
+
+
 def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_reader=None,
                            executable_finder=find_executable, process_factory=_Process, timeout_seconds=15, cancelled=None):
     """Capability handshake only. No user message, turn/start, or config read/write.
@@ -1353,25 +1502,34 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
     An unavailable/unsupported catalog is represented as None, never synthesized.
     The subprocess is owned and closed even when its handshake fails.
     """
-    process = transport = None
+    process = transport = probe_tmp = None
+    probe_cli_root = None
+    probe_session_id = None
+    graceful_close = False
     try:
         target = _resolve_target(source_id, resolver)
         executable = executable_finder(target.tool)
         if not executable:
             return None
         # Listing capabilities does not open the live session or send a turn.
+        spawn_cwd = target.cwd
+        budget = timeout_seconds
         if target.tool == "codex":
             argv = [executable, "app-server", "--stdio"]
         elif target.tool == "antigravity":
             base_dir = _antigravity_base_dir(target.path)
+            probe_cli_root = base_dir.parent / "antigravity-cli"
+            probe_tmp = tempfile.TemporaryDirectory(prefix="monitor-agy-cap-")
+            spawn_cwd = Path(probe_tmp.name)
+            budget = max(timeout_seconds, 45)
             argv = [executable, "acp", "--gemini-dir", str(base_dir.parent),
-                    "--app-data-dir", base_dir.name, "--cli_dir_name", "antigravity-cli", "--disable-telemetry"]
+                    "--cli_dir_name", "antigravity-cli", "--disable-telemetry"]
         else:
             argv = [executable, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
                     "--verbose", "--no-session-persistence", "--permission-mode", "dontAsk", "--tools", "",
                     "--strict-mcp-config", "--settings", '{"disableAllHooks":true}']
-        process = process_factory(argv, target.cwd)
-        transport = _Transport(process, cancelled or threading.Event(), min(30, max(.05, timeout_seconds)))
+        process = process_factory(argv, spawn_cwd)
+        transport = _Transport(process, cancelled or threading.Event(), min(60, max(.05, budget)))
         modes = ()
         reported_model = reported_effort = None
         if target.tool == "codex":
@@ -1386,15 +1544,18 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
                 "protocolVersion": 1, "clientInfo": {"name": "agent_monitor_capabilities", "version": "1"},
                 "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}}})
             _rpc_response(transport, 1)
-            transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/resume", "params": {
-                "sessionId": target.session_id, "cwd": str(target.cwd), "mcpServers": []}})
-            resumed = _rpc_response(transport, 2)
-            if resumed.get("sessionId") != target.session_id:
+            transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {
+                "cwd": str(spawn_cwd), "mcpServers": []}})
+            created = _rpc_response(transport, 2)
+            probe_session_id = created.get("sessionId") if isinstance(created.get("sessionId"), str) else None
+            if not probe_session_id:
                 return None
-            rows, reported_model, reported_effort = antigravity_catalog_rows(resumed)
+            rows, reported_model, reported_effort = antigravity_catalog_rows(created)
             try:
                 transport.send({"jsonrpc": "2.0", "id": 3, "method": "session/close",
-                                "params": {"sessionId": target.session_id}})
+                                "params": {"sessionId": probe_session_id}})
+                _rpc_response(transport, 3)
+                graceful_close = True
             except ExecutionIssue:
                 pass
         else:
@@ -1409,5 +1570,10 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
     finally:
         if transport: transport.done.set()
         if process:
-            try: process.close()
+            try: process.close(graceful=graceful_close)
             except (OSError, ValueError, subprocess.TimeoutExpired): pass
+        if probe_cli_root and probe_session_id:
+            _cleanup_antigravity_probe(probe_cli_root, probe_session_id)
+        if probe_tmp is not None:
+            try: probe_tmp.cleanup()
+            except OSError: pass

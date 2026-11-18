@@ -337,8 +337,10 @@ class FakeAcpProcess:
                                    "error": {"code": -32000, "message": "Authentication required: PRIVATE TOKEN"}})
                 return
             self.stdout.q.put({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1}})
-        elif method == "session/resume":
+        elif method in {"session/resume", "session/new"}:
             payload = json.loads(json.dumps(ACP_RESUME_SAMPLE))
+            if method == "session/new":
+                payload["sessionId"] = "99999999-9999-4999-8999-999999999999"
             payload["modes"]["currentModeId"] = self.mode
             self.stdout.q.put({"jsonrpc": "2.0", "id": rid, "result": payload})
         elif method == "session/set_config_option":
@@ -385,7 +387,7 @@ def test_executor_catalog_lifecycle_locks_and_mode_guards(tmp_path):
     resolver = lambda sid: resolve_local_session(sid, antigravity_home=ag)
     finder = lambda tool: "agy.exe" if tool == "antigravity" else None
 
-    # 1. Catalog discovery uses session/resume + session/close without starting a turn.
+    # 1. Catalog discovery uses isolated session/new + session/close without opening the live desktop session.
     spawned = []
     def factory(argv, cwd, *, mode="default", scenario="perm_allow"):
         p = FakeAcpProcess(argv, cwd, mode=mode, scenario=scenario)
@@ -397,7 +399,8 @@ def test_executor_catalog_lifecycle_locks_and_mode_guards(tmp_path):
     assert cat is not None and cat["provider"] == "antigravity"
     assert cat["current_model"] == "gemini-3.8-flash" and cat["current_effort"] == "low"
     assert "--dangerously-skip-permissions" not in spawned[0].argv
-    assert "--app-data-dir" in spawned[0].argv and "antigravity" in spawned[0].argv
+    assert "--app-data-dir" not in spawned[0].argv and "antigravity-cli" in spawned[0].argv
+    assert [m.get("method") for m in spawned[0].sent if "method" in m] == ["initialize", "session/new", "session/close"]
 
     # 2. Controlled turn with model+effort selection and allow_once permission!
     events, seen_requests = [], []
@@ -439,14 +442,82 @@ def test_executor_catalog_lifecycle_locks_and_mode_guards(tmp_path):
     assert "PRIVATE TOKEN" not in json.dumps(events[-1])
     assert failure_code_for_antigravity({"code": -32000}) == "authentication_failed"
 
-    # 5. Active WAL sidecar on conversations/<sid>.db blocks continuation as busy!
+    # 5. Inert leftover -wal does not block an idle session, while an active open handle or rollback journal blocks as busy!
     wal = conv_db.with_name(conv_db.name + "-wal")
-    wal.write_bytes(b"active")
+    wal.write_bytes(b"inert-leftover")
     try:
-        res_busy = ex.start("cmd-busy-wal", source_id, "Blocked while active")
-        assert res_busy["state"] == "blocked" and res_busy["error_code"] == "busy"
+        assert le._antigravity_locked(ag, SESSION, conv_db) is False
+        with conv_db.open("r+b") as active_handle:
+            if le.os.name != "nt":
+                import fcntl
+                fcntl.flock(active_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            res_busy = ex.start("cmd-busy-open", source_id, "Blocked while active")
+            assert res_busy["state"] == "blocked" and res_busy["error_code"] == "busy"
     finally:
         wal.unlink()
+    journal = conv_db.with_name(conv_db.name + "-journal")
+    journal.write_bytes(b"active-rollback")
+    try:
+        res_journal = ex.start("cmd-busy-journal", source_id, "Blocked during rollback")
+        assert res_journal["state"] == "blocked" and res_journal["error_code"] == "busy"
+    finally:
+        journal.unlink()
+
+    # 5b. Selection without catalog_provider validates against session/resume in a single ACP spawn.
+    events.clear()
+    before_spawns = len(spawned)
+    ex_nocat = le.LocalReplyExecutor(events.append, resolver=resolver, executable_finder=finder,
+                                     process_factory=lambda a, c: factory(a, c, scenario="plain"),
+                                     interaction_handler=handler)
+    ex_nocat.start("cmd-nocat-sel", source_id, "Single spawn", selection=selection)
+    ex_nocat.runs["cmd-nocat-sel"].thread.join(timeout=5)
+    assert events[-1]["state"] == "succeeded"
+    assert len(spawned) - before_spawns == 1
+
+    # 5c. Phone denial returning end_turn maps to declined when transcript halted on permission ERROR,
+    #     or succeeded when the model wrote a post-denial PLANNER_RESPONSE text reply.
+    transcript_path = ag / "brain" / SESSION / ".system_generated" / "logs" / "transcript.jsonl"
+    orig_transcript = transcript_path.read_text(encoding="utf-8")
+    def deny_with_error(req, cancelled):
+        transcript_path.write_text(
+            orig_transcript + json.dumps({"step_index": 9, "source": "MODEL", "type": "GENERIC", "status": "ERROR", "content": "denied"}) + "\n",
+            encoding="utf-8",
+        )
+        return {"decision": "deny"}
+
+    events.clear()
+    ex_deny = le.LocalReplyExecutor(
+        events.append, resolver=resolver, executable_finder=finder,
+        process_factory=lambda a, c: factory(a, c, scenario="perm_allow"),
+        interaction_handler=deny_with_error,
+    )
+    ex_deny.start("cmd-deny-endturn", source_id, "Deny tool")
+    ex_deny.runs["cmd-deny-endturn"].thread.join(timeout=5)
+    assert events[-1]["state"] == "failed" and events[-1]["error_code"] == "declined"
+    transcript_path.write_text(orig_transcript, encoding="utf-8")
+
+    events.clear()
+    ex_deny_reply = le.LocalReplyExecutor(
+        events.append, resolver=resolver, executable_finder=finder,
+        process_factory=lambda a, c: factory(a, c, scenario="perm_allow"),
+        interaction_handler=lambda req, cancelled: {"decision": "deny"},
+    )
+    ex_deny_reply.start("cmd-deny-with-text", source_id, "Deny tool with answer")
+    ex_deny_reply.runs["cmd-deny-with-text"].thread.join(timeout=5)
+    assert events[-1]["state"] == "succeeded"
+
+    # 5d. Expired interaction (handler returns None) sends session/cancel + session/close so index returns to IDLE.
+    events.clear()
+    ex_expired = le.LocalReplyExecutor(
+        events.append, resolver=resolver, executable_finder=finder,
+        process_factory=lambda a, c: factory(a, c, scenario="perm_allow"),
+        interaction_handler=lambda req, cancelled: None,
+    )
+    ex_expired.start("cmd-expired-perm", source_id, "Expired approval")
+    ex_expired.runs["cmd-expired-perm"].thread.join(timeout=5)
+    assert events[-1]["state"] == "blocked" and events[-1]["error_code"] == "approval"
+    abort_methods = [m.get("method") for m in spawned[-1].sent if "method" in m]
+    assert "session/cancel" in abort_methods and abort_methods[-1] == "session/close"
 
     # 6. AgentPoll accepts all 3 supported providers simultaneously.
     poll = AgentPoll.model_validate({"supported_tools": ["codex", "claude", "antigravity"]})
