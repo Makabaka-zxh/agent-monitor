@@ -11,12 +11,16 @@ permissions:
 jobs:
   python-web:
     name: Python and Web (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-24.04
+          - os: windows-latest
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,7 +109,7 @@ jobs:
 
   macos:
     name: macOS Swift tests
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

@@ -354,16 +354,19 @@ class EventLoopHeartbeat:
         self._thread = None
         self._writer = None
         self._progress = self._baseline = self._last_poll = time.monotonic()
+        self._beats = 0
         self._suspect_since = None
 
     def beat(self):
         # Assignment does not wait for a lock possibly held by a stuck thread.
         self._progress = time.monotonic()
+        self._beats += 1
 
     def start(self):
         if self._thread is not None or self._stopped.is_set():
             raise RuntimeError("heartbeat-already-started-or-stopped")
         self._progress = self._baseline = self._last_poll = time.monotonic()
+        self._beats = 0
         worker = threading.Thread(target=self._watch, name="monitor-loop-heartbeat", daemon=True)
         try:
             worker.start()
@@ -407,10 +410,10 @@ class EventLoopHeartbeat:
 
     def _watch(self):
         while not self._stopped.wait(HEARTBEAT_POLL_SECONDS):
-            confirmed_progress = self._progress
+            confirmed_progress = (self._progress, self._beats)
             if not self._poll(time.monotonic()):
                 continue
-            if self._progress != confirmed_progress:
+            if (self._progress, self._beats) != confirmed_progress:
                 continue
             try:
                 if self._writer is None or not self._writer.is_alive():
@@ -428,7 +431,7 @@ class EventLoopHeartbeat:
             # not proof that a process exit occurred.
             if self._stopped.is_set():
                 return
-            if self._progress != confirmed_progress or not self._poll(time.monotonic()):
+            if (self._progress, self._beats) != confirmed_progress or not self._poll(time.monotonic()):
                 self._suspect_since = None
                 continue
             os._exit(HEARTBEAT_EXIT_CODE)
