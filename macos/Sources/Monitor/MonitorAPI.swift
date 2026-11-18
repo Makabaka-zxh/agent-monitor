@@ -3,6 +3,7 @@ import Foundation
 enum Endpoint {
     case workbench, usage, account, profile, preferences, session, pairingStart, pairingPoll(String), pairingCode
     case archive, result(String), resultTXT(String, String), file(String, String, String), reply(String, String?), sendReply
+    case controls(String), controlDecision
 
     var path: String {
         switch self {
@@ -20,6 +21,8 @@ enum Endpoint {
         case .resultTXT: "/api/native/tasks/result.txt"
         case .file: "/api/native/tasks/result/file"
         case .reply, .sendReply: "/api/native/tasks/reply"
+        case .controls: "/api/native/tasks/controls"
+        case .controlDecision: "/api/native/tasks/controls/decision"
         }
     }
     func url(origin: String = MonitorAPI.origin) throws -> URL {
@@ -27,7 +30,7 @@ enum Endpoint {
         switch self {
         case let .pairingPoll(id):
             guard MonitorSecurity.matches(id, "[A-Za-z0-9_-]{32}") else { throw MonitorError.invalidRoute }
-        case let .result(task): query = [URLQueryItem(name: "task_id", value: task)]
+        case let .result(task), let .controls(task): query = [URLQueryItem(name: "task_id", value: task)]
         case let .resultTXT(task, result):
             guard MonitorSecurity.matches(result, "[0-9a-f]{64}") else { throw MonitorError.invalidRoute }
             query = [.init(name: "task_id", value: task), .init(name: "result_id", value: result)]

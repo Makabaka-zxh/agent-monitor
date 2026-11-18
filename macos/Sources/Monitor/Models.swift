@@ -138,10 +138,50 @@ struct PendingReply: Codable {
     var text: String
     let createdAt: Date
     var state: String
+    var submittedSelection: SessionModelSelection?
+    var submittedSelectionInvalid: Bool
+
+    init(id: String, taskId: String, text: String, createdAt: Date, state: String,
+         submittedSelection: SessionModelSelection? = nil, submittedSelectionInvalid: Bool = false) {
+        self.id = id
+        self.taskId = taskId
+        self.text = text
+        self.createdAt = createdAt
+        self.state = state
+        self.submittedSelection = submittedSelection
+        self.submittedSelectionInvalid = submittedSelectionInvalid
+            || (submittedSelection.map { !SessionControlPolicy.selectionSnapshot($0) } ?? false)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, taskId, text, createdAt, state, submittedSelection, submittedSelectionInvalid
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        taskId = try c.decode(String.self, forKey: .taskId)
+        text = try c.decode(String.self, forKey: .text)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        state = try c.decode(String.self, forKey: .state)
+        var invalid = (try? c.decodeIfPresent(Bool.self, forKey: .submittedSelectionInvalid)) ?? false
+        if c.contains(.submittedSelection), (try? c.decodeNil(forKey: .submittedSelection)) != true {
+            if let decoded = try? c.decode(SessionModelSelection.self, forKey: .submittedSelection),
+               SessionControlPolicy.selectionSnapshot(decoded) {
+                submittedSelection = decoded
+            } else {
+                submittedSelection = nil
+                invalid = true
+            }
+        } else {
+            submittedSelection = nil
+        }
+        submittedSelectionInvalid = invalid
+    }
+
     var unresolved: Bool { !["succeeded", "failed", "blocked"].contains(state) }
     var mayRetry: Bool {
         let age = Date().timeIntervalSince(createdAt)
-        return state == "not_found" && !text.isEmpty && age >= 0 && age <= 86400
+        return !submittedSelectionInvalid && state == "not_found" && !text.isEmpty && age >= 0 && age <= 86400
     }
 }
 struct PairingSecret: Codable {

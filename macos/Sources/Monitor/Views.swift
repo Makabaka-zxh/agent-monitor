@@ -8,15 +8,18 @@ private enum MonitorPage: String, CaseIterable, Identifiable {
     var title: String { switch self { case .tasks: "任务"; case .devices: "电脑"; case .usage: "用量"; case .account: "我的" } }
     var symbol: String { switch self { case .tasks: "square.stack.3d.up"; case .devices: "desktopcomputer"; case .usage: "chart.bar.xaxis"; case .account: "person.crop.circle" } }
 }
-private struct GlassCard<Content: View>: View {
-    @ViewBuilder let content: Content
+struct GlassCard<Content: View>: View {
+    let content: Content
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
     var body: some View {
         content.padding(22).frame(maxWidth: .infinity, alignment: .leading)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.quaternary, lineWidth: 0.7) }
     }
 }
-private struct BrandIcon: View {
+struct BrandIcon: View {
     let tool: String
     var size: CGFloat = 32
     var body: some View {
@@ -178,6 +181,7 @@ private struct TaskDetailView: View {
     let task: MonitorTask
     @ObservedObject var store: MonitorStore
     @StateObject private var model: TaskDetailModel
+    @State private var showingModelSettings = false
     init(task: MonitorTask, store: MonitorStore) {
         self.task = task
         self.store = store
@@ -195,6 +199,9 @@ private struct TaskDetailView: View {
                     Spacer()
                 }
                 if let preview = task.preview, !preview.isEmpty { Text(preview).foregroundStyle(.secondary).lineLimit(3) }
+                if task.supportsReply {
+                    TaskAttentionSection(model: model, waiting: task.status == "waiting")
+                }
                 GlassCard {
                     VStack(alignment: .leading, spacing: 18) {
                         HStack {
@@ -226,9 +233,25 @@ private struct TaskDetailView: View {
                 if task.supportsReply {
                     GlassCard {
                         VStack(alignment: .leading, spacing: 15) {
-                            Text("继续任务").font(.custom("MiSans-Regular", size: 18)).fontWeight(.semibold)
+                            HStack(spacing: 12) {
+                                Text("继续任务").font(.custom("MiSans-Regular", size: 18)).fontWeight(.semibold)
+                                Spacer()
+                                Text(model.replySettingsSummary)
+                                    .font(.custom("MiSans-Regular", size: 12))
+                                    .foregroundStyle(model.canSendReplySelection ? Color.secondary : Color.orange)
+                                    .lineLimit(1)
+                                Button("模型设置", systemImage: "slider.horizontal.3") {
+                                    showingModelSettings = true
+                                }
+                                .controlSize(.regular)
+                            }
                             TextEditor(text: $model.draft).scrollContentBackground(.hidden).frame(minHeight: 90, maxHeight: 180).disabled(model.unresolved || model.sending)
                                 .overlay(alignment: .topLeading) { if model.draft.isEmpty { Text("告诉它下一步做什么…").foregroundStyle(.tertiary).padding(.top, 1).padding(.leading, 5).allowsHitTesting(false) } }
+                            if !model.unresolved && !model.canSendReplySelection {
+                                Text("模型选项已变化或过期，请在「模型设置」中重新选择或恢复继承电脑设置")
+                                    .font(.custom("MiSans-Regular", size: 13))
+                                    .foregroundStyle(.orange)
+                            }
                             if !model.replyMessage.isEmpty { Text(model.replyMessage).foregroundStyle(.secondary) }
                             HStack { Spacer(); if model.sending { ProgressView().controlSize(.small) }; Button(model.sendTitle) { Task { await model.send() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSend) }
                         }
@@ -238,6 +261,7 @@ private struct TaskDetailView: View {
         }
         .navigationTitle(task.brand)
         .toolbar { ToolbarItem { Button(task.archived ? "取消归档" : "归档", systemImage: "archivebox") { Task { await store.archive(task) } }.disabled(store.mutating) } }
+        .sheet(isPresented: $showingModelSettings) { SessionModelSettingsSheet(model: model) }
         .task { await model.run() }
     }
 }
