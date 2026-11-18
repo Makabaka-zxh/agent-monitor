@@ -48,6 +48,7 @@ QUOTA_TAIL_BYTES = 256 * 1024
 QUOTA_TAIL_BUDGET = 2 * 1024 * 1024
 QUOTA_TAIL_SECONDS = 0.4
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+UUID_LOWER = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 FIELDS = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens")
 BASES = {"own", "independent", "inherited", "unknown"}
 
@@ -57,7 +58,12 @@ def _model(value, tool):
     if not isinstance(value, str) or len(value) > 96:
         return None
     value = value.lower()
-    pattern = r"(?:gpt-[a-z0-9]|o[1-9])[a-z0-9._:-]*" if tool == "codex" else r"claude-[a-z0-9][a-z0-9._:-]*"
+    if tool == "codex":
+        pattern = r"(?:gpt-[a-z0-9]|o[1-9])[a-z0-9._:-]*"
+    elif tool == "antigravity":
+        pattern = r"(?:gemini-[a-z0-9]|claude-[a-z0-9]|gpt-[a-z0-9]|o[1-9])[a-z0-9._:-]*"
+    else:
+        pattern = r"claude-[a-z0-9][a-z0-9._:-]*"
     return value if re.fullmatch(pattern, value) else None
 
 
@@ -153,8 +159,12 @@ def _safe(path, root):
 def _numbers(usage, tool):
     if not isinstance(usage, dict):
         return None
-    keys = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_input_tokens") if tool == "codex" else (
-        "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    if tool == "codex":
+        keys = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_input_tokens")
+    elif tool == "antigravity":
+        keys = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+    else:
+        keys = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
     values = [_int(usage.get(key)) for key in keys]
     if any(key in usage and usage[key] is not None and val is None for key, val in zip(keys, values)):
         return None
@@ -169,6 +179,13 @@ def _numbers(usage, tool):
             return None
         reasoning = _int(usage.get("reasoning_output_tokens"))
         if "reasoning_output_tokens" in usage and reasoning is None or reasoning is not None and reasoning > out:
+            return None
+    elif tool == "antigravity":
+        inp, out, cached, write = values
+        if inp is None or out is None:
+            return None
+        total = (inp + out + cached + (write or 0)) if cached is not None else None
+        if total is not None and total > MAX_TOKENS:
             return None
     else:
         if values[0] is None or values[1] is None:
@@ -409,11 +426,22 @@ class UsageLedger:
                 if entry.is_symlink() or _link(Path(entry.path)):
                     continue
                 if entry.is_dir(follow_symlinks=False):
+                    if tool == "antigravity":
+                        if ((depth == 0 and UUID_LOWER.fullmatch(entry.name))
+                                or (depth == 1 and entry.name == ".system_generated")
+                                or (depth == 2 and entry.name == "logs")):
+                            if len(self._directories) < MAX_DIRECTORIES:
+                                self._directories.append((tool, root, entry.path, depth + 1))
+                            else:
+                                self._stat("discovery_capped")
+                        continue
                     if depth < 24 and len(self._directories) < MAX_DIRECTORIES:
                         self._directories.append((tool, root, entry.path, depth + 1))
                     else:
                         self._stat("discovery_capped")
                 elif entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
+                    if tool == "antigravity" and (depth != 3 or entry.name != "transcript.jsonl"):
+                        continue
                     if file_count >= MAX_FILES:
                         self._stat("discovery_capped")
                         continue
@@ -431,14 +459,14 @@ class UsageLedger:
     def _active_accounting_files(self, now, deadline):
         """Refresh a bounded recent shortlist, without reading transcript tails.
 
-        Discovery can take several cycles over a large log tree. Stat both
-        tools' recent known files in alternation so its cached mtime does not
+        Discovery can take several cycles over a large log tree. Stat each
+        tool's recent known files in alternation so its cached mtime does not
         leave a currently growing transcript behind old replay work.
         """
         candidates = [self.db.execute("""SELECT * FROM usage_files WHERE tool=?
             ORDER BY mtime DESC,path LIMIT ?""", (tool, RECENT_ACCOUNTING_FILES)).fetchall()
-            for tool in ("codex", "claude")]
-        active = {"codex": [], "claude": []}
+            for tool in ("codex", "claude", "antigravity")]
+        active = {"codex": [], "claude": [], "antigravity": []}
         for index in range(max(map(len, candidates), default=0)):
             for rows in candidates:
                 if time.monotonic() >= deadline:
@@ -467,7 +495,7 @@ class UsageLedger:
         return [sorted(rows, key=lambda row: (-row["mtime"], row["path"]))[:ACTIVE_ACCOUNTING_FILES_PER_TOOL]
                 for rows in active.values() if rows]
 
-    def scan(self, codex_home=None, claude_home=None, budget_bytes=8 * 1024 * 1024, now=None):
+    def scan(self, codex_home=None, claude_home=None, budget_bytes=8 * 1024 * 1024, now=None, *, antigravity_home=None):
         """Read at most budget_bytes accounting bytes and two seconds per cycle.
 
         Directory traversal and parsing have separate entry/line/depth caps.
@@ -482,10 +510,19 @@ class UsageLedger:
         now = _now(now)
         if type(budget_bytes) is not int or not 1 <= budget_bytes <= 64 * 1024 * 1024:
             raise ValueError("invalid scan byte budget")
-        codex = Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-        claude = Path(claude_home) if claude_home is not None else Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-        roots = tuple((tool, Path(os.path.abspath(root))) for tool, root in (
-            ("codex", codex / "sessions"), ("codex", codex / "archived_sessions"), ("claude", claude / "projects")))
+        explicit = codex_home is not None or claude_home is not None or antigravity_home is not None
+        raw_roots = []
+        if not explicit or codex_home is not None:
+            codex = Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+            raw_roots.extend((("codex", codex / "sessions"), ("codex", codex / "archived_sessions")))
+        if not explicit or claude_home is not None:
+            claude = Path(claude_home) if claude_home is not None else Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+            raw_roots.append(("claude", claude / "projects"))
+        if not explicit or antigravity_home is not None:
+            antigravity = (Path(antigravity_home) if antigravity_home is not None
+                           else Path(os.environ.get("ANTIGRAVITY_HOME") or (Path.home() / ".gemini" / "antigravity")))
+            raw_roots.append(("antigravity", antigravity / "brain"))
+        roots = tuple((tool, Path(os.path.abspath(root))) for tool, root in raw_roots)
         started = time.monotonic()
         deadline = started + MAX_SCAN_SECONDS
         with self.lock, self.db:
@@ -880,6 +917,28 @@ class UsageLedger:
             if meta.get("counter_key"):
                 event.update({key: meta.get(key) for key in ("counter_key", "anchor_input", "anchor_output", "anchor_at")})
             event["event_key"] = _event_key(event)
+        elif tool == "antigravity":
+            if (record.get("source"), record.get("type")) not in {("MODEL", "PLANNER_RESPONSE"), ("SYSTEM", "CHECKPOINT")}:
+                return
+            has_tokens = any(key in record for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"))
+            if not has_tokens:
+                return
+            stamp = _stamp(record.get("created_at"), now)
+            step_index = _int(record.get("step_index"), 10_000_000)
+            conv_id = (path.parts[-4] if len(path.parts) >= 4 and path.parts[-3:] == (".system_generated", "logs", "transcript.jsonl")
+                       else path.stem)
+            numbers = _numbers(record, "antigravity")
+            if not stamp or step_index is None or not UUID_LOWER.fullmatch(conv_id) or numbers is None or record.get("status") != "DONE":
+                if numbers is None:
+                    self._stat("invalid_usage")
+                return
+            session_key = _hash("antigravity", conv_id)
+            event_key = _hash("antigravity-step-v1", conv_id, record["type"], step_index, stamp,
+                              numbers["input_tokens"], numbers["output_tokens"],
+                              numbers["cached_input_tokens"], numbers["cache_write_tokens"])
+            event = dict(numbers, event_key=event_key, tool="antigravity", session_key=session_key,
+                         occurred_at=stamp, observed_at=_iso(now), final=True, basis="own", started_at=None,
+                         model=_model(record.get("model"), "antigravity"))
         else:
             if record.get("type") != "assistant" or not stamp:
                 return
@@ -983,7 +1042,7 @@ class UsageLedger:
                 if local and not old["conflict"]:
                     self._changed("event", key)
                 return False
-        day = _day(event["occurred_at"]) if event["tool"] == "claude" and event["final"] else None
+        day = _day(event["occurred_at"]) if event["tool"] in {"claude", "antigravity"} and event["final"] else None
         contribution = event["total_tokens"] if day else None
         model = _model(event.get("model"), event["tool"])
         model_conflict = int(bool((old["model_conflict"] if old else 0) or event.get("model_conflict", False)))
@@ -1306,7 +1365,11 @@ class UsageLedger:
             quota_sql = f" AND device_id IN ({placeholders})"
         with self.lock:
             providers = []
-            for tool in ("codex", "claude"):
+            antigravity_known = self.db.execute(
+                "SELECT max(observed_at) FROM usage_events WHERE tool='antigravity'" + scope_sql, scope_args
+            ).fetchone()[0]
+            tools = ("codex", "claude", "antigravity") if antigravity_known else ("codex", "claude")
+            for tool in tools:
                 totals = self.db.execute("""SELECT sum(contribution) AS tokens,count(DISTINCT session_key) AS sessions,
                     max(observed_at) AS observed FROM usage_events WHERE tool=? AND day=? AND occurred_at<=?""" + scope_sql,
                                          (tool, day, _iso(now), *scope_args)).fetchone()
@@ -1369,7 +1432,7 @@ class UsageLedger:
 
     def task_usage(self, tool, source_id, now=None, device_id=None):
         _now(now)
-        if tool not in {"codex", "claude"} or not isinstance(source_id, str):
+        if tool not in {"codex", "claude", "antigravity"} or not isinstance(source_id, str):
             raise ValueError("invalid task identity")
         raw_id = source_id[len(tool) + 1:] if source_id.startswith(tool + ":") else source_id
         key = _hash(tool, raw_id)
@@ -1410,8 +1473,8 @@ class UsageLedger:
                     result.update(observed_at=max(segment["observed_at"] for segment in segments), coverage="partial")
             else:
                 scoped = " AND EXISTS (SELECT 1 FROM usage_sources s WHERE s.event_key=usage_events.event_key AND s.device_id=?)" if device_id is not None else ""
-                rows = self.db.execute("SELECT * FROM usage_events WHERE tool='claude' AND session_key=?" + scoped,
-                                       (key, device_id) if device_id is not None else (key,)).fetchall()
+                rows = self.db.execute("SELECT * FROM usage_events WHERE tool=? AND session_key=?" + scoped,
+                                       (tool, key, device_id) if device_id is not None else (tool, key)).fetchall()
                 if rows:
                     for field in ("total_tokens", *FIELDS):
                         result[field] = sum(row[field] for row in rows) if all(row[field] is not None for row in rows) else None
@@ -1505,7 +1568,7 @@ class UsageLedger:
         if not isinstance(event, dict) or len(event) > 24:
             return None
         tool = event.get("tool")
-        if (not isinstance(tool, str) or tool not in {"codex", "claude"}
+        if (not isinstance(tool, str) or tool not in {"codex", "claude", "antigravity"}
                 or not isinstance(event.get("basis"), str) or event["basis"] not in BASES or type(event.get("final")) is not bool):
             return None
         if any(not isinstance(event.get(k), str) or not HEX64.fullmatch(event[k]) for k in ("event_key", "session_key")):
@@ -1554,8 +1617,17 @@ class UsageLedger:
                 if _int(mi) is None or _int(mo) is None or mi > inp or mo > out:
                     return None
             model_fields.update(model_input_tokens=mi, model_output_tokens=mo)
-        elif total != (inp + out + cached + write if cached is not None and write is not None else None):
-            return None
+        else:
+            if any(event.get(key) is not None for key in (
+                    "counter_key", "anchor_input", "anchor_output", "anchor_at",
+                    "model_input_tokens", "model_output_tokens")):
+                return None
+            if tool == "antigravity":
+                expected = (inp + out + cached + (write or 0)) if cached is not None else None
+                if total != expected or not event["final"]:
+                    return None
+            elif total != (inp + out + cached + write if cached is not None and write is not None else None):
+                return None
         # Strict reconstruction drops arbitrary text, absolute paths and fields.
         return dict(zip((*FIELDS, "total_tokens"), values), tool=tool, session_key=event["session_key"],
                     event_key=event["event_key"], occurred_at=occurred, observed_at=observed, started_at=started,

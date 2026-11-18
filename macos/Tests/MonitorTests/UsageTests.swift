@@ -42,6 +42,16 @@ final class UsageTests: XCTestCase {
         XCTAssertTrue(check.matches(tool: "claude", sourceId: "device:pc"))
         XCTAssertFalse(check.matches(tool: "claude", sourceId: "device:mac"))
         XCTAssertFalse(check.matches(tool: "codex", sourceId: nil))
+        let withAntigravity = try decode(UsageSummary.self, #"""
+        {"day":"2026-09-27","timezone":"Asia/Shanghai","loading":false,"history_included":true,
+         "providers":[{"tool":"antigravity","today_tokens":1280,"session_count":1,"coverage":"partial","quotas":[],
+           "history":{"start_day":"2026-09-27","end_day":"2026-09-27","timezone":"Asia/Shanghai",
+                      "days":[{"day":"2026-09-27","tokens":1280,"coverage":"partial"}]}}]}
+        """#)
+        let ag = try XCTUnwrap(withAntigravity.provider(tool: "antigravity"))
+        XCTAssertEqual(ag.brand, "Antigravity")
+        XCTAssertEqual(ag.todayTokens, 1280)
+        XCTAssertTrue(ag.quotas.isEmpty)
     }
 
     func testInvalidNumericReadingsRemainUnknownRatherThanZero() throws {

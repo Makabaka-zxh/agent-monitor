@@ -344,33 +344,38 @@ def test_remote_cannot_impersonate_other_computer_or_native_user(hub):
     assert hub["native"].get("/api/native/tasks/result", headers=auth, params={"task_id": hub["task_id"]}).status_code == 401
 
 
-def test_antigravity_remote_result_is_opt_in_and_text_only(hub):
+def test_antigravity_remote_result_is_opt_in_and_syncs_deliverables(hub):
     from agent_monitor.remote_agent import AgentConfig, ResultSync, heartbeat
 
     store = hub["store"]
     remote = store.register(store.create_pairing()["code"], "Antigravity fixture", "Windows")
     auth = {"Authorization": "Bearer " + remote["token"]}
     source = "antigravity:52c5d365-f107-45ed-b82e-d2c9d4738b67"
-    payload = upload_payload(source=source)
-    payload.update(tool="antigravity", text="Verified final response")
+    body = b"# Antigravity Audit Report\nAll checks passed.\n"
+    payload = upload_payload(body, source=source)
+    payload.update(tool="antigravity", text="Verified final response with report.md")
     payload["result_id"] = sha256(("antigravity\n" + payload["completed_at"] + "\n" + payload["text"]).encode())
-    local = {**payload, "files": []}
+    file_meta = payload["files"][0]
     task = {"id": source, "tool": "antigravity", "title": "Antigravity fixture", "status": "idle",
             "updated_at": payload["completed_at"], "final_result_id": payload["result_id"]}
     snapshot = {"tasks": [task], "sources": []}
     requests = []
 
     class Client:
-        def post(self, path, body, token=None):
+        def post(self, path, req_body, token=None):
             requests.append(path)
-            response = hub["native"].post(path, headers={"Authorization": "Bearer " + token}, json=body)
+            response = hub["native"].post(path, headers={"Authorization": "Bearer " + token}, json=req_body)
             assert response.status_code == 200, response.text
             return response.json()
 
     class Results:
         def read(self, source_id):
             assert source_id == source
-            return local
+            return payload
+
+        def file(self, source_id, result_id, file_id):
+            assert (source_id, result_id, file_id) == (source, payload["result_id"], file_meta["id"])
+            return body, file_meta
 
     config = AgentConfig(ORIGIN, remote["device_id"], remote["token"], sync_output=True)
     sync = ResultSync(Results())
@@ -379,13 +384,18 @@ def test_antigravity_remote_result_is_opt_in_and_text_only(hub):
     assert heartbeat(Client(), config, snapshot) and config.antigravity_v1
     assert heartbeat(Client(), config, snapshot)
     store.update_preferences({"sync_output": False})
-    assert hub["native"].post("/api/agent/results", headers=auth, json=local).status_code == 409
+    assert hub["native"].post("/api/agent/results", headers=auth, json=payload).status_code == 409
     store.update_preferences({"sync_output": True})
-    assert hub["native"].post("/api/agent/results", headers=auth, json=payload).status_code == 422
     sync.sync(Client(), config, snapshot)
+    task_id = remote["device_id"] + ":" + source
     view = hub["native"].get("/api/native/tasks/result", headers=hub["auth"],
-                            params={"task_id": remote["device_id"] + ":" + source}).json()
-    assert view["available"] and view["text"] == payload["text"] and view["files"] == []
+                             params={"task_id": task_id}).json()
+    assert view["available"] and view["text"] == payload["text"]
+    assert len(view["files"]) == 1 and view["files"][0]["ready"] is True
+    downloaded = hub["native"].get("/api/native/tasks/result/file", headers=hub["auth"],
+                                   params={"task_id": task_id, "result_id": payload["result_id"],
+                                           "file_id": file_meta["id"]})
+    assert downloaded.status_code == 200 and downloaded.content == body
 
 
 @pytest.mark.parametrize("change", [{"result_id": "a" * 64}, {"files": [{"id": "f" * 64, "name": "../secret.txt", "size": 1, "mime": "text/plain", "sha256": "a" * 64}]}, {"path": "/private"}])

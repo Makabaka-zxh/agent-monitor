@@ -108,6 +108,12 @@ public final class NativeUsagePresentationTest {
         equal("Claude Opus 4.6", NativeUsageFormat.modelName("claude-opus-4.6"));
         equal("Claude Haiku 4.5", NativeUsageFormat.modelName("claude-haiku-4-5"));
         equal("Claude Opus", NativeUsageFormat.modelName("claude-opus"));
+        equal("Gemini 3.8 Flash (Low)", NativeUsageFormat.modelName("gemini-3.8-flash-low"));
+        equal("Gemini 4 Hydrogen (XHigh)", NativeUsageFormat.modelName("gemini-4-hydrogen-xhigh"));
+        equal("Gemini Pro Orchestrator", NativeUsageFormat.modelName("gemini-pro-orchestrator"));
+        equal("GPT-OSS 120B (Medium)", NativeUsageFormat.modelName("gpt-oss-120b-medium"));
+        equal("gemini-future-unknown-tier", NativeUsageFormat.modelName("gemini-future-unknown-tier"));
+        equal("Google · 2026-05-01", NativeUsageFormat.modelVariant("google/gemini-2.5-pro-2026-05-01"));
         equal("Sonnet", NativeUsageFormat.modelName("Sonnet"));
         equal("全部模型", NativeUsageFormat.modelName("全部模型"));
         equal("partner/chat-model-x", NativeUsageFormat.modelName("partner/chat-model-x"));

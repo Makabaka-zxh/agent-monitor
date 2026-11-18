@@ -136,7 +136,7 @@ class DesktopWindow:
             box = tk.Frame(self.content, bg=CARD, padx=inset, pady=9 if self.compact else 19)
             box.pack(fill="x", padx=12 if self.compact else 18, pady=(0, 8 if self.compact else 14))
             box.bind("<Configure>", lambda e, panel=box, margin=inset * 2: self.wrap_card(panel, e.width, margin))
-            color = ACCENT if card["tool"] == "codex" else "#9b6046"
+            color = ACCENT if card["tool"] == "codex" else "#3b6fd8" if card["tool"] == "antigravity" else "#9b6046"
             heading = tk.Frame(box, bg=CARD) if self.compact else box
             if self.compact:
                 heading.pack(fill="x")

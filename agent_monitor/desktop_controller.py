@@ -217,7 +217,7 @@ def present_usage(summary, *, now=None):
     if not isinstance(summary, dict) or not isinstance(summary.get("providers"), list):
         return []
     cards = []
-    for tool in ("codex", "claude"):
+    for tool in ("codex", "claude", "antigravity"):
         provider = next((p for p in summary["providers"] if isinstance(p, dict) and p.get("tool") == tool), None)
         if provider is None:
             continue
@@ -263,7 +263,8 @@ def present_usage(summary, *, now=None):
                 if shares and unknown:
                     shares.append({"label": "未识别模型", "tokens": unknown, "percent": unknown * 100 / denominator})
         if total is not None or quotas or shares:
-            cards.append({"tool": tool, "title": "Codex" if tool == "codex" else "Claude Code",
+            title = "Codex" if tool == "codex" else "Antigravity" if tool == "antigravity" else "Claude Code"
+            cards.append({"tool": tool, "title": title,
                           "today_tokens": total, "quotas": quotas, "models": shares})
     return cards
 

@@ -231,25 +231,53 @@ def _fingerprint(info) -> tuple:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
-def referenced_paths(text: str, root: Path) -> list[Path]:
+def _normalize_candidate_path(raw: str, *, allow_file_uri: bool = False) -> str | None:
+    value = raw.strip().strip("<>")
+    if not value or "\x00" in value:
+        return None
+    if allow_file_uri and value.lower().startswith("file://"):
+        parts = urlsplit(value)
+        if parts.scheme.lower() != "file" or parts.netloc.lower() not in ("", "localhost") or parts.query:
+            return None
+        decoded = unquote(parts.path)
+        if not decoded or "\x00" in decoded:
+            return None
+        if os.name == "nt":
+            if not re.match(r"^/[a-zA-Z]:/.+", decoded):
+                return None
+            value = decoded[1:]
+        else:
+            if not decoded.startswith("/") or decoded.startswith("//") or re.match(r"^/[a-zA-Z]:(?:/|$)", decoded):
+                return None
+            value = decoded
+        value = re.sub(r":\d+(?::\d+)?$", "", value)
+    else:
+        value = unquote(value)
+        # Linux and Windows local paths; never file://, network shares or URLs.
+        if not value or value.startswith(("//", "\\\\")) or "://" in value or "\x00" in value:
+            return None
+        value = re.sub(r":\d+(?::\d+)?$", "", value)
+        value = value.split("#", 1)[0]
+    if any(part == ".." for part in re.split(r"[/\\]", value)):
+        return None
+    return value
+
+
+def referenced_paths(text: str, root: Path, *, allow_file_uri: bool = False) -> list[Path]:
     candidates = [match.group(1) for match in re.finditer(r"\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)", text)]
     candidates += [match.group(1) for match in re.finditer(r"`([^`\n]+)`", text)]
     paths = []
-    for value in candidates[:100]:
-        value = unquote(value.strip().strip("<>"))
-        # Linux and Windows local paths; never file://, network shares or URLs.
-        if not value or value.startswith(("//", "\\\\")) or "://" in value or "\x00" in value:
-            continue
-        value = re.sub(r":\d+(?::\d+)?$", "", value)
-        value = value.split("#", 1)[0]
-        if any(part == ".." for part in re.split(r"[/\\]", value)):
+    abs_root = Path(os.path.abspath(root))
+    for raw in candidates[:100]:
+        value = _normalize_candidate_path(raw, allow_file_uri=allow_file_uri)
+        if not value:
             continue
         candidate = Path(value)
         if not candidate.is_absolute():
-            candidate = root / candidate
+            candidate = abs_root / candidate
         candidate = Path(os.path.abspath(candidate))
         try:
-            relative = candidate.relative_to(Path(os.path.abspath(root)))
+            relative = candidate.relative_to(abs_root)
         except ValueError:
             continue
         if candidate.suffix.lower() not in DELIVERABLE_TYPES or not all(_safe_name(part) for part in relative.parts):
@@ -278,29 +306,105 @@ def _safe_archive(data: bytes, suffix: str) -> bool:
         return False
 
 
+def _read_verified_bytes(path: Path, *, min_mtime: float, max_mtime: float, expected_sha: str | None = None) -> bytes:
+    if not _unlinked(path):
+        raise ValueError()
+    info = path.stat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_FILE_BYTES
+            or info.st_mtime < min_mtime or info.st_mtime > max_mtime):
+        raise ValueError()
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        if _fingerprint(os.fstat(handle.fileno())) != _fingerprint(info):
+            raise ValueError()
+        data = handle.read(MAX_FILE_BYTES + 1)
+        if _fingerprint(os.fstat(handle.fileno())) != _fingerprint(info):
+            raise ValueError()
+    if len(data) != info.st_size or not _unlinked(path) or _fingerprint(path.stat()) != _fingerprint(info):
+        raise ValueError()
+    if expected_sha and sha256(data) != expected_sha or not _safe_archive(data, path.suffix.lower()):
+        raise ValueError()
+    return data
+
+
+def _read_small_json(path: Path, limit: int = 16384) -> dict | None:
+    try:
+        if not _unlinked(path):
+            return None
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            if _fingerprint(os.fstat(handle.fileno())) != _fingerprint(info):
+                return None
+            raw = handle.read(limit + 1)
+        if len(raw) != info.st_size or not _unlinked(path):
+            return None
+        parsed = json.loads(raw.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else None
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return None
+
+
+def _antigravity_candidates(final: dict, brain_dir: Path | None,
+                            workspace_dir: Path | None) -> list[tuple[Path, float, float]]:
+    ended = collector._timestamp(final.get("completed_at"))
+    if not ended:
+        return []
+    started = collector._timestamp(final.get("started_at"))
+    seen: set[Path] = set()
+    candidates: list[tuple[Path, float, float]] = []
+
+    def add(path: Path, lo: float, hi: float) -> None:
+        if path not in seen and len(candidates) < MAX_FILES:
+            seen.add(path)
+            candidates.append((path, lo, hi))
+
+    if workspace_dir is not None and started is not None and workspace_dir.is_dir() and _unlinked(workspace_dir):
+        for path in referenced_paths(final["text"], workspace_dir, allow_file_uri=True):
+            add(path, started.timestamp() - 2, ended.timestamp() + 5)
+
+    if brain_dir is not None and brain_dir.is_dir() and _unlinked(brain_dir):
+        abs_brain = Path(os.path.abspath(brain_dir))
+        for path in referenced_paths(final["text"], abs_brain, allow_file_uri=True):
+            if path.parent == abs_brain and not path.name.lower().endswith(".metadata.json"):
+                add(path, 946684800.0, ended.timestamp() + 5)
+        if started is not None:
+            try:
+                with os.scandir(abs_brain) as it:
+                    entries = sorted(
+                        (e for _, e in zip(range(128), it)
+                         if e.name.lower().endswith(".metadata.json") and not e.is_symlink()
+                         and e.is_file(follow_symlinks=False)),
+                        key=lambda item: item.name,
+                    )
+            except OSError:
+                entries = []
+            for entry in entries[:64]:
+                meta = _read_small_json(Path(entry.path))
+                if not meta or meta.get("userFacing") is not True:
+                    continue
+                artifact_name = entry.name[:-len(".metadata.json")]
+                if (not _safe_name(artifact_name) or artifact_name.lower().endswith(".metadata.json")
+                        or Path(artifact_name).suffix.lower() not in DELIVERABLE_TYPES):
+                    continue
+                candidate = Path(os.path.abspath(abs_brain / artifact_name))
+                if candidate.parent == abs_brain:
+                    add(candidate, started.timestamp() - 2, ended.timestamp() + 5)
+    return candidates
+
+
 def read_deliverable(path: Path, session: LocalSession, final: dict, expected_sha: str | None = None) -> bytes:
     try:
         if path not in referenced_paths(final["text"], session.cwd) or not _unlinked(path):
             raise ValueError()
-        info = path.stat()
         started = collector._timestamp(final.get("started_at"))
         ended = collector._timestamp(final.get("completed_at"))
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_FILE_BYTES
-                or not started or not ended or info.st_mtime < started.timestamp() - 2
-                or info.st_mtime > ended.timestamp() + 5):
+        if not started or not ended:
             raise ValueError()
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(descriptor, "rb") as handle:
-            if _fingerprint(os.fstat(handle.fileno())) != _fingerprint(info):
-                raise ValueError()
-            data = handle.read(MAX_FILE_BYTES + 1)
-            if _fingerprint(os.fstat(handle.fileno())) != _fingerprint(info):
-                raise ValueError()
-        if len(data) != info.st_size or not _unlinked(path) or _fingerprint(path.stat()) != _fingerprint(info):
-            raise ValueError()
-        if expected_sha and sha256(data) != expected_sha or not _safe_archive(data, path.suffix.lower()):
-            raise ValueError()
-        return data
+        return _read_verified_bytes(path, min_mtime=started.timestamp() - 2,
+                                    max_mtime=ended.timestamp() + 5, expected_sha=expected_sha)
     except (OSError, ValueError):
         raise HTTPException(409, "文件已变化或不适合下载，请在电脑确认后重新生成") from None
 
@@ -318,10 +422,31 @@ class LocalResults:
         return resolve_local_session(source_id, self.codex_home, self.claude_home,
                                      antigravity_home=self.antigravity_home, require_workspace=False)
 
+    def _read_antigravity(self, wanted: str) -> dict | None:
+        from .antigravity import read_antigravity_result, resolve_antigravity_deliverable_roots
+
+        final = read_antigravity_result(wanted, base=self.antigravity_home, include_turn_start=True)
+        if not final:
+            return None
+        final = dict(final, files=[], _paths={}, _antigravity_id=wanted)
+        roots = resolve_antigravity_deliverable_roots(wanted, base=self.antigravity_home)
+        if roots is not None:
+            for path, lo, hi in _antigravity_candidates(final, *roots):
+                try:
+                    content = _read_verified_bytes(path, min_mtime=lo, max_mtime=hi)
+                except (OSError, ValueError):
+                    continue
+                digest = sha256(content)
+                identity = sha256((final["result_id"] + "\n" + str(path) + "\n" + digest).encode())
+                final["files"].append({"id": identity, "name": path.name, "size": len(content),
+                                       "mime": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                                       "sha256": digest, "ready": True})
+                final["_paths"][identity] = path
+        return final
+
     def read(self, source_id: str) -> dict | None:
         if source_id.startswith("antigravity:"):
-            from .antigravity import read_antigravity_result
-            return read_antigravity_result(source_id.removeprefix("antigravity:"), base=self.antigravity_home)
+            return self._read_antigravity(source_id.removeprefix("antigravity:"))
         session = self.resolve(source_id)
         if not session:
             return None
@@ -374,7 +499,20 @@ class LocalResults:
         metadata = next((file for file in final["files"] if file["id"] == file_id), None)
         if not metadata:
             raise HTTPException(404, "文件不存在")
-        content = read_deliverable(final["_paths"][file_id], final["_session"], final, metadata["sha256"])
+        target = final["_paths"][file_id]
+        if source_id.startswith("antigravity:"):
+            from .antigravity import resolve_antigravity_deliverable_roots
+            roots = resolve_antigravity_deliverable_roots(final["_antigravity_id"], base=self.antigravity_home)
+            allowed = {p: (lo, hi) for p, lo, hi in (_antigravity_candidates(final, *roots) if roots else ())}
+            if target not in allowed:
+                raise HTTPException(409, "文件已变化或不适合下载，请在电脑确认后重新生成")
+            lo, hi = allowed[target]
+            try:
+                content = _read_verified_bytes(target, min_mtime=lo, max_mtime=hi, expected_sha=metadata["sha256"])
+            except (OSError, ValueError):
+                raise HTTPException(409, "文件已变化或不适合下载，请在电脑确认后重新生成") from None
+            return content, metadata
+        content = read_deliverable(target, final["_session"], final, metadata["sha256"])
         return content, metadata
 
 
@@ -539,8 +677,6 @@ class TaskResults:
         _, source, row = self._task(device + ":" + payload.source_id)
         if row["local"] or json.loads(row["payload"])["tool"] != payload.tool:
             raise HTTPException(403, "任务不属于这台电脑")
-        if payload.tool == "antigravity" and payload.files:
-            raise HTTPException(422, "Antigravity 只同步最终回复文本")
         expected = sha256((payload.tool + "\n" + payload.completed_at + "\n" + payload.text).encode())
         if expected != payload.result_id or len({file.id for file in payload.files}) != len(payload.files):
             raise HTTPException(422, "结果校验失败")

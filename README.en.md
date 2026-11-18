@@ -2,7 +2,7 @@
 
 <img src="assets/identity/monitor-brand.png" width="128" height="128" alt="Monitor application mark">
 
-A self-hosted companion for Codex, Claude Code and Antigravity desktop tasks across multiple computers. View tasks, available final responses, attachments and usage information from a native Android app, a SwiftUI macOS client or a browser, and continue authorized sessions from mobile. [Antigravity desktop support](docs/CONNECTORS.md#antigravity-桌面会话) covers status, verified final text, and `agy acp` continuation, model/thinking-level selection, form elicitation and single-turn approvals when the official `agy` CLI is installed on that computer.
+A self-hosted companion for Codex, Claude Code and Antigravity desktop tasks across multiple computers. View tasks, available final responses, attachments and usage information from a native Android app, a SwiftUI macOS client or a browser, and continue authorized sessions from mobile. [Antigravity desktop support](docs/CONNECTORS.md#antigravity-桌面会话) covers status, verified final text and deliverables, observed local token accounting, and `agy acp` continuation, model/thinking-level selection, form elicitation and single-turn approvals when the official `agy` CLI is installed on that computer.
 
 [中文介绍](README.md) · [Android releases](https://github.com/Makabaka-zxh/agent-monitor/releases/latest)
 

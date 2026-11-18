@@ -1,0 +1,276 @@
+"""Synthetic tests for Antigravity usage accounting and verified deliverables."""
+from __future__ import annotations
+
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import sqlite3
+from unittest.mock import MagicMock
+from urllib.parse import quote
+import zipfile
+
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+import pytest
+
+from agent_monitor.desktop_controller import present_usage
+from agent_monitor.server import create_app
+from agent_monitor.task_results import LocalResults
+from agent_monitor.usage_ledger import UsageLedger, _iso
+from agent_monitor.usage_service import UsageService
+
+SESSION = "52c5d365-f107-45ed-b82e-d2c9d4738b67"
+SUBAGENT = "7a1d8290-33aa-44e4-98d4-0f42d4c25e11"
+NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+SCHEMA = """
+CREATE TABLE conversation_summaries (
+ conversation_id text PRIMARY KEY, title text, last_modified_time text, workspace_uris text,
+ status text, source text, parent_conversation_id text, nesting_depth integer,
+ not_fully_idle numeric, killed numeric, step_count integer, last_user_input_step_index integer,
+ preview text, raw_summary blob
+)
+"""
+
+
+def _file_uri(path: Path) -> str:
+    posix = path.resolve().as_posix()
+    return ("file:///" + quote(posix, safe="/:") if os.name == "nt"
+            else "file://" + quote(posix, safe="/"))
+
+
+def _index_db(base: Path, *, workspace_uris: str, step_count: int = 2, user_step: int = 0,
+              updated_at: str = "2026-11-18T11:59:30Z") -> Path:
+    db = base / "conversation_summaries.db"
+    row = (
+        SESSION, "Synthetic Antigravity Task", updated_at, workspace_uris,
+        "CASCADE_RUN_STATUS_IDLE", "", "", 0, 0, 0, step_count, user_step,
+        "private preview", b"private blob",
+    )
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(SCHEMA)
+        conn.execute("INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+    return db
+
+
+def _write_transcript(base: Path, session_id: str, records: list[dict], *, filename: str = "transcript.jsonl") -> Path:
+    path = base / "brain" / session_id / ".system_generated" / "logs" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join((json.dumps(r, ensure_ascii=False) + "\n").encode("utf-8") for r in records))
+    return path
+
+
+def test_antigravity_usage_ledger_scans_only_canonical_transcripts_and_handles_retries(tmp_path):
+    ag_home = tmp_path / "antigravity"
+    # Main session with retry at step_index=1 + checkpoint step + model attribution + unknown model scrubbing.
+    main_steps = [
+        {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+         "created_at": _iso(NOW - timedelta(minutes=10)), "content": "SECRET USER PROMPT"},
+        {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+         "created_at": _iso(NOW - timedelta(minutes=9)), "model": "gemini-3.8-flash-low",
+         "input_tokens": 1000, "cache_read_tokens": 4000, "output_tokens": 200,
+         "content": "SECRET PLANNER TEXT", "thinking": "SECRET THINKING"},
+        # Retried step_index=1 at a later timestamp must NOT conflict or drop tokens.
+        {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+         "created_at": _iso(NOW - timedelta(minutes=8)), "model": "gemini-3.8-flash-low",
+         "input_tokens": 900, "cache_read_tokens": 4100, "output_tokens": 250,
+         "content": "RETRIED PLANNER TEXT"},
+        # Context compaction checkpoint LLM call.
+        {"step_index": 2, "source": "SYSTEM", "type": "CHECKPOINT", "status": "DONE",
+         "created_at": _iso(NOW - timedelta(minutes=7)),
+         "input_tokens": 300, "cache_read_tokens": 5000, "output_tokens": 700},
+        # Unrecognized model string is scrubbed to None (unknown_model_tokens), never leaked.
+        {"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+         "created_at": _iso(NOW - timedelta(minutes=6)), "model": "PRIVATE / CUSTOM / LABEL",
+         "input_tokens": 100, "cache_read_tokens": 200, "output_tokens": 50},
+        # Non-DONE step must be ignored.
+        {"step_index": 4, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "RUNNING",
+         "created_at": _iso(NOW - timedelta(minutes=5)),
+         "input_tokens": 9999, "cache_read_tokens": 0, "output_tokens": 9999},
+    ]
+    _write_transcript(ag_home, SESSION, main_steps, filename="transcript.jsonl")
+    # Duplicate full transcript, scratch jsonl, and non-UUID directory must be ignored completely.
+    _write_transcript(ag_home, SESSION, main_steps, filename="transcript_full.jsonl")
+    scratch = ag_home / "brain" / SESSION / "scratch" / "noise.jsonl"
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text(json.dumps(main_steps[1]) + "\n", encoding="utf-8")
+    _write_transcript(ag_home, "not-a-uuid", main_steps, filename="transcript.jsonl")
+
+    # Subagent conversation contributes to provider daily total once, while keeping main own_session separate.
+    _write_transcript(ag_home, SUBAGENT, [
+        {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+         "created_at": _iso(NOW - timedelta(minutes=4)), "model": "gpt-oss-120b-medium",
+         "input_tokens": 500, "cache_read_tokens": 500, "output_tokens": 100},
+    ])
+
+    ledger = UsageLedger(tmp_path / "usage.sqlite3")
+    try:
+        report = ledger.scan(antigravity_home=ag_home, now=NOW)
+        assert report["files_discovered"] == 2
+        # Rescanning does not double count.
+        ledger.scan(antigravity_home=ag_home, now=NOW)
+
+        summary = ledger.summary(now=NOW)
+        raw_json = json.dumps(summary, ensure_ascii=False)
+        for secret in ("SECRET USER PROMPT", "SECRET PLANNER TEXT", "SECRET THINKING", "PRIVATE / CUSTOM / LABEL"):
+            assert secret not in raw_json
+
+        provider = next(p for p in summary["providers"] if p["tool"] == "antigravity")
+        # Main: (1000+4000+200)=5200 + (900+4100+250)=5250 + (300+5000+700)=6000 + (100+200+50)=350 = 16800
+        # Subagent: (500+500+100)=1100 -> Total = 17900 across 2 sessions.
+        assert provider["today_tokens"] == 17900
+        assert provider["session_count"] == 2
+        assert provider["quotas"] == []
+        today_entry = provider["history"]["days"][-1]
+        assert today_entry["tokens"] == 17900
+        assert today_entry["models"] == [
+            {"model": "gemini-3.8-flash-low", "tokens": 10450},
+            {"model": "gpt-oss-120b-medium", "tokens": 1100},
+        ]
+        assert today_entry["unknown_model_tokens"] == 6350
+
+        own = ledger.task_usage("antigravity", f"antigravity:{SESSION}", now=NOW)
+        assert own["total_tokens"] == 16800
+        assert own["input_tokens"] == 2300
+        assert own["output_tokens"] == 1200
+        assert own["cached_input_tokens"] == 13300
+        assert own["cache_write_tokens"] is None
+        assert own["coverage"] == "partial"
+
+        cards = present_usage(summary, now=NOW.timestamp())
+        ag_card = next(c for c in cards if c["tool"] == "antigravity")
+        assert ag_card["title"] == "Antigravity" and ag_card["today_tokens"] == 17900
+
+        # Export v2 wire batch and ingest into a fresh Hub via /api/agent/usage.
+        batch = ledger.export_batch()
+        assert batch["version"] == 2 and len(batch["events"]) == 5
+        app = create_app(tmp_path / "hub", collect_local=False)
+        with TestClient(app) as client:
+            reg = app.state.store.register(app.state.store.create_pairing()["code"], "Mac mini", "macOS")
+            headers = {"Authorization": "Bearer " + reg["token"]}
+            resp = client.post("/api/agent/usage", headers=headers, json=batch)
+            assert resp.status_code == 200
+            assert resp.json() == {"version": 2, "accepted": 5, "rejected": 0}
+            hub_ag = next(p for p in app.state.usage.ledger.summary(NOW, [reg["device_id"]])["providers"]
+                          if p["tool"] == "antigravity")
+            assert hub_ag["today_tokens"] == 17900
+    finally:
+        ledger.close()
+
+
+def test_usage_service_enriches_antigravity_tasks_without_error(tmp_path):
+    store = MagicMock()
+    store.snapshot.return_value = {
+        "devices": [{"id": "pc-local", "name": "Local", "local": True}],
+        "tasks": [{"id": f"pc-local:antigravity:{SESSION}", "device_id": "pc-local", "tool": "antigravity"}],
+    }
+    service = UsageService(tmp_path, store, enabled=False)
+    try:
+        service.refresh()
+        enriched = service.enrich(store.snapshot.return_value)
+        assert enriched["tasks"][0]["usage"]["tool"] == "antigravity"
+        assert enriched["tasks"][0]["usage"]["coverage"] == "unavailable"
+    finally:
+        service.close()
+
+
+def test_antigravity_local_deliverables_workspace_and_brain_artifacts_with_strict_boundaries(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_monitor.collector.utc_now", lambda: NOW)
+    ag_home = tmp_path / "antigravity"
+    workspace = tmp_path / "workspace"
+    (workspace / "docs").mkdir(parents=True)
+
+    turn_start = NOW - timedelta(seconds=40)
+    turn_end = NOW - timedelta(seconds=10)
+    old_time = (NOW - timedelta(hours=2)).timestamp()
+    in_turn_time = (NOW - timedelta(seconds=20)).timestamp()
+
+    # 1. Workspace deliverable created during the turn and linked via file:// URI + line fragment.
+    ws_report = workspace / "docs" / "audit-report.md"
+    ws_report.write_bytes(b"# Workspace Deliverable\n")
+    os.utime(ws_report, (in_turn_time, in_turn_time))
+
+    # 2. Pre-existing untouched workspace source file cited in prose -> MUST NOT be attached.
+    old_source = workspace / "existing.py"
+    old_source.write_text("print('untouched')\n", encoding="utf-8")
+    os.utime(old_source, (old_time, old_time))
+
+    # 3. Brain artifact explicitly linked via file:// URI.
+    brain_dir = ag_home / "brain" / SESSION
+    brain_dir.mkdir(parents=True)
+    brain_chart = brain_dir / "architecture.png"
+    brain_chart.write_bytes(b"\x89PNG\r\n\x1a\nsynthetic")
+    os.utime(brain_chart, (old_time, old_time))  # Created in an earlier turn of same session, linked in final answer.
+
+    # 4. Unlinked brain artifact with userFacing: true created in this turn -> MUST be attached.
+    brain_plan = brain_dir / "implementation_plan.md"
+    brain_plan.write_bytes(b"# Implementation Plan\n")
+    os.utime(brain_plan, (in_turn_time, in_turn_time))
+    (brain_dir / "implementation_plan.md.metadata.json").write_text(
+        json.dumps({"summary": "Plan", "userFacing": True}), encoding="utf-8"
+    )
+
+    # 5. Forbidden / non-deliverable files that MUST NEVER be exposed:
+    # - userFacing: false unlinked file
+    hidden_art = brain_dir / "internal_notes.md"
+    hidden_art.write_text("internal", encoding="utf-8")
+    os.utime(hidden_art, (in_turn_time, in_turn_time))
+    (brain_dir / "internal_notes.md.metadata.json").write_text(
+        json.dumps({"summary": "Internal", "userFacing": False}), encoding="utf-8"
+    )
+    # - scratch subdirectory file even if linked
+    scratch_file = brain_dir / "scratch" / "temp.md"
+    scratch_file.parent.mkdir(parents=True)
+    scratch_file.write_text("scratch", encoding="utf-8")
+    os.utime(scratch_file, (in_turn_time, in_turn_time))
+    # - outside workspace file linked via file://
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("outside", encoding="utf-8")
+    os.utime(outside, (in_turn_time, in_turn_time))
+    # - unsafe zip with traversal inside workspace
+    bad_zip = workspace / "bad.zip"
+    with zipfile.ZipFile(bad_zip, "w") as zf:
+        zf.writestr("../escape.txt", "nope")
+    os.utime(bad_zip, (in_turn_time, in_turn_time))
+
+    answer_text = "\n".join([
+        f"报告已生成：[audit-report.md]({_file_uri(ws_report)}#L1-L5)",
+        f"参考旧代码：[existing.py]({_file_uri(old_source)}#L1)",
+        f"架构图：[architecture.png]({_file_uri(brain_chart)})",
+        f"草稿（不应暴露）：[temp.md]({_file_uri(scratch_file)})",
+        f"外部文件（不应暴露）：[outside]({_file_uri(outside)})",
+        f"远程共享（不应暴露）：[unc](file://evil-server/share/audit-report.md)",
+        f"危险压缩包（不应暴露）：[bad.zip]({_file_uri(bad_zip)})",
+    ])
+
+    _index_db(ag_home, workspace_uris=json.dumps([_file_uri(workspace)]), step_count=2, user_step=0,
+              updated_at=_iso(turn_end))
+    _write_transcript(ag_home, SESSION, [
+        {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+         "created_at": _iso(turn_start), "content": "Generate report and plan."},
+        {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+         "created_at": _iso(turn_end), "content": answer_text},
+    ])
+
+    results = LocalResults(antigravity_home=ag_home)
+    source_id = f"antigravity:{SESSION}"
+    final = results.read(source_id)
+    assert final is not None
+    names = [f["name"] for f in final["files"]]
+    assert names == ["audit-report.md", "architecture.png", "implementation_plan.md"]
+
+    # Every exposed file downloads cleanly with exact bytes.
+    by_name = {f["name"]: f for f in final["files"]}
+    raw_ws, meta_ws = results.file(source_id, final["result_id"], by_name["audit-report.md"]["id"])
+    assert raw_ws == b"# Workspace Deliverable\n" and meta_ws["name"] == "audit-report.md"
+    raw_plan, _ = results.file(source_id, final["result_id"], by_name["implementation_plan.md"]["id"])
+    assert raw_plan == b"# Implementation Plan\n"
+
+    # Mutating a file after final completion triggers HTTP 409 fail-closed rejection on download.
+    old_file_id = by_name["audit-report.md"]["id"]
+    ws_report.write_text("# Tampered after completion\n", encoding="utf-8")
+    os.utime(ws_report, (NOW.timestamp() + 30, NOW.timestamp() + 30))
+    with pytest.raises(HTTPException) as exc:
+        results.file(source_id, final["result_id"], old_file_id)
+    assert exc.value.status_code in (404, 409)

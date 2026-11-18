@@ -19,6 +19,12 @@ public final class NativeUsageFormat {
     private static final Pattern GPT = Pattern.compile("(?:openai/)?(gpt-[0-9]+(?:\\.[0-9]+)?o?|o[1-9][0-9]*)"
             + "((?:-(?:codex|spark|pro|mini|nano|max|turbo|astra|sol|luna|terra))*)(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern GPT_OSS = Pattern.compile("(?:openai/)?gpt-oss-([0-9]+b)(?:-(low|medium|high|xhigh))?",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern GEMINI = Pattern.compile("(?:google/)?gemini(?:-([0-9]+(?:[.-][0-9]+)?))?"
+            + "((?:-(?:pro|flash|lite|ultra|nano|carbon|hydrogen|argon|orchestrator|thinking|exp))+)"
+            + "(?:-(low|medium|high|xhigh))?(?:-(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest))?",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern DATED_ID = Pattern.compile(".*-([0-9]{4})-?([0-9]{2})-?([0-9]{2})$");
     private NativeUsageFormat() { }
 
@@ -32,6 +38,19 @@ public final class NativeUsageFormat {
         }
         Matcher early = EARLY_CLAUDE.matcher(value);
         if (early.matches()) return "Claude " + early.group(1).replace('-', '.') + " " + title(early.group(2));
+        Matcher gemini = GEMINI.matcher(value);
+        if (gemini.matches()) {
+            StringBuilder label = new StringBuilder("Gemini");
+            if (gemini.group(1) != null) label.append(' ').append(gemini.group(1).replace('-', '.'));
+            for (String word : gemini.group(2).substring(1).split("-")) label.append(' ').append(title(word));
+            if (gemini.group(3) != null) label.append(" (").append(effortLabel(gemini.group(3))).append(')');
+            return label.toString();
+        }
+        Matcher gptOss = GPT_OSS.matcher(value);
+        if (gptOss.matches()) {
+            String base = "GPT-OSS " + gptOss.group(1).toUpperCase(Locale.ROOT);
+            return gptOss.group(2) == null ? base : base + " (" + effortLabel(gptOss.group(2)) + ")";
+        }
         Matcher gpt = GPT.matcher(value);
         if (!gpt.matches()) return value;
         String base = gpt.group(1).toLowerCase(Locale.ROOT);
@@ -52,6 +71,9 @@ public final class NativeUsageFormat {
     private static String title(String token) {
         return token.substring(0, 1).toUpperCase(Locale.ROOT) + token.substring(1).toLowerCase(Locale.ROOT);
     }
+    private static String effortLabel(String effort) {
+        return "xhigh".equalsIgnoreCase(effort) ? "XHigh" : title(effort);
+    }
     /** A short version note for otherwise identical product labels. */
     public static String modelVariant(String id) {
         String version;
@@ -60,6 +82,7 @@ public final class NativeUsageFormat {
         else version = id.endsWith("-latest") ? "最新版" : "未指定快照";
         if (id.startsWith("openai/")) return "OpenAI · " + version;
         if (id.startsWith("anthropic/")) return "Anthropic · " + version;
+        if (id.startsWith("google/")) return "Google · " + version;
         return version;
     }
     public static Long count(Object value) {

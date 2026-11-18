@@ -7,6 +7,12 @@ struct UsageView: View {
     @ObservedObject var store: MonitorStore
     @State private var showingAlerts = false
 
+    private var displayedTools: [String] {
+        var tools = ["codex", "claude"]
+        if store.usage?.provider(tool: "antigravity") != nil { tools.append("antigravity") }
+        return tools
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -27,7 +33,7 @@ struct UsageView: View {
                     Text(store.usageRefreshing ? "正在读取用量…" : "等待用量记录").foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 18, alignment: .top)], alignment: .leading, spacing: 18) {
-                    ForEach(["codex", "claude"], id: \.self) { tool in
+                    ForEach(displayedTools, id: \.self) { tool in
                         UsageProviderCard(
                             tool: tool,
                             provider: store.usage?.provider(tool: tool),
@@ -85,7 +91,7 @@ private struct UsageProviderCard: View {
     @State private var selectedDay: Date?
     @State private var showingHelp = false
 
-    private var brand: String { tool == "claude" ? "Claude Code" : "Codex" }
+    private var brand: String { tool == "claude" ? "Claude Code" : tool == "antigravity" ? "Antigravity" : "Codex" }
     private var today: Date { UsageCalendar.today(now: Date()) }
     private var historyValid: Bool {
         guard provider?.history?.isValid == true,
@@ -165,7 +171,13 @@ private struct UsageProviderCard: View {
                 Text("正在读取历史…").font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
             }
             Divider()
-            UsageQuotaSection(tool: tool, provider: provider, checks: checks, failed: failed)
+            if tool == "antigravity" {
+                Text("仅统计已连接电脑本地对话日志中的 Token；本地日志不含套餐滚动额度。")
+                    .font(.custom("MiSans-Regular", size: 12))
+                    .foregroundStyle(.secondary)
+            } else {
+                UsageQuotaSection(tool: tool, provider: provider, checks: checks, failed: failed)
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -331,7 +343,7 @@ private struct UsageBrand: View {
     let tool: String
     var body: some View {
         Group {
-            if let image = MonitorResources.image(tool == "claude" ? "Claude" : "Codex") {
+            if let image = MonitorResources.image(tool == "claude" ? "Claude" : tool == "antigravity" ? "Antigravity" : "Codex") {
                 Image(nsImage: image).resizable().scaledToFit()
             } else {
                 Image(systemName: "terminal").resizable().scaledToFit()

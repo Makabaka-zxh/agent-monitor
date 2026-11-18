@@ -46,7 +46,7 @@ public final class NativeUsagePage {
     /** The Activity owns the identity boundary and discards this on account changes. */
     public Bundle saveState() {
         Bundle saved = new Bundle();
-        for (String tool : new String[]{"codex", "claude"}) {
+        for (String tool : new String[]{"codex", "claude", "antigravity"}) {
             Selection state = selections.get(tool); if (state == null) continue;
             Bundle item = new Bundle();
             if (state.saved.week != null) item.putString("week", state.saved.week.toString());
@@ -57,7 +57,7 @@ public final class NativeUsagePage {
     }
     public void restoreState(Bundle saved) {
         selections.clear();
-        for (String tool : new String[]{"codex", "claude"}) {
+        for (String tool : new String[]{"codex", "claude", "antigravity"}) {
             Bundle item = saved == null ? null : saved.getBundle(tool); if (item == null) continue;
             Selection state = new Selection();
             state.saved = NativeUsageSelectionPolicy.restore(item.getString("week", ""), item.getString("day", ""), item.getString("source", ""));
@@ -90,7 +90,7 @@ public final class NativeUsagePage {
         localSection.addView(localTitle, wrap());
         view.addView(localSection, wrap());
         JSONArray providers = summary == null ? null : summary.optJSONArray("providers");
-        for (String tool : new String[]{"codex", "claude"}) {
+        for (String tool : new String[]{"codex", "claude", "antigravity"}) {
             JSONObject data = null;
             for (int i = 0; providers != null && i < providers.length(); i++) {
                 JSONObject candidate = providers.optJSONObject(i);
@@ -168,7 +168,7 @@ public final class NativeUsagePage {
         }
         private LinearLayout providerHeading(String tool, String description) {
             LinearLayout heading = ui.row(); heading.addView(ui.brand(tool, 24));
-            TextView name = ui.heading(tool.equals("codex") ? "Codex" : "Claude Code", 17);
+            TextView name = ui.heading("codex".equals(tool) ? "Codex" : "antigravity".equals(tool) ? "Antigravity" : "Claude Code", 17);
             LinearLayout.LayoutParams words = new LinearLayout.LayoutParams(0, -2, 1); words.setMarginStart(ui.dp(8)); heading.addView(name, words);
             TextView details = ui.quietButton(description,
                     () -> help.show(name.getText().toString(), providerHelp(tool, data, findSource(state.saved.source))));

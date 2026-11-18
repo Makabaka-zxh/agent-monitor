@@ -884,7 +884,7 @@ def _collect_snapshot(codex_home=None, claude_home=None, include_output=False, l
         if antigravity is not None:
             tasks.update((task["id"], task) for task in antigravity)
             sources.append({"tool": "antigravity", "available": True, "mode": "local_log",
-                            "detail": f"已读取 {len(antigravity)} 个 Antigravity 桌面会话。只读同步，回复和审批请在原应用处理。"})
+                            "detail": f"已读取 {len(antigravity)} 个 Antigravity 会话；已登录官方 agy CLI 时支持手机续接与单次审批。"})
     published = _published_tasks(tasks, limit, extra_codex)
     if include_output:
         from .antigravity import read_antigravity_result

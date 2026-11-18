@@ -19,7 +19,7 @@ struct UsageSummary: Codable {
         historyIncluded = (try? c.decode(Bool.self, forKey: .historyIncluded)) ?? false
         let decoded = (try? c.decode([UsageProvider].self, forKey: .providers)) ?? []
         let counts = Dictionary(grouping: decoded, by: \.tool).mapValues(\.count)
-        providers = decoded.filter { ["codex", "claude"].contains($0.tool) && counts[$0.tool] == 1 }
+        providers = decoded.filter { ["codex", "claude", "antigravity"].contains($0.tool) && counts[$0.tool] == 1 }
         quotaChecksIncluded = c.contains(.quotaChecks)
         quotaChecks = (try? c.decode([UsageQuotaCheck].self, forKey: .quotaChecks)) ?? []
     }
@@ -68,7 +68,7 @@ struct UsageProvider: Codable, Identifiable {
     let quotas: [UsageQuota]
     var history: UsageHistory?
     var id: String { tool }
-    var brand: String { tool == "claude" ? "Claude Code" : "Codex" }
+    var brand: String { tool == "claude" ? "Claude Code" : tool == "antigravity" ? "Antigravity" : "Codex" }
 
     private enum CodingKeys: String, CodingKey { case tool, todayTokens, sessionCount, observedAt, coverage, quotas, history }
     init(from decoder: Decoder) throws {

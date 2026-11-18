@@ -231,6 +231,28 @@ def resolve_antigravity_session(session_id: str, *, base: Path | str | None = No
         return None
 
 
+def resolve_antigravity_deliverable_roots(session_id: str, *,
+                                          base: Path | str | None = None) -> tuple[Path | None, Path | None] | None:
+    """Resolve verified brain and optional workspace roots for an indexed session."""
+    try:
+        if not isinstance(session_id, str) or len(session_id) != 36 or str(UUID(session_id)) != session_id:
+            return None
+        rows = _read(base, 0, session_id=session_id, query=_SELECT_SESSION)
+        if len(rows) != 1:
+            return None
+        workspace, source, killed = rows[0]
+        if source not in _LOCAL_SOURCES or type(killed) is not int or killed != 0:
+            return None
+        brain_candidate = _base(base) / "brain" / session_id
+        brain_dir = _plain_directory(brain_candidate) if brain_candidate.exists() else None
+        cwd = resolve_antigravity_workspace(workspace)
+        if cwd is not None and not cwd.is_dir():
+            cwd = None
+        return brain_dir, cwd
+    except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+        return None
+
+
 def _status(native, not_idle, killed, updated, now, stale_seconds):
     if type(not_idle) is not int or not_idle not in (0, 1) or type(killed) is not int or killed != 0:
         return "unknown"
@@ -319,7 +341,22 @@ def _last_explicit_input(lines, final_index):
     return None
 
 
-def _last_complete_record(file, size: int, count: int, user_step: int):
+def _indexed_explicit_input(lines, user_step):
+    for raw in reversed(lines[-512:]):
+        if not raw:
+            continue
+        step = json.loads(raw)
+        if not isinstance(step, dict) or step.get("step_index") != user_step:
+            continue
+        text = step.get("content")
+        if (step.get("type") == "USER_INPUT" and step.get("source") == "USER_EXPLICIT"
+                and step.get("status") == "DONE" and isinstance(text, str) and text.strip()):
+            return _record_time(step.get("created_at"))
+        return None
+    return False
+
+
+def _last_complete_record(file, size: int, count: int, user_step: int, *, include_turn_start: bool = False):
     for cap in (_RESULT_FAST_TAIL, _MAX_RESULT_READ_BYTES):
         start = max(0, size - cap)
         file.seek(start)
@@ -331,6 +368,15 @@ def _last_complete_record(file, size: int, count: int, user_step: int):
             continue
         final = tail[line_at + 1:-1]
         if user_step >= 0:
+            if not include_turn_start:
+                return final, None
+            if line_at >= 0:
+                earlier = tail[:line_at].split(b"\n")
+                found = _indexed_explicit_input(earlier[1:] if start else earlier, user_step)
+                if found is not False:
+                    return final, found
+                if start > 0:
+                    continue
             return final, None
         if line_at >= 0:
             # For a truncated window never trust the first line, even if it
@@ -344,7 +390,8 @@ def _last_complete_record(file, size: int, count: int, user_step: int):
     return None
 
 
-def read_antigravity_result(session_id: str, *, base: Path | str | None = None) -> dict | None:
+def read_antigravity_result(session_id: str, *, base: Path | str | None = None,
+                            include_turn_start: bool = False) -> dict | None:
     """Read only the final model text from a confirmed idle, identical trajectory."""
     from . import collector
     from .task_results import MAX_RESULT_CHARS
@@ -364,7 +411,8 @@ def read_antigravity_result(session_id: str, *, base: Path | str | None = None) 
             before = os.fstat(file.fileno())
             if _stamp(initial) != _stamp(before):
                 return None
-            latest = _last_complete_record(file, before.st_size, count, user_step)
+            latest = _last_complete_record(file, before.st_size, count, user_step,
+                                           include_turn_start=include_turn_start)
             if _stamp(os.fstat(file.fileno())) != _stamp(before):
                 return None
         if latest is None:
@@ -394,8 +442,9 @@ def read_antigravity_result(session_id: str, *, base: Path | str | None = None) 
         truncated = len(text) > MAX_RESULT_CHARS or "content" in truncated_fields
         text = text[:MAX_RESULT_CHARS]
         completed_at = collector._iso(stamp)
+        started_at = collector._iso(prompt_at) if include_turn_start and prompt_at is not None else ""
         result_id = hashlib.sha256(f"antigravity\n{completed_at}\n{text}".encode()).hexdigest()
         return {"text": text, "completed_at": completed_at, "truncated": truncated,
-                "result_id": result_id, "started_at": "", "files": []}
+                "result_id": result_id, "started_at": started_at, "files": []}
     except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError, RecursionError):
         return None
