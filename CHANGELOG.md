@@ -1,5 +1,14 @@
 # 更新记录
 
+## 1.0.8 — 2026-11-19
+
+- 新增 Antigravity 本地用量统计与配套附件同步：只读增量解析 `brain/<id>/.system_generated/logs/transcript.jsonl` 中已完成步骤的 Token 明细与公开模型占比，覆盖任务详情会话卡片、顶层「用量」页及桌面小组件；本地对话日志不含官方套餐滚动额度窗口，界面明确标注边界。结果同步补齐经路径与大小校验的本轮工作区交付文件、`brain/<id>/` 顶层显式引用文件及 `userFacing: true` 顶层报告产物，排除 `.system_generated`、`scratch`、`browser_sandbox` 与 `.metadata.json`。
+- 原生 macOS 客户端补齐单次批准、结构化提问回答与模型／思考强度选择面板：对齐 `/api/native/tasks/controls` 与 `/api/native/tasks/controls/decision`，覆盖 Codex、Claude Code 和 Antigravity，支持展示完整操作内容的单次批准／拒绝、单选／多选／自定义回答表单，以及可用模型、思考强度与 Codex 单轮快速／计划模式选择；所有决定绑定展示内容 SHA-256 指纹并在发送前写入钥匙串，`Monitor.app` 升至 `1.0.8`。
+
+验证范围：跨平台 Python／Web／Swift／Android 离线测试及 6 项 GitHub Actions CI 通过；已在 Windows 主机服务与 Android 真机完成 Antigravity 配套交付文件真实保存、任务详情会话 Token 明细及顶层用量图表验收，并在 `macos-15` 完成原生 Swift 编译与 62 项 XCTest 校验。
+
+验证边界：Antigravity 本地日志统计不代替服务商账单或官方实时配额；macOS 新交互面板仍需在目标 Mac 本地更新 `Monitor.app 1.0.8` 后核验真机界面与批准链路。
+
 ## 1.0.7 — 2026-11-18
 
 - 新增 Antigravity 会话接入：自动发现 `~/.gemini/antigravity` 桌面会话索引并同步状态与已授权的最终答复文本；在安装并登录官方 `agy` CLI 的电脑上，支持通过 `agy acp` 同会话续接、非侵入式模型与思考强度目录拉取及切换、表单式提问回答（`elicitation/create`）和单次工具／命令批准与拒绝（`session/request_permission`）。桌面窗口正在占用同一会话、缺少本地工作区或处于自动扩权模式时保持拒绝，不开放永久批准或跳过权限参数。
