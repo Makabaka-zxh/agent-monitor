@@ -247,7 +247,17 @@ struct UsageQuota: Codable, Identifiable {
     let sourceName: String?
     let stale: Bool
     let availability: String?
-    var id: String { [sourceDeviceId ?? "", bucketId ?? "", key, String(windowMinutes ?? 0), String(resetsAt ?? 0), observedAt ?? ""].map { "\($0.utf8.count):\($0)" }.joined() }
+    var id: String {
+        let parts: [String] = [
+            sourceDeviceId ?? "",
+            bucketId ?? "",
+            key,
+            String(windowMinutes ?? 0),
+            String(resetsAt ?? 0),
+            observedAt ?? ""
+        ]
+        return parts.map { "\($0.utf8.count):\($0)" }.joined()
+    }
     var remaining: Double? { remainingPercent ?? usedPercent.map { 100 - $0 } }
     var used: Double? { usedPercent ?? remainingPercent.map { 100 - $0 } }
     var resetDate: Date? { UsageFormat.epochDate(resetsAt) }
