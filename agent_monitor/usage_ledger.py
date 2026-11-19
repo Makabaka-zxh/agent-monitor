@@ -32,7 +32,7 @@ MAX_FILES = 100_000
 MAX_DIRECTORIES = 20_000
 MAX_SCAN_SECONDS = 2.0
 LOCAL_CODEX_PARSER_VERSION = 2
-LOCAL_ANTIGRAVITY_PARSER_VERSION = 2
+LOCAL_ANTIGRAVITY_PARSER_VERSION = 3
 RECENT_ACCOUNTING_FILES = 32
 RECENT_FILE_BYTES = 4 * 1024 * 1024
 ACTIVE_ACCOUNTING_FILES_PER_TOOL = 2
@@ -523,6 +523,9 @@ class UsageLedger:
         now = _now(now)
         if type(budget_bytes) is not int or not 1 <= budget_bytes <= 64 * 1024 * 1024:
             raise ValueError("invalid scan byte budget")
+        # NTFS does not update st_mtime/st_size on in-place WAL writes to an open handle;
+        # scope gen_metadata caching strictly to one scan pass so active sessions stay fresh.
+        self._ag_step_models.clear()
         explicit = codex_home is not None or claude_home is not None or antigravity_home is not None
         raw_roots = []
         if not explicit or codex_home is not None:
