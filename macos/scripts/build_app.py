@@ -20,7 +20,7 @@ APP_OWNER = "monitor-native-macos-v1"
 def app_info() -> dict:
     return {"CFBundleIdentifier": BUNDLE_ID, "CFBundleName": "Monitor", "CFBundleDisplayName": "Monitor",
             "CFBundleExecutable": "Monitor", "CFBundlePackageType": "APPL", "CFBundleInfoDictionaryVersion": "6.0",
-            "CFBundleShortVersionString": "1.0.8", "CFBundleVersion": "9", "LSMinimumSystemVersion": "14.0",
+            "CFBundleShortVersionString": "1.0.8", "CFBundleVersion": "10", "LSMinimumSystemVersion": "14.0",
             "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
             "CFBundleURLTypes": [{"CFBundleURLName": "Monitor login return", "CFBundleURLSchemes": ["agentmonitor"]}]}
 
@@ -117,6 +117,10 @@ def main() -> int:
                 if backup.resolve().parent != destination_root.resolve() or not owned_app(backup):
                     raise RuntimeError("Unexpected backup location; backup preserved")
                 shutil.rmtree(backup)
+            lsregister = Path("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+            if lsregister.is_file():
+                subprocess.run([str(lsregister), "-f", str(destination)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.utime(destination, None)
         print(f"已生成原生 App：{destination}")
         print("此包使用个人测试签名，未经过 Apple 公证。")
         return 0

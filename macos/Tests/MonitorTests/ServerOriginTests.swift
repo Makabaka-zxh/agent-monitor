@@ -65,4 +65,23 @@ final class ServerOriginTests: XCTestCase {
             XCTAssertEqual(status.supportsServerBinding, version == 1)
         }
     }
+    func testRuntimeSaveAndCollectorPrefillHintStayValidated() throws {
+        let suiteName = "MonitorOriginTest-" + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        if !ServerOrigin.isEnvironmentControlled {
+            XCTAssertEqual(ServerOrigin.save("  HTTPS://Monitor.Example.com:443/  ", defaults: defaults), "https://monitor.example.com")
+            XCTAssertEqual(defaults.string(forKey: ServerOrigin.defaultsKey), "https://monitor.example.com")
+            XCTAssertNil(ServerOrigin.save("http://insecure.example.com", defaults: defaults))
+        }
+        let tempHome = FileManager.default.temporaryDirectory.appendingPathComponent("monitor-home-" + UUID().uuidString)
+        let agentDir = tempHome.appendingPathComponent("Library/Application Support/Monitor/collector/agent")
+        try FileManager.default.createDirectory(at: agentDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempHome) }
+        let configFile = agentDir.appendingPathComponent("config.json")
+        try Data(#"{"server":"https://paired.example.com:8443/"}"#.utf8).write(to: configFile)
+        XCTAssertEqual(ServerOrigin.suggestedCollectorOrigin(home: tempHome), "https://paired.example.com:8443")
+        try Data(#"{"server":"http://insecure.example.com"}"#.utf8).write(to: configFile)
+        XCTAssertNil(ServerOrigin.suggestedCollectorOrigin(home: tempHome))
+    }
 }

@@ -62,7 +62,7 @@ private final class RejectRedirects: NSObject, URLSessionTaskDelegate {
 }
 
 final class MonitorAPI {
-    static let origin = ServerOrigin.current ?? ""
+    static var origin: String { ServerOrigin.current ?? "" }
     private let redirectDelegate: RejectRedirects
     private let session: URLSession
     init() {
@@ -96,10 +96,11 @@ final class MonitorAPI {
         return data
     }
     private func bytes(_ endpoint: Endpoint, method: String = "GET", body: [String: Any]? = nil, token: String?, maximum: Int) async throws -> Data {
-        var request = URLRequest(url: try endpoint.url())
+        let activeOrigin = MonitorAPI.origin
+        var request = URLRequest(url: try endpoint.url(origin: activeOrigin))
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(MonitorAPI.origin, forHTTPHeaderField: "Origin")
+        request.setValue(activeOrigin, forHTTPHeaderField: "Origin")
         if let token {
             guard MonitorSecurity.matches(token, "nrd_[A-Za-z0-9_-]{43}") else { throw MonitorError.invalidResponse }
             request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")

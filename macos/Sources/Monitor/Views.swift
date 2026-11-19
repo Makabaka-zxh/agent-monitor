@@ -81,7 +81,7 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 155, ideal: 175, max: 220)
                 .safeAreaInset(edge: .top) {
                     HStack(spacing: 10) {
-                        if let image = MonitorResources.image("AppIcon") { Image(nsImage: image).resizable().scaledToFit().frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 10)) }
+                        if let image = MonitorResources.image("AppIcon") { Image(nsImage: image).resizable().scaledToFit().frame(width: 44, height: 44) }
                         Text("Monitor").font(.custom("MiSans-Regular", size: 15)).fontWeight(.semibold)
                         Spacer()
                     }.padding(.horizontal, 14).padding(.bottom, 8).accessibilityElement(children: .combine)
@@ -160,18 +160,144 @@ struct RootView: View {
 @MainActor
 private struct LoginView: View {
     @EnvironmentObject var store: MonitorStore
+    @State private var serverDraft = ""
+    @State private var editingServer = false
+    @State private var copiedLink = false
+
+    private var envLocked: Bool { ServerOrigin.isEnvironmentControlled }
+    private var showingEditor: Bool { !envLocked && !store.pendingLogin && (store.origin.isEmpty || editingServer) }
+    private var canSubmitLogin: Bool {
+        guard !store.loginBusy else { return false }
+        if store.pendingLogin { return !store.origin.isEmpty }
+        if envLocked { return !store.origin.isEmpty }
+        if showingEditor {
+            return ServerOrigin.normalize(serverDraft.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+        }
+        return !store.origin.isEmpty
+    }
+
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color.accentColor.opacity(0.06), Color.clear, Color.purple.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing)
-            VStack(spacing: 24) {
-                if let image = MonitorResources.image("AppIcon") { Image(nsImage: image).resizable().scaledToFit().frame(width: 76, height: 76) }
+            VStack(spacing: 22) {
+                if let image = MonitorResources.image("AppIcon") {
+                    Image(nsImage: image).resizable().scaledToFit().frame(width: 84, height: 84)
+                }
                 Text("工作，尽在眼前").font(.custom("MiSans-Regular", size: 32)).fontWeight(.semibold)
-                Text(MonitorAPI.origin.isEmpty ? "先配置自建服务器地址，再重新打开 Monitor。" : store.pendingLogin ? "在浏览器确认后，自动回到这里" : "查看每台电脑上的 Claude Code、Codex 与 Antigravity").foregroundStyle(.secondary)
-                Button { Task { await store.beginLogin() } } label: {
-                    HStack { if store.loginBusy { ProgressView().controlSize(.small) }; Text(store.pendingLogin ? "继续登录" : "登录 Monitor") }.frame(width: 190)
-                }.buttonStyle(.borderedProminent).controlSize(.large).disabled(store.loginBusy || MonitorAPI.origin.isEmpty)
-                if store.pendingLogin { Button("取消") { store.cancelLogin() }.buttonStyle(.plain).foregroundStyle(.secondary).disabled(store.loginBusy) }
-            }.padding(40)
+                Text(envLocked && store.origin.isEmpty
+                     ? "环境变量 MONITOR_SERVER_URL 无效，请改为有效的 HTTPS 根地址后重启 Monitor。"
+                     : store.pendingLogin
+                     ? "请在打开的浏览器页面确认本次连接，确认后自动进入工作台"
+                     : "查看每台电脑上的 Claude Code、Codex 与 Antigravity")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                if showingEditor {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("自建服务器 HTTPS 地址")
+                            .font(.custom("MiSans-Regular", size: 13))
+                            .foregroundStyle(.secondary)
+                        TextField("https://monitor.example.com", text: $serverDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.large)
+                            .frame(width: 340)
+                            .disabled(store.loginBusy)
+                            .onSubmit {
+                                guard canSubmitLogin else { return }
+                                Task {
+                                    await store.beginLogin(serverInput: serverDraft)
+                                    if !store.origin.isEmpty { editingServer = false }
+                                }
+                            }
+                        if !store.origin.isEmpty && editingServer {
+                            HStack {
+                                Button("取消修改") {
+                                    serverDraft = store.origin
+                                    editingServer = false
+                                }
+                                .buttonStyle(.plain)
+                                .font(.custom("MiSans-Regular", size: 12))
+                                .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("仅保存地址") {
+                                    if store.saveServerOrigin(serverDraft) { editingServer = false }
+                                }
+                                .buttonStyle(.plain)
+                                .font(.custom("MiSans-Regular", size: 12))
+                                .foregroundStyle(Color.accentColor)
+                            }
+                            .frame(width: 340)
+                        }
+                    }
+                } else if !store.origin.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.shield")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Text(store.origin)
+                            .font(.custom("MiSans-Regular", size: 13))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        if !envLocked && !store.pendingLogin {
+                            Button("更改") {
+                                serverDraft = store.origin
+                                editingServer = true
+                            }
+                            .buttonStyle(.plain)
+                            .font(.custom("MiSans-Regular", size: 13))
+                            .foregroundStyle(Color.accentColor)
+                            .disabled(store.loginBusy)
+                        }
+                    }
+                }
+
+                Button {
+                    Task {
+                        if showingEditor {
+                            await store.beginLogin(serverInput: serverDraft)
+                            if !store.origin.isEmpty { editingServer = false }
+                        } else {
+                            await store.beginLogin()
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        if store.loginBusy { ProgressView().controlSize(.small) }
+                        Text(store.pendingLogin ? "重新打开浏览器确认" : "登录 Monitor")
+                    }
+                    .frame(width: 210)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!canSubmitLogin)
+
+                if store.pendingLogin {
+                    HStack(spacing: 18) {
+                        Button(copiedLink ? "已复制确认链接" : "复制确认链接") {
+                            store.copyVerificationURL()
+                            copiedLink = true
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                        Button("取消") {
+                            copiedLink = false
+                            store.cancelLogin()
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(store.loginBusy)
+                    }
+                    .font(.custom("MiSans-Regular", size: 13))
+                }
+            }
+            .padding(40)
+            .onAppear {
+                if !store.origin.isEmpty {
+                    serverDraft = store.origin
+                } else if serverDraft.isEmpty, let suggested = ServerOrigin.suggestedCollectorOrigin() {
+                    serverDraft = suggested
+                }
+            }
         }
     }
 }

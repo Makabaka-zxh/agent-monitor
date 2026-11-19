@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 final class MonitorStore: ObservableObject {
+    @Published private(set) var origin: String
     @Published private(set) var connected = false
     @Published private(set) var loginBusy = false
     @Published private(set) var pendingLogin = false
@@ -34,22 +35,14 @@ final class MonitorStore: ObservableObject {
     private var accountBusy = false
     private var preferenceGeneration = 0
     private var loopStarted = false
+    private var pairingLoopTask: Task<Void, Never>?
     private var usageRetryAfter = Date.distantPast
 
     init() {
+        origin = MonitorAPI.origin
         tool = ToolFilter(rawValue: UserDefaults.standard.string(forKey: "tool") ?? "") ?? .all
         scope = TaskScope(rawValue: UserDefaults.standard.string(forKey: "scope") ?? "") ?? .active
-        do {
-            if let saved = try Keychain.read(LoginSecret.self, key: "login"), saved.expiresAt > Date(), MonitorSecurity.matches(saved.token, "nrd_[A-Za-z0-9_-]{43}") {
-                credential = saved
-                connected = true
-            }
-            if !connected, let saved = try Keychain.read(PairingSecret.self, key: "pairing"), saved.expiresAt > Date(),
-               MonitorSecurity.matches(saved.id, "[A-Za-z0-9_-]{32}"), MonitorSecurity.matches(saved.verifier, "[A-Za-z0-9_-]{43,128}") {
-                pairing = saved
-                pendingLogin = true
-            }
-        } catch { notice = error.localizedDescription }
+        loadCredentialsForCurrentOrigin()
         usageAlerts.setAccount(connected ? tokenFingerprint : nil)
         usageAlerts.onOpenUsage = { [weak self] _ in
             guard let self, self.connected else { return }
@@ -57,12 +50,66 @@ final class MonitorStore: ObservableObject {
             self.openMainWindow?()
         }
     }
+
+    private func loadCredentialsForCurrentOrigin() {
+        credential = nil
+        pairing = nil
+        connected = false
+        pendingLogin = false
+        guard !origin.isEmpty else { return }
+        do {
+            if let saved = try Keychain.read(LoginSecret.self, key: "login"),
+               saved.expiresAt > Date(),
+               MonitorSecurity.matches(saved.token, "nrd_[A-Za-z0-9_-]{43}") {
+                credential = saved
+                connected = true
+            }
+            if !connected,
+               let saved = try Keychain.read(PairingSecret.self, key: "pairing"),
+               saved.expiresAt > Date(),
+               MonitorSecurity.matches(saved.id, "[A-Za-z0-9_-]{32}"),
+               MonitorSecurity.matches(saved.verifier, "[A-Za-z0-9_-]{43,128}") {
+                pairing = saved
+                pendingLogin = true
+            }
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
     var fresh: Bool { lastSuccess.map { Date().timeIntervalSince($0) < 20 } ?? false }
     var visibleTasks: [MonitorTask] { tasks.filter { $0.matches(tool: tool, scope: scope, fresh: fresh) } }
     var onlineCount: Int { fresh ? devices.filter(\.online).count : 0 }
     var tokenFingerprint: String { MonitorSecurity.hash(Data((credential?.token ?? "").utf8)) }
+    var pendingVerificationURL: String? {
+        guard let pairing, pairing.expiresAt > Date(), !origin.isEmpty else { return nil }
+        return verificationURL(pairing.id).absoluteString
+    }
     func task(_ id: String) -> MonitorTask? { tasks.first { $0.id == id } }
     func current(_ token: String) -> Bool { connected && credential?.token == token }
+
+    @discardableResult
+    func saveServerOrigin(_ input: String) -> Bool {
+        guard !connected, !loginBusy, !ServerOrigin.isEnvironmentControlled else { return false }
+        if pendingLogin { clearPendingLogin() }
+        guard let normalized = ServerOrigin.save(input) else {
+            notice = "请输入有效的 HTTPS 服务器根地址（如 https://monitor.example.com，不带路径或查询参数）"
+            return false
+        }
+        origin = normalized
+        generation = UUID()
+        cooldownUntil = .distantPast
+        notice = nil
+        loadCredentialsForCurrentOrigin()
+        usageAlerts.setAccount(connected ? tokenFingerprint : nil)
+        return true
+    }
+
+    func copyVerificationURL() {
+        guard let link = pendingVerificationURL else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link, forType: .string)
+    }
 
     func run() async {
         guard !loopStarted else { return }
@@ -77,10 +124,43 @@ final class MonitorStore: ObservableObject {
             catch { return }
         }
     }
-    func beginLogin() async {
-        guard !connected, !loginBusy, Date() >= cooldownUntil else { return }
+
+    private func startFastPairingPoll() {
+        pairingLoopTask?.cancel()
+        let epoch = generation
+        pairingLoopTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled, let self, self.generation == epoch, self.pendingLogin, !self.connected {
+                try? await Task.sleep(for: .milliseconds(2500))
+                guard !Task.isCancelled, self.generation == epoch, self.pendingLogin, !self.connected else { return }
+                await self.pollLogin()
+            }
+        }
+    }
+
+    func beginLogin(serverInput: String? = nil) async {
+        guard !connected, !loginBusy else { return }
+        if let serverInput, !ServerOrigin.isEnvironmentControlled {
+            let trimmed = serverInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if origin.isEmpty || (!trimmed.isEmpty && ServerOrigin.normalize(trimmed) != origin) {
+                guard saveServerOrigin(trimmed) else { return }
+                if connected {
+                    await refresh()
+                    await refreshAccount()
+                    return
+                }
+            }
+        }
+        guard !origin.isEmpty else {
+            notice = "请先填写有效的 HTTPS 服务器地址"
+            return
+        }
+        guard Date() >= cooldownUntil else {
+            notice = "请求较多，请稍后再试"
+            return
+        }
         if let pairing, pairing.expiresAt > Date() {
             NSWorkspace.shared.open(verificationURL(pairing.id))
+            startFastPairingPoll()
             await pollLogin()
             return
         }
@@ -99,11 +179,12 @@ final class MonitorStore: ObservableObject {
             pairing = secret
             pendingLogin = true
             NSWorkspace.shared.open(verificationURL(secret.id))
+            startFastPairingPoll()
         } catch { if epoch == generation { report(error) } }
     }
-    private func verificationURL(_ id: String) -> URL { URL(string: MonitorAPI.origin + "/#/native-connect/" + id)! }
+    private func verificationURL(_ id: String) -> URL { URL(string: origin + "/#/native-connect/" + id)! }
     func pollLogin() async {
-        guard !loginBusy, let pairing, !connected, Date() >= cooldownUntil else { return }
+        guard !loginBusy, let pairing, !connected, !origin.isEmpty, Date() >= cooldownUntil else { return }
         guard pairing.expiresAt > Date() else { cancelLogin(); notice = "连接请求已过期，请重新登录"; return }
         loginBusy = true
         let epoch = generation
@@ -122,6 +203,8 @@ final class MonitorStore: ObservableObject {
                 throw error
             }
             try? Keychain.remove("pairing")
+            pairingLoopTask?.cancel()
+            pairingLoopTask = nil
             credential = login
             self.pairing = nil
             pendingLogin = false
@@ -151,7 +234,11 @@ final class MonitorStore: ObservableObject {
         clearPendingLogin()
     }
     private func clearPendingLogin() {
-        do { try Keychain.remove("pairing") } catch { report(error); return }
+        pairingLoopTask?.cancel()
+        pairingLoopTask = nil
+        if !origin.isEmpty {
+            do { try Keychain.remove("pairing") } catch { report(error); return }
+        }
         generation = UUID()
         pairing = nil
         pendingLogin = false
@@ -280,6 +367,8 @@ final class MonitorStore: ObservableObject {
     func invalidate(_ token: String) {
         guard credential?.token == token else { return }
         do { try Keychain.remove("login") } catch { notice = error.localizedDescription }
+        pairingLoopTask?.cancel()
+        pairingLoopTask = nil
         generation = UUID()
         credential = nil
         connected = false

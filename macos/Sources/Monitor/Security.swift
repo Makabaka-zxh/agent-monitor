@@ -12,7 +12,7 @@ enum MonitorError: LocalizedError {
         case .digestMismatch: "文件校验未通过，请刷新结果后重试"
         case .keychain: "无法保存到钥匙串，请检查系统授权"
         case .invalidRoute: "连接地址无效"
-        case .serverConfiguration: "请先配置 HTTPS 服务器地址，重新打开 Monitor 后登录"
+        case .serverConfiguration: "请先填写有效的 HTTPS 服务器地址"
         case let .service(_, message, _): message
         }
     }
@@ -52,11 +52,18 @@ enum Keychain {
     private static func currentService() throws -> String { try service(for: MonitorAPI.origin) }
     static func read<T: Decodable>(_ type: T.Type, key: String) throws -> T? {
         let service = try currentService()
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                  kSecAttrAccount as String: key, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        let baseQuery: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key]
+        var query = baseQuery
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
+        if status == errSecAuthFailed || status == errSecInteractionNotAllowed {
+            // Ad-hoc local rebuilds produce a new CDHash; clear unreadable stale entries so re-login works cleanly.
+            _ = SecItemDelete(baseQuery as CFDictionary)
+            return nil
+        }
         guard status == errSecSuccess, let data = result as? Data else { throw MonitorError.keychain }
         do { return try JSONDecoder().decode(type, from: data) } catch { throw MonitorError.keychain }
     }
@@ -65,12 +72,14 @@ enum Keychain {
         let data = try JSONEncoder().encode(value)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key]
         let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if status == errSecItemNotFound {
-            var item = query
-            item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw MonitorError.keychain }
-        } else if status != errSecSuccess { throw MonitorError.keychain }
+        if status == errSecSuccess { return }
+        if status != errSecItemNotFound {
+            _ = SecItemDelete(query as CFDictionary)
+        }
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw MonitorError.keychain }
     }
     static func remove(_ key: String) throws {
         let service = try currentService()

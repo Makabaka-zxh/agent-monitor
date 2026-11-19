@@ -116,13 +116,13 @@ codesign --verify --deep --strict macos/dist/Monitor.app
 
 当前构建使用宿主架构和 ad hoc 本地签名，没有 Apple 公证。面向其他用户分发时，需要单独准备目标架构、Developer ID 签名和公证流程；本仓库 CI 不执行这些操作。
 
-首次使用原生 Mac 客户端，先完全退出 App，再设置自己的 HTTPS 来源：
+首次使用原生 Mac 客户端，可直接在登录页填写自建 HTTPS 服务器根地址（如本机连接器已配对，输入框会自动预填该地址），也可预先通过 `defaults` 写入：
 
 ```sh
 defaults write com.agentmonitor.mac MonitorServerOrigin -string 'https://monitor.example.com'
 ```
 
-也可在启动进程时设置 `MONITOR_SERVER_URL`，它优先于上述配置；无效值不会回退到其他服务器。配置在每次进程启动时固定，未配置时不会发送账号请求。钥匙串按服务器隔离，公开版不迁移早期未绑定服务器的凭据，需要重新登录。更换服务器前先退出账号并暂停旧连接器，退出 App 后更改配置，再重新登录和配对。原生 App 会检查连接器的服务器隔离支持版本，旧连接器需先更新。
+也可在启动进程时设置 `MONITOR_SERVER_URL`，它优先于应用内保存的地址；无效环境变量值不会回退到其他服务器。钥匙串按服务器隔离，公开版不迁移早期未绑定服务器的凭据，需要重新登录。更换服务器前先退出账号并暂停旧连接器，在登录页修改服务器地址后再重新登录和配对。原生 App 会检查连接器的服务器隔离支持版本，旧连接器需先更新。
 
 连接器的 `--server` 优先使用显式参数，否则读取 `MONITOR_SERVER_URL`，再否则使用占位地址 `https://monitor.example.com`。配对时应提供自己的 HTTPS 服务地址，例如：
 

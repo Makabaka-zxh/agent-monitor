@@ -1,11 +1,53 @@
 import Foundation
 import Darwin
 
-/** One startup snapshot binds account traffic, Keychain and collector commands to one server. */
+/** Bind account traffic, Keychain and collector commands to one validated HTTPS server origin. */
 enum ServerOrigin {
     static let defaultsKey = "MonitorServerOrigin"
-    static let current = resolve(environment: ProcessInfo.processInfo.environment,
-                                 stored: UserDefaults.standard.string(forKey: defaultsKey))
+    private static let lock = NSLock()
+    private static var runtimeStored: String? = UserDefaults.standard.string(forKey: defaultsKey)
+
+    static var isEnvironmentControlled: Bool {
+        ProcessInfo.processInfo.environment["MONITOR_SERVER_URL"] != nil
+    }
+
+    static var current: String? {
+        lock.lock()
+        let stored = runtimeStored
+        lock.unlock()
+        return resolve(environment: ProcessInfo.processInfo.environment, stored: stored)
+    }
+
+    @discardableResult
+    static func save(_ rawValue: String, defaults: UserDefaults = .standard) -> String? {
+        guard !isEnvironmentControlled,
+              let normalized = normalize(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        defaults.set(normalized, forKey: defaultsKey)
+        if defaults === UserDefaults.standard {
+            lock.lock()
+            runtimeStored = normalized
+            lock.unlock()
+        }
+        return normalized
+    }
+
+    /// Read-only UI prefill hint from this user's local collector config; never auto-connects.
+    static func suggestedCollectorOrigin(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String? {
+        let root = home.resolvingSymlinksInPath()
+        let config = root.appendingPathComponent("Library/Application Support/Monitor/collector/agent/config.json")
+        guard config.resolvingSymlinksInPath() == config else { return nil }
+        var info = stat()
+        guard lstat(config.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_size > 0, info.st_size <= 64 * 1024,
+              let data = try? Data(contentsOf: config),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let server = object["server"] as? String else { return nil }
+        return normalize(server)
+    }
 
     static func resolve(environment: [String: String], stored: String?) -> String? {
         // An explicitly supplied but invalid environment value must not fall through to another host.
