@@ -13,9 +13,20 @@ struct UsageView: View {
         return tools
     }
 
+    private var officialTools: [String] {
+        guard let usage = store.usage else { return [] }
+        return displayedTools.filter { tool in
+            let provider = usage.provider(tool: tool)
+            let hasVisible = !(provider?.visibleSources(now: Date()).isEmpty ?? true)
+            let hasCheck = usage.quotaChecks.contains(where: { $0.tool == tool })
+            let hasHistory = provider?.hasRecordedHistory == true
+            return hasVisible || hasCheck || (hasHistory && (tool == "claude" || tool == "antigravity"))
+        }
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 26) {
                 HStack(spacing: 12) {
                     Text("用量").font(.custom("MiSans-Regular", size: 24)).fontWeight(.semibold)
                     Spacer()
@@ -26,23 +37,48 @@ struct UsageView: View {
                     }
                     .disabled(store.usageRefreshing)
                 }
+
                 if !store.usageError.isEmpty {
                     Label(store.usage == nil ? "暂时无法读取用量" : "连接暂不可用，显示上次记录", systemImage: "wifi.exclamationmark")
                         .foregroundStyle(.secondary)
                 } else if store.usage == nil {
                     Text(store.usageRefreshing ? "正在读取用量…" : "等待用量记录").foregroundStyle(.secondary)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 18, alignment: .top)], alignment: .leading, spacing: 18) {
-                    ForEach(displayedTools, id: \.self) { tool in
-                        UsageProviderCard(
-                            tool: tool,
-                            provider: store.usage?.provider(tool: tool),
-                            reportDay: store.usage?.day,
-                            checks: store.usage?.quotaChecks ?? [],
-                            failed: !store.usageError.isEmpty,
-                            loading: store.usageRefreshing || store.usage?.loading == true
-                        )
-                        .id(store.tokenFingerprint + ":" + tool)
+
+                if !officialTools.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("官方额度")
+                            .font(.custom("MiSans-Regular", size: 20))
+                            .fontWeight(.semibold)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 18, alignment: .top)], alignment: .leading, spacing: 18) {
+                            ForEach(officialTools, id: \.self) { tool in
+                                UsageOfficialQuotaCard(
+                                    tool: tool,
+                                    provider: store.usage?.provider(tool: tool),
+                                    checks: store.usage?.quotaChecks ?? [],
+                                    failed: !store.usageError.isEmpty
+                                )
+                                .id(store.tokenFingerprint + ":quota:" + tool)
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("本地 Token")
+                        .font(.custom("MiSans-Regular", size: 20))
+                        .fontWeight(.semibold)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 330), spacing: 18, alignment: .top)], alignment: .leading, spacing: 18) {
+                        ForEach(displayedTools, id: \.self) { tool in
+                            UsageProviderCard(
+                                tool: tool,
+                                provider: store.usage?.provider(tool: tool),
+                                reportDay: store.usage?.day,
+                                failed: !store.usageError.isEmpty,
+                                loading: store.usageRefreshing || store.usage?.loading == true
+                            )
+                            .id(store.tokenFingerprint + ":local:" + tool)
+                        }
                     }
                 }
             }
@@ -64,8 +100,6 @@ struct UsageView: View {
         }
         .task(id: store.tokenFingerprint) {
             while !Task.isCancelled && store.connected {
-                // A previous page's cancelled request may still be unwinding.
-                // Wait for its gate instead of skipping this page's first load.
                 while store.usageRefreshing && !Task.isCancelled && store.connected {
                     do { try await Task.sleep(for: .milliseconds(200)) }
                     catch { return }
@@ -80,11 +114,130 @@ struct UsageView: View {
     }
 }
 
+@MainActor
+private struct UsageOfficialQuotaCard: View {
+    let tool: String
+    let provider: UsageProvider?
+    let checks: [UsageQuotaCheck]
+    let failed: Bool
+    @State private var selectedSource: String?
+    @State private var showingDetails = false
+
+    private var brand: String { tool == "claude" ? "Claude Code" : tool == "antigravity" ? "Antigravity" : "Codex" }
+    private var sources: [UsageSource] { provider?.visibleSources(now: Date()) ?? [] }
+    private var source: UsageSource? {
+        sources.first(where: { $0.id == selectedSource }) ?? sources.first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                UsageBrand(tool: tool)
+                Text(brand).font(.custom("MiSans-Regular", size: 17)).fontWeight(.semibold)
+                Spacer()
+                Button { showingDetails = true } label: { Image(systemName: "info.circle") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("查看 \(brand) 官方额度说明")
+                    .accessibilityLabel("查看 \(brand) 官方额度说明")
+            }
+
+            if let source {
+                HStack(spacing: 10) {
+                    if sources.count > 1 {
+                        Picker("额度来源", selection: Binding(
+                            get: { source.id },
+                            set: { selectedSource = $0 }
+                        )) {
+                            ForEach(sources, id: \.id) { item in Text(item.name).tag(item.id) }
+                        }
+                        .pickerStyle(.menu)
+                        .help("仅切换官方额度来源；本地 Token 图表仍汇总全部已授权电脑")
+                    } else {
+                        Text("来源 · " + source.name)
+                            .font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let windows = source.visibleQuotas(now: context.date)
+                    VStack(alignment: .leading, spacing: 17) {
+                        ForEach(windows) { quota in
+                            UsageQuotaRow(quota: quota, failed: failed, now: context.date)
+                        }
+                    }
+                }
+            } else {
+                Text(emptyQuotaNote)
+                    .font(.custom("MiSans-Regular", size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.quaternary, lineWidth: 0.7) }
+        .onAppear { retainSource(sources.map(\.id)) }
+        .onChange(of: sources.map(\.id)) { _, ids in retainSource(ids) }
+        .sheet(isPresented: $showingDetails) {
+            UsageHelpSheet(title: brand + " 官方额度", text: detailsText)
+        }
+    }
+
+    private func retainSource(_ ids: [String]) {
+        if let selectedSource, ids.contains(selectedSource) { return }
+        selectedSource = ids.first
+    }
+
+    private var emptyQuotaNote: String {
+        if let check = checks.first(where: { $0.tool == tool }) {
+            let prefix = (check.sourceName?.isEmpty == false) ? "来源 · \(check.sourceName!)\n" : ""
+            return prefix + UsageFormat.quotaCheck(check.state)
+        }
+        if tool == "claude" {
+            return "暂未收到官方额度读数 · 在电脑端登录 Claude Code 或开启状态栏同步后显示"
+        }
+        if tool == "antigravity" {
+            return "暂未收到官方额度读数 · 打开电脑端 Antigravity 后自动同步"
+        }
+        return "等待电脑提供官方额度"
+    }
+
+    private var detailsText: String {
+        let now = Date()
+        var parts = ["官方额度显示服务方实际返回的窗口及额度组，百分比只使用真实读数，不用 Token 推算。不同来源电脑可能登录不同账号，额度不合并。"]
+        if let source {
+            for quota in source.visibleQuotas(now: now) {
+                var text = quota.displayTitle + "\n" + quota.usedText(now: now, failed: failed) + "（" + quota.remainingText(now: now, failed: failed) + "）\n" + quota.resetText(now: now, failed: failed)
+                if let observed = quota.observedDate { text += "\n记录于 " + UsageViewText.observed(observed) }
+                parts.append(text)
+            }
+        }
+        let relevant = checks.filter { $0.matches(tool: tool, sourceId: source?.id) }
+        for check in relevant {
+            var text = "额度读取"
+            if let name = check.sourceName, !name.isEmpty { text += " · " + name }
+            text += "\n" + UsageFormat.quotaCheck(check.state)
+            if let raw = check.lastAttemptAt, let date = MonitorDate.parse(raw) { text += "\n尝试于 " + UsageViewText.observed(date) }
+            if ["no_live_data", "unavailable"].contains(check.state), let interval = check.retryAfterSeconds {
+                text += "\n后续按 \((interval + 59) / 60) 分钟间隔重试"
+            }
+            parts.append(text)
+        }
+        if source == nil && relevant.isEmpty { parts.append(emptyQuotaNote) }
+        parts.append("每个窗口独立计量。已到重置时间的窗口等待新的真实读数确认，不会自动视为满额。")
+        return parts.joined(separator: "\n\n")
+    }
+}
+
+@MainActor
 private struct UsageProviderCard: View {
     let tool: String
     let provider: UsageProvider?
     let reportDay: String?
-    let checks: [UsageQuotaCheck]
     let failed: Bool
     let loading: Bool
     @State private var selectedWeek: Date?
@@ -110,6 +263,12 @@ private struct UsageProviderCard: View {
         if day == today { return failed ? "今日上次记录" : "今日已记录" }
         return UsageCalendar.shortDay(day) + " 已记录"
     }
+    private var selectedDayShares: [UsageModelShare] {
+        guard historyValid, day >= firstDay, day <= today,
+              let end = UsageCalendar.date(provider?.history?.endDay), day <= end,
+              let entry = provider?.history?.dayEntry(on: day) else { return [] }
+        return entry.modelShares()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 17) {
@@ -119,8 +278,8 @@ private struct UsageProviderCard: View {
                 Spacer()
                 Button { showingHelp = true } label: { Image(systemName: "info.circle") }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .help("\(brand) 用量说明")
-                    .accessibilityLabel("查看 \(brand) 用量说明")
+                    .help("\(brand) 本地使用说明")
+                    .accessibilityLabel("查看 \(brand) 本地使用说明")
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text(caption).font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
@@ -170,28 +329,45 @@ private struct UsageProviderCard: View {
             if !historyValid && loading {
                 Text("正在读取历史…").font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
             }
-            Divider()
-            if tool == "antigravity" {
-                Text("仅统计已连接电脑本地对话日志中的 Token；本地日志不含套餐滚动额度。")
-                    .font(.custom("MiSans-Regular", size: 12))
-                    .foregroundStyle(.secondary)
-            } else {
-                UsageQuotaSection(tool: tool, provider: provider, checks: checks, failed: failed)
+            let shares = selectedDayShares
+            if !shares.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("模型 Token 占比")
+                        .font(.custom("MiSans-Regular", size: 14))
+                        .fontWeight(.semibold)
+                    ForEach(shares) { share in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(share.displayName)
+                                    .font(.custom("MiSans-Regular", size: 13))
+                                    .lineLimit(2)
+                                Spacer(minLength: 6)
+                                Text(UsageFormat.percentage(share.percent))
+                                    .font(.custom("MiSans-Regular", size: 14))
+                                    .fontWeight(.medium)
+                                    .monospacedDigit()
+                            }
+                            Text(UsageFormat.exact(share.tokens) + " Token" + (share.variantNote.map { " · " + $0 } ?? ""))
+                                .font(.custom("MiSans-Regular", size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.quaternary, lineWidth: 0.7) }
-        .sheet(isPresented: $showingHelp) { UsageHelpSheet(title: brand + " 用量", text: providerHelp) }
+        .sheet(isPresented: $showingHelp) { UsageHelpSheet(title: brand + " 本地用量", text: providerHelp) }
     }
 
     private func tokens(on date: Date) -> Int64? {
         if historyValid, date >= firstDay, date <= today,
            let end = UsageCalendar.date(provider?.history?.endDay), date <= end,
            let value = provider?.history?.tokens(on: date) { return value }
-        // Startup/compact responses may carry today's numeric record without history.
-        // A previous day's cached total must never be relabelled as today's usage.
         if date == today, UsageCalendar.date(reportDay) == today { return provider?.todayTokens }
         return nil
     }
@@ -201,135 +377,53 @@ private struct UsageProviderCard: View {
         selectedDay = UsageCalendar.selection(selected: nil, week: next, start: firstDay, end: today)
     }
     private var providerHelp: String {
-        var lines = ["柱状图汇总所有已授权电脑的已记录 Token，切换额度来源不会改变图表。"]
-        if let count = provider?.sessionCount { lines.append("已记录 \(count) 个对话。") }
+        var lines = ["柱状图汇总所有已授权电脑采集到的本地对话记录，可能有历史缺口，并非完整账单。"]
+        if let count = provider?.sessionCount { lines.append("今日已记录 \(count) 个对话。") }
         if let observed = provider?.observedAt, let date = MonitorDate.parse(observed) {
             lines.append("最近记录：" + UsageViewText.observed(date))
         }
-        lines.append("按北京时间统计，周一至周日为一周，最多查看最近 90 天。点选柱状图可查看该日准确数字；— 表示未提供，0 表示已记录为零。历史可能有缺口，并非完整账单。")
-        lines.append("套餐周额度是服务方提供的滚动窗口，与图表的日历周不同。百分比只使用真实额度读数，不用 Token 推算。不同来源电脑可能登录不同账号，额度不合并。")
-        lines.append("旧数据会标为上次记录。到达重置时间后等待新额度确认，不会自动显示为已恢复。缓存读取已包含在总量中，不重复相加。")
+        lines.append("按北京时间统计，周一至周日为一周，最多查看最近 90 天。点选柱状图可查看该日准确数字与模型 Token 占比；— 表示未提供，0 表示已记录为零。")
+        lines.append("模型构成是所选日期各模型占已采集 Token 总量的比例，未识别模型也计入分母，不是官方额度消耗比例。缓存读取已包含在总量中，不重复相加。")
         return lines.joined(separator: "\n\n")
     }
 }
 
-private struct UsageQuotaSection: View {
-    let tool: String
-    let provider: UsageProvider?
-    let checks: [UsageQuotaCheck]
-    let failed: Bool
-    @State private var selectedSource: String?
-    @State private var showingDetails = false
-
-    private var sources: [UsageSource] { provider?.sources(now: Date()) ?? [] }
-    private var source: UsageSource? {
-        sources.first(where: { $0.id == selectedSource }) ?? sources.first
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 10) {
-                if sources.count > 1 {
-                    Picker("额度来源", selection: Binding(
-                        get: { source?.id ?? "" },
-                        set: { selectedSource = $0 }
-                    )) {
-                        ForEach(sources, id: \.id) { item in Text(item.name).tag(item.id) }
-                    }
-                    .pickerStyle(.menu)
-                    .help("仅切换套餐额度来源；图表仍汇总全部已授权电脑")
-                } else {
-                    Text(source.map { "额度来源 · " + $0.name } ?? "套餐额度")
-                        .font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                }
-                Spacer(minLength: 0)
-                Button { showingDetails = true } label: { Image(systemName: "info.circle") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .help("查看全部额度窗口与读取状态")
-                    .accessibilityLabel("查看额度详情")
-            }
-            // Only quota rows tick. Chart identity and source-picker presentation stay stable.
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                VStack(spacing: 17) {
-                    UsageQuotaRow(title: "周额度", quota: source?.preferredQuota(minutes: 10080, now: context.date), weekly: true, failed: failed, now: context.date)
-                    UsageQuotaRow(title: "5 小时额度", quota: source?.preferredQuota(minutes: 300, now: context.date), weekly: false, failed: failed, now: context.date)
-                }
-            }
-        }
-        .onAppear { retainSource(sources.map(\.id)) }
-        .onChange(of: sources.map(\.id)) { _, ids in retainSource(ids) }
-        .sheet(isPresented: $showingDetails) {
-            UsageHelpSheet(title: source.map { "额度 · " + $0.name } ?? "套餐额度", text: details)
-        }
-    }
-
-    private func retainSource(_ ids: [String]) {
-        if let selectedSource, ids.contains(selectedSource) { return }
-        selectedSource = ids.first
-    }
-
-    private var details: String {
-        let now = Date()
-        var parts = ["额度来自所选电脑登录的账号，不同来源不能合并。这里的来源选择只影响套餐额度，不影响每日 Token 图表。"]
-        if let source {
-            for quota in source.quotas {
-                var text = quota.windowTitle + "\n" + quota.remainingText(now: now, failed: failed) + "\n" + quota.resetText(now: now, failed: failed)
-                if let observed = quota.observedDate { text += "\n记录于 " + UsageViewText.observed(observed) }
-                parts.append(text)
-            }
-        }
-        let relevant = checks.filter { $0.matches(tool: tool, sourceId: source?.id) }
-        for check in relevant {
-            var text = "额度读取"
-            if let name = check.sourceName, !name.isEmpty { text += " · " + name }
-            text += "\n" + UsageFormat.quotaCheck(check.state)
-            if let raw = check.lastAttemptAt, let date = MonitorDate.parse(raw) { text += "\n尝试于 " + UsageViewText.observed(date) }
-            if ["no_live_data", "unavailable"].contains(check.state), let interval = check.retryAfterSeconds {
-                text += "\n后续按 \((interval + 59) / 60) 分钟间隔重试"
-            }
-            parts.append(text)
-        }
-        if source == nil && relevant.isEmpty { parts.append("这台电脑暂未提供套餐额度。未提供不代表没有使用。") }
-        parts.append("每个窗口独立计量。已过期窗口等待新的真实读数，不能自动视为满额。读取尝试时间与额度记录时间分别显示，重试不会使旧数据变新。")
-        return parts.joined(separator: "\n\n")
-    }
-}
-
 private struct UsageQuotaRow: View {
-    let title: String
-    let quota: UsageQuota?
-    let weekly: Bool
+    let quota: UsageQuota
     let failed: Bool
     let now: Date
-    private var old: Bool { failed || quota?.isStale(now: now) != false }
-    private var expired: Bool { quota?.isExpired(now: now) == true }
-    private var remaining: Double? { expired ? nil : quota?.remaining }
-    private var heading: String {
-        guard weekly, !expired, let used = quota?.usedPercent else { return title }
-        return title + (old ? " · 上次已用 " : "已用 ") + UsageFormat.percentage(used)
-    }
-    var remainingText: String {
-        quota?.remainingText(now: now, failed: failed) ?? "未提供"
-    }
+    private var old: Bool { failed || quota.isStale(now: now) }
+    private var expired: Bool { quota.isExpired(now: now) }
+    private var remaining: Double? { expired ? nil : quota.remaining }
     private var tone: Color { old || expired ? .secondary : (remaining ?? 100) <= 10 ? .orange : .primary }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(heading).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
+                Text(quota.displayTitle).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-                Text(remainingText).foregroundStyle(tone).fixedSize(horizontal: true, vertical: false)
+                Text(quota.remainingText(now: now, failed: failed))
+                    .foregroundStyle(tone)
+                    .monospacedDigit()
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            .font(.custom("MiSans-Regular", size: 12))
+            .font(.custom("MiSans-Regular", size: 12.5))
             UsageRemainingBar(value: remaining, stale: old)
-            Text(quota?.resetText(now: now, failed: failed) ?? "等待电脑提供额度")
-                .font(.custom("MiSans-Regular", size: 11)).foregroundStyle(.secondary)
-                .monospacedDigit().fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Text(quota.usedText(now: now, failed: failed))
+                Text("·")
+                Text(quota.resetText(now: now, failed: failed))
+            }
+            .font(.custom("MiSans-Regular", size: 11))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
     }
 }
 
-private enum UsageViewText {
+enum UsageViewText {
     static func observed(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
@@ -428,7 +522,7 @@ private struct UsageRemainingBar: View {
     }
 }
 
-private struct UsageHelpSheet: View {
+struct UsageHelpSheet: View {
     let title: String
     let text: String
     @Environment(\.dismiss) private var dismiss

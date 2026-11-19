@@ -21,9 +21,9 @@ final class UsageAlertNotification {
     }
     private static Notification.Builder builder(Context context, String channel, String tool,
                                                  String text, String detail, boolean locked) {
-        String brand = "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "任务";
+        String brand = "claude".equals(tool) ? "Claude Code" : "codex".equals(tool) ? "Codex" : "antigravity".equals(tool) ? "Antigravity" : "任务";
         int icon = R.drawable.ic_monitor;
-        Icon providerIcon = Icon.createWithResource(context, "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : R.drawable.monitor_brand);
+        Icon providerIcon = Icon.createWithResource(context, "claude".equals(tool) ? R.drawable.claude : "codex".equals(tool) ? R.drawable.codex : "antigravity".equals(tool) ? R.drawable.antigravity : R.drawable.monitor_brand);
         Intent open = new Intent(context, MainActivity.class).setAction("com.agentmonitor.live.OPEN_USAGE");
         PendingIntent content = PendingIntent.getActivity(context, ID, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);

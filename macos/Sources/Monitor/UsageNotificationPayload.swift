@@ -9,8 +9,8 @@ struct UsageNotificationPayload {
 
     init(account: String, tool: String, test: Bool = false) {
         self.account = account
-        self.tool = ["codex", "claude"].contains(tool) ? tool : ""
-        title = test ? "Monitor · 测试提醒" : tool == "claude" ? "Claude Code" : "Codex"
+        self.tool = ["codex", "claude", "antigravity"].contains(tool) ? tool : ""
+        title = test ? "Monitor · 测试提醒" : tool == "claude" ? "Claude Code" : tool == "antigravity" ? "Antigravity" : "Codex"
         body = test ? "点击查看用量" : "有一条额度提醒，打开 Monitor 查看"
     }
     var userInfo: [String: String] {
@@ -21,7 +21,7 @@ struct UsageNotificationPayload {
               currentAccount.allSatisfy({ "0123456789abcdef".contains($0) }),
               info["monitor_route"] as? String == "usage",
               info["monitor_account"] as? String == currentAccount,
-              let tool = info["monitor_tool"] as? String, ["", "codex", "claude"].contains(tool) else { return nil }
+              let tool = info["monitor_tool"] as? String, ["", "codex", "claude", "antigravity"].contains(tool) else { return nil }
         return tool
     }
 }

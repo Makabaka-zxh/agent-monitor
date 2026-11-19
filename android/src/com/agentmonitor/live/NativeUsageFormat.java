@@ -13,7 +13,7 @@ public final class NativeUsageFormat {
     private static final String VERSION = "([0-9]{1,2}(?:[.-][0-9]{1,2})?)";
     private static final String SNAPSHOT = "(?:-(?:[0-9]{8}|latest))?";
     private static final Pattern CLAUDE = Pattern.compile("(?:anthropic/)?claude-" + FAMILY
-            + "(?:-" + VERSION + ")?" + SNAPSHOT, Pattern.CASE_INSENSITIVE);
+            + "(?:-" + VERSION + ")?(?:-(low|medium|high|xhigh))?" + SNAPSHOT, Pattern.CASE_INSENSITIVE);
     private static final Pattern EARLY_CLAUDE = Pattern.compile("(?:anthropic/)?claude-" + VERSION
             + "-" + FAMILY + SNAPSHOT, Pattern.CASE_INSENSITIVE);
     private static final Pattern GPT = Pattern.compile("(?:openai/)?(gpt-[0-9]+(?:\\.[0-9]+)?o?|o[1-9][0-9]*)"
@@ -22,8 +22,8 @@ public final class NativeUsageFormat {
     private static final Pattern GPT_OSS = Pattern.compile("(?:openai/)?gpt-oss-([0-9]+b)(?:-(low|medium|high|xhigh))?",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern GEMINI = Pattern.compile("(?:google/)?gemini(?:-([0-9]+(?:[.-][0-9]+)?))?"
-            + "((?:-(?:pro|flash|lite|ultra|nano|carbon|hydrogen|argon|orchestrator|thinking|exp))+)"
-            + "(?:-(low|medium|high|xhigh))?(?:-(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest))?",
+            + "((?:-(?:pro|flash|lite|ultra|nano|neon|carbon|hydrogen|argon|orchestrator|tiered|worker|thinking|exp))+)"
+            + "(?:-(low|medium|high|xhigh))?(?:-(?:agy|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest))?",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern DATED_ID = Pattern.compile(".*-([0-9]{4})-?([0-9]{2})-?([0-9]{2})$");
     private NativeUsageFormat() { }
@@ -34,7 +34,8 @@ public final class NativeUsageFormat {
         Matcher claude = CLAUDE.matcher(value);
         if (claude.matches()) {
             String version = claude.group(2);
-            return "Claude " + title(claude.group(1)) + (version == null ? "" : " " + version.replace('-', '.'));
+            String base = "Claude " + title(claude.group(1)) + (version == null ? "" : " " + version.replace('-', '.'));
+            return claude.group(3) == null ? base : base + " (" + effortLabel(claude.group(3)) + ")";
         }
         Matcher early = EARLY_CLAUDE.matcher(value);
         if (early.matches()) return "Claude " + early.group(1).replace('-', '.') + " " + title(early.group(2));

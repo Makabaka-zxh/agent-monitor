@@ -308,10 +308,29 @@ private struct TaskDetailView: View {
     @ObservedObject var store: MonitorStore
     @StateObject private var model: TaskDetailModel
     @State private var showingModelSettings = false
+    @State private var showingTaskUsage = false
     init(task: MonitorTask, store: MonitorStore) {
         self.task = task
         self.store = store
         _model = StateObject(wrappedValue: TaskDetailModel(task: task, store: store))
+    }
+    private var liveTask: MonitorTask { store.task(task.id) ?? task }
+    private func exactOrMissing(_ value: Int64?) -> String {
+        value.map { UsageFormat.exact($0) } ?? "未提供"
+    }
+    private func taskUsageHelp(_ usage: TaskUsageSummary?) -> String {
+        guard let usage else { return "这台电脑暂未提供此对话的用量记录。\n未提供不代表没有使用。" }
+        var lines = [
+            "总量：\(exactOrMissing(usage.totalTokens)) Token",
+            "输入：\(exactOrMissing(usage.inputTokens))",
+            "输出：\(exactOrMissing(usage.outputTokens))",
+            "缓存读取：\(exactOrMissing(usage.cachedInputTokens))",
+            "缓存写入：\(exactOrMissing(usage.cacheWriteTokens))"
+        ]
+        if let raw = usage.observedAt, let date = MonitorDate.parse(raw) {
+            lines.append("最近记录：" + UsageViewText.observed(date))
+        }
+        return lines.joined(separator: "\n") + "\n\n这是已采集到的对话记录，可能不是完整历史。\n缓存相关分类依工具定义，总量由采集端去重计算，不把分类重复相加。"
     }
     var body: some View {
         ScrollView {
@@ -325,6 +344,24 @@ private struct TaskDetailView: View {
                     Spacer()
                 }
                 if let preview = task.preview, !preview.isEmpty { Text(preview).foregroundStyle(.secondary).lineLimit(3) }
+                if let usage = liveTask.usage, let total = usage.totalTokens {
+                    GlassCard {
+                        HStack(spacing: 14) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("本次对话已记录")
+                                    .font(.custom("MiSans-Regular", size: 12.5))
+                                    .foregroundStyle(.secondary)
+                                Text(UsageFormat.compact(total) + " Token" + (usage.coverage == "complete" ? "" : " · 部分记录"))
+                                    .font(.custom("MiSans-Regular", size: 19))
+                                    .fontWeight(.semibold)
+                                    .monospacedDigit()
+                            }
+                            Spacer()
+                            Button("查看明细") { showingTaskUsage = true }
+                                .controlSize(.regular)
+                        }
+                    }
+                }
                 if task.supportsReply {
                     TaskAttentionSection(model: model, waiting: task.status == "waiting")
                 }
@@ -388,6 +425,7 @@ private struct TaskDetailView: View {
         .navigationTitle(task.brand)
         .toolbar { ToolbarItem { Button(task.archived ? "取消归档" : "归档", systemImage: "archivebox") { Task { await store.archive(task) } }.disabled(store.mutating) } }
         .sheet(isPresented: $showingModelSettings) { SessionModelSettingsSheet(model: model) }
+        .sheet(isPresented: $showingTaskUsage) { UsageHelpSheet(title: "对话用量", text: taskUsageHelp(liveTask.usage)) }
         .task { await model.run() }
     }
 }

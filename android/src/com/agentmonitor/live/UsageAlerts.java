@@ -82,7 +82,8 @@ public final class UsageAlerts {
         if (providers == null) return;
         for (int i = 0; i < Math.min(4, providers.length()); i++) {
             JSONObject provider = providers.optJSONObject(i); if (provider == null) continue;
-            String tool = provider.optString("tool"); if (!"claude".equals(tool) && !"codex".equals(tool)) continue;
+            String tool = provider.optString("tool");
+            if (!"claude".equals(tool) && !"codex".equals(tool) && !"antigravity".equals(tool)) continue;
             JSONArray quotas = provider.optJSONArray("quotas"); if (quotas == null) continue;
             for (int j = 0; j < Math.min(20, quotas.length()); j++) {
                 JSONObject q = quotas.optJSONObject(j); if (q == null) continue;

@@ -125,6 +125,7 @@ public final class NativeUsagePage {
         refresh.setEnabled(!busy); refresh.setAlpha(busy ? .55f : 1f); setText(refresh, busy ? "正在更新" : "刷新用量");
     }
     private final class ProviderCard {
+        final String tool;
         final LinearLayout view = ui.column(), quotaView = ui.card(), chartArea = ui.column(), modelArea = ui.column(), quotaArea = ui.column();
         final JSONObject data; final Selection state;
         final TextView caption = ui.text("", 13), amount = ui.text("—", 24, true), unit = ui.text("Token", 13);
@@ -135,7 +136,7 @@ public final class NativeUsagePage {
         long nextQuotaExpiry = Long.MAX_VALUE;
         LocalDate start, today, displayedWeek, displayedDay; boolean hasHistory, hasRecordedHistory; TextView weekName;
         ProviderCard(String tool, JSONObject data) {
-            this.data = data; Selection found = selections.get(tool);
+            this.tool = tool; this.data = data; Selection found = selections.get(tool);
             if (found == null) { found = new Selection(); selections.put(tool, found); }
             state = found; today = NativeUsagePresentation.today(System.currentTimeMillis()); start = today;
             JSONObject series = data == null ? null : data.optJSONObject("history");
@@ -271,7 +272,18 @@ public final class NativeUsagePage {
             collectSources(now);
             for (int i = quotas.size() - 1; i >= 0; i--) if (quotas.get(i).owner == this) quotas.remove(i);
             quotaArea.removeAllViews(); Source source = findSource(state.saved.source);
-            quotaView.setVisibility(source == null ? View.GONE : View.VISIBLE); if (source == null) return;
+            if (source == null) {
+                String fallback = emptyQuotaNote(tool, hasRecordedHistory);
+                quotaView.setVisibility(fallback.isEmpty() ? View.GONE : View.VISIBLE);
+                if (!fallback.isEmpty()) {
+                    quotaArea.addView(ui.space(12));
+                    TextView note = ui.text(fallback, 13);
+                    note.setTextColor(ui.muted);
+                    quotaArea.addView(note, wrap());
+                }
+                return;
+            }
+            quotaView.setVisibility(View.VISIBLE);
             if (source != null) {
                 LinearLayout choices = ui.column(); choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE);
                 TextView choose = ui.quietButton("来源 · " + source.name + (sources.size() > 1 ? "  ▾" : ""),
@@ -375,6 +387,20 @@ public final class NativeUsagePage {
             if (value != null && value > 0) { paint.setColor(old ? ui.muted : value >= 90 ? ui.warning : ui.accent); paint.setAlpha(old ? 110 : 255);
                 canvas.drawRoundRect(new RectF(0, 0, (float) (getWidth() * value / 100), getHeight()), radius, radius, paint); paint.setAlpha(255); }
         }
+    }
+    private String emptyQuotaNote(String tool, boolean hasRecordedHistory) {
+        JSONArray checks = summary == null ? null : summary.optJSONArray("quota_checks");
+        for (int i = 0; checks != null && i < Math.min(checks.length(), 20); i++) {
+            JSONObject check = checks.optJSONObject(i);
+            if (check == null || !tool.equals(check.optString("tool"))) continue;
+            String name = LivePresentation.clean(check.optString("source_name"), 60);
+            String prefix = name.isEmpty() ? "" : "来源 · " + name + "\n";
+            return prefix + NativeUsageFormat.quotaCheck(check.optString("state"));
+        }
+        if (!hasRecordedHistory) return "";
+        if ("claude".equals(tool)) return "暂未收到官方额度读数 · 在电脑端登录 Claude Code 或开启状态栏同步后显示";
+        if ("antigravity".equals(tool)) return "暂未收到官方额度读数 · 打开电脑端 Antigravity 后自动同步";
+        return "";
     }
     private String providerHelp(String tool, JSONObject data, Source source) {
         String day = summary == null ? "" : summary.optString("day");

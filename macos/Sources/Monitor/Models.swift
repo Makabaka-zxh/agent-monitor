@@ -11,6 +11,32 @@ enum TaskScope: String, CaseIterable, Identifiable {
     var title: String { switch self { case .active: "进行中"; case .all: "全部任务"; case .archived: "已归档" } }
 }
 
+struct TaskUsageSummary: Decodable, Hashable {
+    let tool: String?
+    let coverage: String?
+    let totalTokens: Int64?
+    let inputTokens: Int64?
+    let outputTokens: Int64?
+    let cachedInputTokens: Int64?
+    let cacheWriteTokens: Int64?
+    let observedAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case tool, coverage, totalTokens, inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, observedAt
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tool = try? c.decode(String.self, forKey: .tool)
+        coverage = try? c.decode(String.self, forKey: .coverage)
+        totalTokens = UsageFormat.count(try? c.decode(Int64.self, forKey: .totalTokens))
+        inputTokens = UsageFormat.count(try? c.decode(Int64.self, forKey: .inputTokens))
+        outputTokens = UsageFormat.count(try? c.decode(Int64.self, forKey: .outputTokens))
+        cachedInputTokens = UsageFormat.count(try? c.decode(Int64.self, forKey: .cachedInputTokens))
+        cacheWriteTokens = UsageFormat.count(try? c.decode(Int64.self, forKey: .cacheWriteTokens))
+        observedAt = try? c.decode(String.self, forKey: .observedAt)
+    }
+}
+
 struct MonitorTask: Decodable, Identifiable, Hashable {
     let id: String
     let title: String
@@ -24,6 +50,7 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
     let finalResultId: String?
     var archived: Bool
     let stale: Bool?
+    var usage: TaskUsageSummary? = nil
     static func brand(for tool: String) -> String {
         guard let source = ToolFilter(rawValue: tool), source != .all else { return "任务" }
         return source.title

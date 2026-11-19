@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .antigravity_quota import read_antigravity_quota
 from .usage_claude_cli import MAX_LIMITS, ClaudeCliQuotaReader
 from .usage_ledger import SHANGHAI, UsageLedger, read_claude_quota_file
 from .usage_statusline import atomic_write, decode, safe_path
@@ -148,6 +149,9 @@ class UsageService:
                 quota = read_claude_quota_file()
                 if quota is not None:
                     self.ledger.ingest_claude_quota(quota)
+                ag_quota = read_antigravity_quota()
+                if ag_quota is not None:
+                    self.ledger.ingest_antigravity_quota(ag_quota)
         except Exception as exc:
             logging.getLogger("agent_monitor").warning("Usage collection unavailable (%s)", type(exc).__name__)
         # A failed log scan must not hide an existing persisted ledger.

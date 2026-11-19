@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from .antigravity_quota import read_antigravity_quota
 from .usage_ledger import UsageLedger, read_claude_quota_file
 
 
@@ -31,6 +32,9 @@ class RemoteUsageWorker:
                     quota = read_claude_quota_file()
                     if quota is not None:
                         ledger.ingest_claude_quota(quota)
+                    ag_quota = read_antigravity_quota()
+                    if ag_quota is not None:
+                        ledger.ingest_antigravity_quota(ag_quota)
                     # Quota freshness must not queue behind the first historical
                     # token backfill. This timestamp-idempotent snapshot has no
                     # accounting cursor and is never acknowledged separately.

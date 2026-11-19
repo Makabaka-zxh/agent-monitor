@@ -78,7 +78,7 @@ enum UsageAlertPolicy {
         guard lowEnabled || resetEnabled else { return [] }
 
         var windows: [Window: [UsageQuota]] = [:]
-        for provider in summary.providers where ["codex", "claude"].contains(provider.tool) {
+        for provider in summary.providers where ["codex", "claude", "antigravity"].contains(provider.tool) {
             for quota in provider.quotas {
                 guard let window = Window(tool: provider.tool, quota: quota) else { continue }
                 windows[window, default: []].append(quota)

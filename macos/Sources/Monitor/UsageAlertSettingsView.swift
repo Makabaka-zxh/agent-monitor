@@ -51,7 +51,7 @@ struct UsageAlertSettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("关于提醒").font(.custom("MiSans-Regular", size: 24)).fontWeight(.semibold)
                 Text("仅依据新鲜的真实额度提醒，每个额度周期内，同一种提醒只发送一次。")
-                Text("通知只显示 Claude Code 或 Codex，不包含额度、电脑名或任务内容。点击通知可进入用量页。")
+                Text("通知只显示 Codex、Claude Code 或 Antigravity，不包含额度、电脑名或任务内容。点击通知可进入用量页。")
                 Text("Monitor 运行时持续检查，关闭窗口后仍有效；退出 App 或 Mac 睡眠期间不会检查。横幅、声音和锁屏展示由系统通知设置决定。")
                     .foregroundStyle(.secondary)
                 Button("知道了") { showingInfo = false }.buttonStyle(.borderedProminent).controlSize(.large)

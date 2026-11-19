@@ -4,9 +4,9 @@ import XCTest
 final class UsageNotificationPayloadTests: XCTestCase {
     private let account = String(repeating: "a", count: 64)
     func testNotificationsHaveNoQuotaOrComputerDetails() {
-        for tool in ["codex", "claude"] {
+        for tool in ["codex", "claude", "antigravity"] {
             let payload = UsageNotificationPayload(account: account, tool: tool)
-            XCTAssertEqual(payload.title, tool == "claude" ? "Claude Code" : "Codex")
+            XCTAssertEqual(payload.title, tool == "claude" ? "Claude Code" : tool == "antigravity" ? "Antigravity" : "Codex")
             XCTAssertEqual(payload.body, "有一条额度提醒，打开 Monitor 查看")
             XCTAssertEqual(Set(payload.userInfo.keys), Set(["monitor_route", "monitor_account", "monitor_tool"]))
             XCTAssertEqual(UsageNotificationPayload.route(payload.userInfo, currentAccount: account), tool)

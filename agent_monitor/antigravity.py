@@ -26,7 +26,9 @@ _MAX_SIDE_BYTES = 64 * 1024 * 1024
 _MAX_WORKSPACE_CHARS = 8192
 _RESULT_FAST_TAIL = 64 * 1024
 _MAX_RESULT_READ_BYTES = 2 * 1024 * 1024
-_READ_TIMEOUT = 0.075
+_READ_TIMEOUT = 0.5
+_MAX_GEN_METADATA_BLOB = 256 * 1024
+_MAX_GEN_METADATA_ROWS = 20_000
 _SCHEMA = "conversation_summaries"
 _FIELDS = frozenset({
     "conversation_id", "title", "last_modified_time", "workspace_uris", "status",
@@ -298,6 +300,159 @@ def scan_antigravity(*, base: Path | str | None = None, limit: int = 50,
 
 def antigravity_available(*, base: Path | str | None = None) -> bool:
     return scan_antigravity(base=base, limit=0) is not None
+
+
+def _pb_varint(buf: bytes, pos: int, end: int) -> tuple[int | None, int]:
+    val = shift = 0
+    while pos < end and shift < 70:
+        byte = buf[pos]
+        pos += 1
+        val |= (byte & 0x7F) << shift
+        if not (byte & 0x80):
+            return val, pos
+        shift += 7
+    return None, end
+
+
+def _pb_fields(buf: bytes, pos: int = 0, end: int | None = None):
+    if end is None:
+        end = len(buf)
+    while pos < end:
+        tag, pos = _pb_varint(buf, pos, end)
+        if tag is None or tag == 0:
+            break
+        field_no, wire = tag >> 3, tag & 7
+        if wire == 0:
+            val, pos = _pb_varint(buf, pos, end)
+            if val is None:
+                break
+            yield field_no, wire, val
+        elif wire == 1:
+            if pos + 8 > end:
+                break
+            pos += 8
+        elif wire == 2:
+            length, pos = _pb_varint(buf, pos, end)
+            if length is None or pos + length > end:
+                break
+            yield field_no, wire, (pos, pos + length)
+            pos += length
+        elif wire == 5:
+            if pos + 4 > end:
+                break
+            pos += 4
+        else:
+            break
+
+
+def parse_antigravity_gen_metadata_blob(blob: bytes) -> tuple[list[int], str | None]:
+    """Extract (step_indices, model_id) from a GeneratorMetadata protobuf blob."""
+    if not isinstance(blob, (bytes, bytearray, memoryview)) or not 0 < len(blob) <= _MAX_GEN_METADATA_BLOB:
+        return [], None
+    raw = bytes(blob)
+    steps: list[int] = []
+    model: str | None = None
+    for field_no, wire, val in _pb_fields(raw):
+        if field_no == 2:
+            if wire == 0 and 0 <= val <= 10_000_000:
+                steps.append(val)
+            elif wire == 2:
+                p, e = val
+                while p < e and len(steps) < 512:
+                    sv, p = _pb_varint(raw, p, e)
+                    if sv is None:
+                        break
+                    if 0 <= sv <= 10_000_000:
+                        steps.append(sv)
+        elif field_no == 1 and wire == 2:
+            p, e = val
+            for sub_no, sub_wire, sub_val in _pb_fields(raw, p, e):
+                if sub_no == 19 and sub_wire == 2:
+                    sp, se = sub_val
+                    if 0 < se - sp <= 96:
+                        try:
+                            decoded = raw[sp:se].decode("utf-8", errors="strict")
+                            if decoded and not any(ord(c) < 32 for c in decoded):
+                                model = decoded
+                        except UnicodeDecodeError:
+                            pass
+    return steps, model
+
+
+def _allow_gen_metadata_columns(action, first, second, database, _origin):
+    if action == sqlite3.SQLITE_SELECT:
+        return sqlite3.SQLITE_OK
+    if action == sqlite3.SQLITE_READ and database == "main" and first == "gen_metadata" and second in {"idx", "data"}:
+        return sqlite3.SQLITE_OK
+    if action == sqlite3.SQLITE_FUNCTION and second == "length":
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def _read_gen_metadata_rows(conv_db: Path, *, latest_only: bool) -> list[tuple]:
+    first = _file(conv_db, size_limit=2**63 - 1)
+    with conv_db.open("rb") as handle:
+        if not os.path.samestat(first, os.fstat(handle.fileno())):
+            return []
+        header = handle.read(20)
+    if header[:16] != b"SQLite format 3\0" or header[18:20] not in (b"\1\1", b"\2\2"):
+        return []
+    wal, shm, journal = (_side(conv_db, suffix) for suffix in ("-wal", "-shm", "-journal"))
+    if (wal is None) != (shm is None) or journal is not None or (wal is not None and header[18] != 2):
+        return []
+    checkpointed = wal is None and header[18] == 2
+    uri = conv_db.as_uri() + "?mode=ro" + ("&immutable=1" if checkpointed else "")
+    deadline = time.monotonic() + _READ_TIMEOUT
+    query = (
+        "SELECT data FROM main.gen_metadata WHERE length(data) <= ? ORDER BY idx DESC LIMIT 8"
+        if latest_only else
+        "SELECT data FROM main.gen_metadata WHERE length(data) <= ? ORDER BY idx ASC LIMIT ?"
+    )
+    params = (_MAX_GEN_METADATA_BLOB,) if latest_only else (_MAX_GEN_METADATA_BLOB, _MAX_GEN_METADATA_ROWS)
+    with closing(sqlite3.connect(uri, uri=True, timeout=_READ_TIMEOUT)) as connection:
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 512)
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        connection.execute("PRAGMA temp_store=MEMORY")
+        table = connection.execute(
+            "SELECT type FROM pragma_table_list('gen_metadata') WHERE schema = 'main' AND name = 'gen_metadata'"
+        ).fetchone()
+        if table != ("table",):
+            return []
+        connection.set_authorizer(_allow_gen_metadata_columns)
+        return connection.execute(query, params).fetchall()
+
+
+def read_antigravity_step_models(conv_db: Path) -> dict[int, str | None]:
+    """Map step_index -> public model ID; conflicting retries map to None."""
+    try:
+        rows = _read_gen_metadata_rows(conv_db, latest_only=False)
+    except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+        return {}
+    mapping: dict[int, str | None] = {}
+    for (blob,) in rows:
+        steps, model = parse_antigravity_gen_metadata_blob(blob)
+        if not steps or not model:
+            continue
+        for step_idx in steps:
+            if step_idx not in mapping:
+                mapping[step_idx] = model
+            elif mapping[step_idx] is not None and mapping[step_idx] != model:
+                mapping[step_idx] = None
+    return mapping
+
+
+def read_latest_antigravity_model(conv_db: Path) -> str | None:
+    """Return the most recent model ID recorded in gen_metadata for a conversation DB."""
+    try:
+        rows = _read_gen_metadata_rows(conv_db, latest_only=True)
+    except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+        return None
+    for (blob,) in rows:
+        _, model = parse_antigravity_gen_metadata_blob(blob)
+        if model:
+            return model
+    return None
 
 
 def _result_index(base, session_id, now):

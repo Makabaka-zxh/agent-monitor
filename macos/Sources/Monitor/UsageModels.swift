@@ -103,6 +103,12 @@ struct UsageProvider: Codable, Identifiable {
             return $0.id < $1.id
         }
     }
+    func visibleSources(now: Date = Date()) -> [UsageSource] {
+        sources(now: now).filter { !$0.visibleQuotas(now: now).isEmpty }
+    }
+    var hasRecordedHistory: Bool {
+        history?.days.contains(where: { $0.tokens != nil }) == true || todayTokens != nil
+    }
 }
 
 struct UsageHistory: Codable {
@@ -131,29 +137,107 @@ struct UsageHistory: Codable {
             }.sorted { $0.day < $1.day }.suffix(90))
         } else { days = [] }
     }
-    func tokens(on date: Date, now: Date = Date()) -> Int64? {
+    func dayEntry(on date: Date, now: Date = Date()) -> UsageDay? {
         guard isValid, UsageCalendar.today(now: date) <= UsageCalendar.today(now: now) else { return nil }
-        return days.first { $0.day == UsageCalendar.day(date) }?.tokens
+        return days.first { $0.day == UsageCalendar.day(date) }
     }
+    func tokens(on date: Date, now: Date = Date()) -> Int64? {
+        dayEntry(on: date, now: now)?.tokens
+    }
+}
+
+struct UsageDayModel: Codable, Equatable {
+    let model: String
+    let tokens: Int64?
+    private enum CodingKeys: String, CodingKey { case model, tokens }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        model = (try? c.decode(String.self, forKey: .model)) ?? ""
+        tokens = UsageFormat.count(try? c.decode(Int64.self, forKey: .tokens))
+    }
+}
+
+struct UsageModelShare: Equatable, Identifiable {
+    let model: String?
+    let displayName: String
+    let tokens: Int64
+    let percent: Double
+    let variantNote: String?
+    var id: String { model ?? "__unknown__" }
 }
 
 struct UsageDay: Codable, Identifiable {
     let day: String
     let tokens: Int64?
     let coverage: String?
+    let models: [UsageDayModel]
+    let unknownModelTokens: Int64?
     var id: String { day }
-    private enum CodingKeys: String, CodingKey { case day, tokens, coverage }
+    private enum CodingKeys: String, CodingKey { case day, tokens, coverage, models, unknownModelTokens }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         day = (try? c.decode(String.self, forKey: .day)) ?? ""
         coverage = try? c.decode(String.self, forKey: .coverage)
         tokens = coverage == "unavailable" ? nil : UsageFormat.count(try? c.decode(Int64.self, forKey: .tokens))
+        models = Array(((try? c.decode([UsageDayModel].self, forKey: .models)) ?? []).prefix(101))
+        unknownModelTokens = coverage == "unavailable" ? nil : UsageFormat.count(try? c.decode(Int64.self, forKey: .unknownModelTokens))
+    }
+
+    func modelShares() -> [UsageModelShare] {
+        guard let total = tokens, total > 0, !models.isEmpty, models.count <= 100,
+              let unknown = unknownModelTokens, unknown >= 0 else { return [] }
+        var seen = Set<String>()
+        var sum = unknown
+        var rawItems: [(model: String, displayName: String, tokens: Int64, percent: Double)] = []
+        for entry in models {
+            let raw = entry.model
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty, raw == trimmed, raw.count <= 120, seen.insert(raw).inserted,
+                  let amount = entry.tokens, amount >= 0 else { return [] }
+            if raw.unicodeScalars.contains(where: { $0.value <= 0x1F || (0x7F...0x9F).contains($0.value) }) {
+                return []
+            }
+            guard amount <= Int64.max - sum else { return [] }
+            sum += amount
+            rawItems.append((raw, UsageFormat.modelName(raw), amount, Double(amount) / Double(total) * 100))
+        }
+        guard sum == total else { return [] }
+        let sorted = rawItems.enumerated().sorted { lhs, rhs in
+            if lhs.element.tokens != rhs.element.tokens { return lhs.element.tokens > rhs.element.tokens }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+        var nameCounts: [String: Int] = [:]
+        var variantCounts: [String: Int] = [:]
+        for item in sorted {
+            let variant = UsageFormat.modelVariant(item.model)
+            nameCounts[item.displayName, default: 0] += 1
+            variantCounts[item.displayName + "\n" + variant, default: 0] += 1
+        }
+        var shares: [UsageModelShare] = sorted.map { item in
+            let note: String?
+            if (nameCounts[item.displayName] ?? 0) >= 2 {
+                let variant = UsageFormat.modelVariant(item.model)
+                note = (variantCounts[item.displayName + "\n" + variant] == 1) ? variant : item.model
+            } else {
+                note = nil
+            }
+            return UsageModelShare(model: item.model, displayName: item.displayName,
+                                   tokens: item.tokens, percent: item.percent, variantNote: note)
+        }
+        if unknown > 0 {
+            shares.append(UsageModelShare(model: nil, displayName: "未识别模型",
+                                          tokens: unknown, percent: Double(unknown) / Double(total) * 100, variantNote: nil))
+        }
+        return shares
     }
 }
 
 struct UsageQuota: Codable, Identifiable {
     let key: String
     let label: String?
+    let bucketId: String?
+    let bucketLabel: String?
+    let model: String?
     let usedPercent: Double?
     let remainingPercent: Double?
     let windowMinutes: Int64?
@@ -163,16 +247,30 @@ struct UsageQuota: Codable, Identifiable {
     let sourceName: String?
     let stale: Bool
     let availability: String?
-    var id: String { [sourceDeviceId ?? "", key, String(resetsAt ?? 0), observedAt ?? ""].map { "\($0.utf8.count):\($0)" }.joined() }
+    var id: String { [sourceDeviceId ?? "", bucketId ?? "", key, String(windowMinutes ?? 0), String(resetsAt ?? 0), observedAt ?? ""].map { "\($0.utf8.count):\($0)" }.joined() }
     var remaining: Double? { remainingPercent ?? usedPercent.map { 100 - $0 } }
+    var used: Double? { usedPercent ?? remainingPercent.map { 100 - $0 } }
     var resetDate: Date? { UsageFormat.epochDate(resetsAt) }
     var observedDate: Date? { observedAt.flatMap(MonitorDate.parse) }
     var windowTitle: String { UsageFormat.window(windowMinutes, fallback: label) }
-    private enum CodingKeys: String, CodingKey { case key, label, usedPercent, remainingPercent, windowMinutes, resetsAt, observedAt, sourceDeviceId, sourceName, stale, availability }
+    var displayTitle: String {
+        let rawBucket = bucketLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawModel = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let target = rawBucket.isEmpty ? rawModel : rawBucket
+        let formatted = UsageFormat.modelName(target)
+        return formatted.isEmpty ? windowTitle : "\(formatted) · \(windowTitle)"
+    }
+    private enum CodingKeys: String, CodingKey {
+        case key, label, bucketId, bucketLabel, model, usedPercent, remainingPercent
+        case windowMinutes, resetsAt, observedAt, sourceDeviceId, sourceName, stale, availability
+    }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         key = (try? c.decode(String.self, forKey: .key)) ?? ""
         label = try? c.decode(String.self, forKey: .label)
+        bucketId = try? c.decode(String.self, forKey: .bucketId)
+        bucketLabel = try? c.decode(String.self, forKey: .bucketLabel)
+        model = try? c.decode(String.self, forKey: .model)
         usedPercent = UsageFormat.percent(try? c.decode(Double.self, forKey: .usedPercent))
         remainingPercent = UsageFormat.percent(try? c.decode(Double.self, forKey: .remainingPercent))
         windowMinutes = UsageFormat.positive(try? c.decode(Int64.self, forKey: .windowMinutes))
@@ -185,12 +283,24 @@ struct UsageQuota: Codable, Identifiable {
         availability = try? c.decode(String.self, forKey: .availability)
     }
     func isExpired(now: Date = Date()) -> Bool { availability == "expired" || resetDate.map { $0 <= now } == true }
+    func isVisible(now: Date = Date()) -> Bool { remaining != nil && !isExpired(now: now) }
     func isStale(now: Date = Date()) -> Bool {
         stale || isExpired(now: now) || !UsageFormat.observationFresh(observedDate, now: now)
     }
     func rank(now: Date) -> Int {
         guard remaining != nil else { return 0 }
         return isExpired(now: now) ? 1 : isStale(now: now) ? 2 : 3
+    }
+    func quotaIdentity(ordinal: Int) -> String {
+        let group = bucketId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let window = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mins = windowMinutes ?? 0
+        return "\(group.count):\(group)\(window.count):\(window):\(mins)" + (group.isEmpty && window.isEmpty ? ":\(ordinal)" : "")
+    }
+    func usedText(now: Date = Date(), failed: Bool = false) -> String {
+        if isExpired(now: now) { return "待更新" }
+        guard let used else { return "未提供" }
+        return (failed || isStale(now: now) ? "上次已用 " : "已用 ") + UsageFormat.percentage(used)
     }
     func remainingText(now: Date = Date(), failed: Bool = false) -> String {
         if isExpired(now: now) { return "待更新" }
@@ -209,6 +319,26 @@ struct UsageSource: Identifiable {
     var quotas: [UsageQuota]
     func preferredQuota(minutes: Int64, now: Date = Date()) -> UsageQuota? {
         best(quotas.filter { $0.windowMinutes == minutes }, now: now)
+    }
+    func visibleQuotas(now: Date = Date()) -> [UsageQuota] {
+        var orderedKeys: [String] = []
+        var bestByKey: [String: UsageQuota] = [:]
+        var ordinal = 0
+        for candidate in quotas {
+            guard candidate.isVisible(now: now) else { continue }
+            let identity = candidate.quotaIdentity(ordinal: ordinal)
+            ordinal += 1
+            if let previous = bestByKey[identity] {
+                let cRank = candidate.rank(now: now), pRank = previous.rank(now: now)
+                if cRank > pRank || (cRank == pRank && (candidate.observedDate ?? .distantPast) > (previous.observedDate ?? .distantPast)) {
+                    bestByKey[identity] = candidate
+                }
+            } else {
+                orderedKeys.append(identity)
+                bestByKey[identity] = candidate
+            }
+        }
+        return orderedKeys.compactMap { bestByKey[$0] }
     }
     func bestQuota(now: Date = Date()) -> UsageQuota? { best(quotas, now: now) }
     private func best(_ items: [UsageQuota], now: Date) -> UsageQuota? {
@@ -278,6 +408,24 @@ enum UsageCalendar {
 }
 
 enum UsageFormat {
+    private static let datedIdRegex = try! NSRegularExpression(pattern: #"\A.*-([0-9]{4})-?([0-9]{2})-?([0-9]{2})\z"#)
+    static func modelName(_ value: String) -> String { SessionControlPolicy.modelName(value) }
+    static func modelVariant(_ id: String) -> String {
+        let range = NSRange(id.startIndex..<id.endIndex, in: id)
+        let version: String
+        if let match = datedIdRegex.firstMatch(in: id, range: range),
+           let y = Range(match.range(at: 1), in: id),
+           let m = Range(match.range(at: 2), in: id),
+           let d = Range(match.range(at: 3), in: id) {
+            version = "\(id[y])-\(id[m])-\(id[d])"
+        } else {
+            version = id.hasSuffix("-latest") ? "最新版" : "未指定快照"
+        }
+        if id.hasPrefix("openai/") { return "OpenAI · " + version }
+        if id.hasPrefix("anthropic/") { return "Anthropic · " + version }
+        if id.hasPrefix("google/") { return "Google · " + version }
+        return version
+    }
     static func count(_ value: Int64?) -> Int64? { value.flatMap { $0 >= 0 ? $0 : nil } }
     static func positive(_ value: Int64?) -> Int64? { value.flatMap { $0 > 0 ? $0 : nil } }
     static func percent(_ value: Double?) -> Double? { value.flatMap { $0.isFinite && (0...100).contains($0) ? $0 : nil } }

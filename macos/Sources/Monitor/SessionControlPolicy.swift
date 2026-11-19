@@ -470,7 +470,7 @@ enum SessionControlPolicy {
     private static let sha256Pattern = "[0-9a-f]{64}"
 
     private static let claudeRegex = try! NSRegularExpression(
-        pattern: #"\A(?:anthropic/)?claude-(opus|sonnet|haiku|fable|mythos)(?:-([0-9]{1,2}(?:[.-][0-9]{1,2})?))?(?:-(?:[0-9]{8}|latest))?\z"#,
+        pattern: #"\A(?:anthropic/)?claude-(opus|sonnet|haiku|fable|mythos)(?:-([0-9]{1,2}(?:[.-][0-9]{1,2})?))?(?:-(low|medium|high|xhigh))?(?:-(?:[0-9]{8}|latest))?\z"#,
         options: [.caseInsensitive]
     )
     private static let earlyClaudeRegex = try! NSRegularExpression(
@@ -478,7 +478,7 @@ enum SessionControlPolicy {
         options: [.caseInsensitive]
     )
     private static let geminiRegex = try! NSRegularExpression(
-        pattern: #"\A(?:google/)?gemini(?:-([0-9]+(?:[.-][0-9]+)?))?((?:-(?:pro|flash|lite|ultra|nano|carbon|hydrogen|argon|orchestrator|thinking|exp))+)(?:-(low|medium|high|xhigh))?(?:-(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest))?\z"#,
+        pattern: #"\A(?:google/)?gemini(?:-([0-9]+(?:[.-][0-9]+)?))?((?:-(?:pro|flash|lite|ultra|nano|neon|carbon|hydrogen|argon|orchestrator|tiered|worker|thinking|exp))+)(?:-(low|medium|high|xhigh))?(?:-(?:agy|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest))?\z"#,
         options: [.caseInsensitive]
     )
     private static let gptOssRegex = try! NSRegularExpression(
@@ -736,10 +736,14 @@ enum SessionControlPolicy {
         let range = NSRange(value.startIndex..<value.endIndex, in: value)
         if let match = claudeRegex.firstMatch(in: value, range: range) {
             let family = titleCase(group(match, 1, in: value) ?? "")
+            var base = "Claude \(family)"
             if let version = group(match, 2, in: value) {
-                return "Claude \(family) \(version.replacingOccurrences(of: "-", with: "."))"
+                base += " \(version.replacingOccurrences(of: "-", with: "."))"
             }
-            return "Claude \(family)"
+            if let effort = group(match, 3, in: value) {
+                return base + " (\(modelEffortSuffix(effort)))"
+            }
+            return base
         }
         if let match = earlyClaudeRegex.firstMatch(in: value, range: range),
            let version = group(match, 1, in: value), let family = group(match, 2, in: value) {

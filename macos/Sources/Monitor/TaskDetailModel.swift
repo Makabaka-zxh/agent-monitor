@@ -212,7 +212,8 @@ final class TaskDetailModel: ObservableObject {
                 await refreshControls()
             }
             let waitingTask = store.task(taskId)?.status == "waiting"
-            let interval = retryResultSoon ? 1 : (unresolved || waitingTask || hasOpenInteraction) ? 3 : 8
+            let catalogPending = controls?.catalogStatus == "pending"
+            let interval = retryResultSoon ? 1 : catalogPending ? 2 : (unresolved || waitingTask || hasOpenInteraction) ? 3 : 8
             do { try await Task.sleep(for: .seconds(interval)) } catch { return }
         }
     }
@@ -289,8 +290,9 @@ final class TaskDetailModel: ObservableObject {
             controlsReadFailed = false
             controlsObservedAt = Date()
             controlsFeedback = ""
+            let catalogPending = value.catalogStatus == "pending"
             let fastPoll = unresolved || store.task(taskId)?.status == "waiting" || hasOpenInteraction
-            controlsNextAt = Date().addingTimeInterval(fastPoll ? 3 : 5)
+            controlsNextAt = Date().addingTimeInterval(catalogPending ? 1.5 : fastPoll ? 3 : 5)
             pruneFinishedDecisions()
         } catch {
             guard !Task.isCancelled, current else { return }

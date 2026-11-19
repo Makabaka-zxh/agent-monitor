@@ -225,5 +225,52 @@ final class UsageTests: XCTestCase {
         XCTAssertEqual(UsageFormat.ratio(100, maximum: 200), 0.5)
         XCTAssertEqual(UsageFormat.ratio(300, maximum: 200), 1)
         XCTAssertEqual(UsageFormat.quotaCheck("raw diagnostic or path"), "暂时无法读取新额度")
+        XCTAssertEqual(UsageFormat.modelName("claude-opus-5-5-high"), "Claude Opus 5.5 (High)")
+        XCTAssertEqual(UsageFormat.modelName("gemini-4-neon-high"), "Gemini 4 Neon (High)")
+        XCTAssertEqual(UsageFormat.modelName("gemini-flash-worker-agy"), "Gemini Flash Worker")
+        XCTAssertEqual(UsageFormat.modelName("gpt-oss-120b-medium"), "GPT-OSS 120B (Medium)")
+    }
+
+    func testMultiBucketQuotasAndPerDayModelSharesMatchAndroidSemantics() throws {
+        let now = try date("2026-11-19T12:00:00Z")
+        let fiveHourReset = Int64(now.timeIntervalSince1970 + 7200)
+        let weeklyReset = Int64(now.timeIntervalSince1970 + 500000)
+        let expiredReset = Int64(now.timeIntervalSince1970 - 60)
+        let ag = try decode(UsageProvider.self, """
+        {"tool":"antigravity","today_tokens":24500,"coverage":"partial",
+         "quotas":[
+           {"key":"k1","bucket_id":"b1","bucket_label":"Gemini","source_device_id":"pc","source_name":"Studio","window_minutes":300,"used_percent":12,"remaining_percent":88,"resets_at":\(fiveHourReset),"observed_at":"2026-11-19T12:00:00Z","stale":false},
+           {"key":"k2","bucket_id":"b2","bucket_label":"Claude / GPT-OSS","source_device_id":"pc","source_name":"Studio","window_minutes":10080,"used_percent":100,"remaining_percent":0,"resets_at":\(weeklyReset),"observed_at":"2026-11-19T12:00:00Z","stale":false},
+           {"key":"k3","bucket_id":"b3","bucket_label":"Old","source_device_id":"pc","source_name":"Studio","window_minutes":300,"used_percent":50,"remaining_percent":50,"resets_at":\(expiredReset),"observed_at":"2026-11-19T11:00:00Z","stale":true}
+         ],
+         "history":{"start_day":"2026-11-19","end_day":"2026-11-19","timezone":"Asia/Shanghai",
+           "days":[{"day":"2026-11-19","tokens":24500,"unknown_model_tokens":1000,"coverage":"partial",
+             "models":[{"model":"gemini-4-carbon","tokens":10500},{"model":"claude-opus-5-5-high","tokens":13000}]}]}}
+        """)
+        let sources = ag.visibleSources(now: now)
+        XCTAssertEqual(sources.count, 1)
+        let visible = sources[0].visibleQuotas(now: now)
+        XCTAssertEqual(visible.map(\.displayTitle), ["Gemini · 5 小时额度", "Claude / GPT-OSS · 每周额度"])
+        XCTAssertEqual(visible.map { $0.remainingText(now: now) }, ["剩余 88%", "剩余 0%"])
+        XCTAssertEqual(visible.map { $0.usedText(now: now) }, ["已用 12%", "已用 100%"])
+
+        let shares = try XCTUnwrap(ag.history?.days.first?.modelShares())
+        XCTAssertEqual(shares.count, 3)
+        XCTAssertEqual(shares[0].displayName, "Claude Opus 5.5 (High)")
+        XCTAssertEqual(shares[0].tokens, 13000)
+        XCTAssertEqual(shares[1].displayName, "Gemini 4 Carbon")
+        XCTAssertEqual(shares[1].tokens, 10500)
+        XCTAssertEqual(shares[2].displayName, "未识别模型")
+        XCTAssertEqual(shares[2].tokens, 1000)
+
+        // Mismatched partial model sum fails closed rather than normalizing a misleading 100%.
+        let mismatched = try decode(UsageDay.self, #"{"day":"2026-11-19","tokens":100,"unknown_model_tokens":0,"coverage":"partial","models":[{"model":"gemini-4-carbon","tokens":80}]}"#)
+        XCTAssertTrue(mismatched.modelShares().isEmpty)
+
+        // Task usage decoding preserves exact numbers and omits negative/invalid fields.
+        let task = try decode(MonitorTask.self, #"{"id":"pc:antigravity:1","title":"Demo","tool":"antigravity","status":"idle","device_id":"pc","archived":false,"usage":{"tool":"antigravity","coverage":"partial","total_tokens":24500,"input_tokens":5400,"output_tokens":1600,"cached_input_tokens":17500,"cache_write_tokens":null}}"#)
+        XCTAssertEqual(task.usage?.totalTokens, 24500)
+        XCTAssertEqual(task.usage?.cachedInputTokens, 17500)
+        XCTAssertNil(task.usage?.cacheWriteTokens)
     }
 }

@@ -1440,16 +1440,18 @@ def _catalog_observation(resolved):
         if resolved.tool == "antigravity":
             transcript = (_antigravity_base_dir(resolved.path) / "brain" / resolved.session_id
                           / ".system_generated" / "logs" / "transcript.jsonl")
-            if not _unlinked(transcript) or not transcript.is_file():
-                return None, None
-            before = _stamp(transcript)
-            _, rows, _ = collector._read_window(transcript, max_bytes=256 * 1024)
-            for row in reversed(rows):
-                if row.get("type") == "PLANNER_RESPONSE" and row.get("source") == "MODEL" and isinstance(row.get("model"), str):
-                    model = row["model"]
-                    break
-            if before != _stamp(transcript):
-                return None, None
+            if _unlinked(transcript) and transcript.is_file():
+                before = _stamp(transcript)
+                _, rows, _ = collector._read_window(transcript, max_bytes=256 * 1024)
+                for row in reversed(rows):
+                    if row.get("type") == "PLANNER_RESPONSE" and row.get("source") == "MODEL" and isinstance(row.get("model"), str):
+                        model = row["model"]
+                        break
+                if before != _stamp(transcript):
+                    return None, None
+            if model is None and _unlinked(resolved.path) and resolved.path.is_file():
+                from .antigravity import read_latest_antigravity_model
+                model = read_latest_antigravity_model(resolved.path)
         else:
             before = _stamp(resolved.path)
             _, rows, _ = collector._read_window(resolved.path, max_bytes=1024 * 1024)
@@ -1511,6 +1513,19 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
         executable = executable_finder(target.tool)
         if not executable:
             return None
+        if (target.tool == "antigravity" and process_factory is _Process
+                and _same_path(_antigravity_base_dir(target.path), Path.home() / ".gemini" / "antigravity")):
+            from .antigravity_quota import antigravity_fast_catalog_rows, fetch_antigravity_user_status
+            fast_status = fetch_antigravity_user_status()
+            if fast_status is not None:
+                try:
+                    fast_rows, default_model, default_effort = antigravity_fast_catalog_rows(fast_status)
+                    obs_model, obs_effort = _catalog_observation(target)
+                    if obs_model is None:
+                        obs_model, obs_effort = default_model, default_effort
+                    return normalize_catalog("antigravity", fast_rows, current_model=obs_model, current_effort=obs_effort)
+                except Exception:
+                    pass
         # Listing capabilities does not open the live session or send a turn.
         spawn_cwd = target.cwd
         budget = timeout_seconds

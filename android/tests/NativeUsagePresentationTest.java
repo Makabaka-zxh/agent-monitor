@@ -108,8 +108,11 @@ public final class NativeUsagePresentationTest {
         equal("Claude Opus 4.6", NativeUsageFormat.modelName("claude-opus-4.6"));
         equal("Claude Haiku 4.5", NativeUsageFormat.modelName("claude-haiku-4-5"));
         equal("Claude Opus", NativeUsageFormat.modelName("claude-opus"));
+        equal("Claude Opus 5.5 (High)", NativeUsageFormat.modelName("claude-opus-5-5-high"));
         equal("Gemini 3.8 Flash (Low)", NativeUsageFormat.modelName("gemini-3.8-flash-low"));
+        equal("Gemini 4 Neon (High)", NativeUsageFormat.modelName("gemini-4-neon-high"));
         equal("Gemini 4 Hydrogen (XHigh)", NativeUsageFormat.modelName("gemini-4-hydrogen-xhigh"));
+        equal("Gemini Flash Worker", NativeUsageFormat.modelName("gemini-flash-worker-agy"));
         equal("Gemini Pro Orchestrator", NativeUsageFormat.modelName("gemini-pro-orchestrator"));
         equal("GPT-OSS 120B (Medium)", NativeUsageFormat.modelName("gpt-oss-120b-medium"));
         equal("gemini-future-unknown-tier", NativeUsageFormat.modelName("gemini-future-unknown-tier"));

@@ -457,8 +457,11 @@ struct SessionModelSettingsSheet: View {
         .padding(28)
         .frame(width: 460)
         .task { await model.refreshControls(force: false) }
-        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { value in
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { value in
             tickNow = value
+            if model.controls?.catalogStatus == "pending" || state == .loading {
+                Task { await model.refreshControls(force: false) }
+            }
         }
     }
 

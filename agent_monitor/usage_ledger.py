@@ -32,6 +32,7 @@ MAX_FILES = 100_000
 MAX_DIRECTORIES = 20_000
 MAX_SCAN_SECONDS = 2.0
 LOCAL_CODEX_PARSER_VERSION = 2
+LOCAL_ANTIGRAVITY_PARSER_VERSION = 2
 RECENT_ACCOUNTING_FILES = 32
 RECENT_FILE_BYTES = 4 * 1024 * 1024
 ACTIVE_ACCOUNTING_FILES_PER_TOOL = 2
@@ -72,9 +73,10 @@ def _bucket_label(value):
         return None
     # Preserve provider/model meter names, not arbitrary names returned in a
     # future account-scoped field. A missing label never becomes a model.
-    if value in {"全部模型", "总额度"}:
+    if value in {"全部模型", "总额度", "Claude / GPT-OSS", "GPT-OSS"}:
         return value
     if (re.fullmatch(r"(?:Codex|Claude|ChatGPT)(?: (?:Code|Spark|Pro|Plus))?", value)
+            or re.fullmatch(r"Gemini(?: (?:Pro|Flash|Ultra|Nano))?", value)
             or re.fullmatch(r"(?:GPT|gpt)-[0-9][A-Za-z0-9._:-]{0,80}", value)
             or re.fullmatch(r"(?:Sonnet|Opus|Haiku|Fable|Mythos|sonnet|opus|haiku|fable|mythos)(?: [0-9]+(?:[.\-][0-9]+)*)?", value)):
         return value
@@ -315,6 +317,7 @@ class UsageLedger:
                         "ON usage_events(COALESCE(counter_key,session_key),occurred_at DESC)")
         self.db.commit()
         self._pending = {}
+        self._ag_step_models = {}
         self._directories = deque()
         self._iterator = None
         self._roots = None
@@ -322,6 +325,16 @@ class UsageLedger:
         self._anchor_bytes = self._anchor_files = 0
         with self.db:
             self._migrate_local_codex()
+            self._migrate_local_antigravity()
+
+    def _migrate_local_antigravity(self):
+        """Re-scan Antigravity transcripts once so gen_metadata models enrich existing rows."""
+        version = self.db.execute("SELECT value FROM usage_meta WHERE key='local_antigravity_parser_version'").fetchone()
+        if version and int(version[0]) >= LOCAL_ANTIGRAVITY_PARSER_VERSION:
+            return
+        self.db.execute("""UPDATE usage_files SET offset=0,meta='{}',skipping=0,scanned_at=0,
+            checkpoint=NULL,head_hash=NULL,head_len=NULL,generation=generation+1 WHERE tool='antigravity'""")
+        self._set("local_antigravity_parser_version", LOCAL_ANTIGRAVITY_PARSER_VERSION)
 
     def _migrate_local_codex(self):
         """Invalidate only local Codex accounting produced by the old parser.
@@ -805,7 +818,7 @@ class UsageLedger:
                         try:
                             record = json.loads(raw)
                             if isinstance(record, dict):
-                                self._record(record, row["tool"], meta, path, now)
+                                self._record(record, row["tool"], meta, path, now, root=root)
                         except (ValueError, UnicodeError, RecursionError):
                             self._stat("invalid_records")
                     if skipping or len(data) > MAX_LINE:
@@ -830,7 +843,34 @@ class UsageLedger:
             self._stat("read_errors")
         return read, lines
 
-    def _record(self, record, tool, meta, path, now):
+    def _antigravity_step_model(self, root: Path | None, conv_id: str, step_index: int) -> str | None:
+        if root is None:
+            return None
+        base = root.parent if root.name == "brain" else root
+        conv_db = base / "conversations" / f"{conv_id}.db"
+        if not _safe(conv_db, base):
+            return None
+        try:
+            info = conv_db.stat()
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            wal = conv_db.with_name(conv_db.name + "-wal")
+            wal_stamp = (wal.stat().st_mtime_ns, wal.stat().st_size) if wal.exists() else (0, 0)
+            stamp = (info.st_mtime_ns, info.st_size, *wal_stamp)
+        except OSError:
+            return None
+        key = str(conv_db)
+        cached = self._ag_step_models.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1].get(step_index)
+        from .antigravity import read_antigravity_step_models
+        mapping = read_antigravity_step_models(conv_db)
+        while len(self._ag_step_models) >= 32:
+            self._ag_step_models.pop(next(iter(self._ag_step_models)))
+        self._ag_step_models[key] = (stamp, mapping)
+        return mapping.get(step_index)
+
+    def _record(self, record, tool, meta, path, now, *, root=None):
         stamp = _stamp(record.get("timestamp"), now)
         if tool == "codex":
             payload = record.get("payload")
@@ -936,9 +976,12 @@ class UsageLedger:
             event_key = _hash("antigravity-step-v1", conv_id, record["type"], step_index, stamp,
                               numbers["input_tokens"], numbers["output_tokens"],
                               numbers["cached_input_tokens"], numbers["cache_write_tokens"])
+            raw_model = record.get("model")
+            if raw_model is None:
+                raw_model = self._antigravity_step_model(root, conv_id, step_index)
             event = dict(numbers, event_key=event_key, tool="antigravity", session_key=session_key,
                          occurred_at=stamp, observed_at=_iso(now), final=True, basis="own", started_at=None,
-                         model=_model(record.get("model"), "antigravity"))
+                         model=_model(raw_model, "antigravity"))
         else:
             if record.get("type") != "assistant" or not stamp:
                 return
@@ -1176,7 +1219,7 @@ class UsageLedger:
     @staticmethod
     def _valid_quota(quota, now):
         if (not isinstance(quota, dict) or not isinstance(quota.get("tool"), str)
-                or quota["tool"] not in {"codex", "claude"}):
+                or quota["tool"] not in {"codex", "claude", "antigravity"}):
             return False
         if not isinstance(quota.get("key"), str) or not HEX64.fullmatch(quota["key"]):
             return False
@@ -1349,6 +1392,59 @@ class UsageLedger:
                     rejected += 1
         return {"accepted": accepted, "rejected": rejected}
 
+    def ingest_antigravity_quota(self, payload, now=None, device_id="local"):
+        """Accept validated Antigravity model-pool quota windows without PII."""
+        now = _now(now)
+        if not _id(device_id) or not isinstance(payload, dict):
+            return {"accepted": 0, "rejected": 1}
+        stamp = _stamp(payload.get("observed_at"), now)
+        windows = payload.get("quota_windows")
+        if stamp is None or not isinstance(windows, list) or len(windows) > MAX_QUOTA_WINDOWS:
+            return {"accepted": 0, "rejected": 1}
+        accepted = rejected = 0
+        active, seen = [], set()
+        with self.lock, self.db:
+            for window in windows:
+                if not isinstance(window, dict):
+                    rejected += 1
+                    continue
+                slot = window.get("kind")
+                bucket = window.get("bucket_id")
+                if not isinstance(slot, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", slot) or not _id(bucket):
+                    rejected += 1
+                    continue
+                identity = (slot, bucket)
+                if identity in seen:
+                    rejected += 1
+                    continue
+                seen.add(identity)
+                meta = _quota_metadata("antigravity", bucket, window.get("bucket_label"), window.get("model"))
+                minutes = window.get("window_minutes")
+                resets_at = window.get("resets_at")
+                if _int(minutes, 525600) is not None and resets_at is not None:
+                    prior = self.db.execute(
+                        "SELECT window_minutes FROM usage_quotas WHERE tool='antigravity' AND device_id=? "
+                        "AND bucket_id=? AND resets_at=? AND present=1 ORDER BY window_minutes DESC LIMIT 1",
+                        (device_id, meta["bucket_id"], resets_at),
+                    ).fetchone()
+                    if prior and prior["window_minutes"] > minutes:
+                        minutes = prior["window_minutes"]
+                key = _hash("antigravity-scoped-limit", slot, bucket)
+                quota = {"tool": "antigravity", "key": key, **meta,
+                         "used_percent": window.get("used_percentage"), "window_minutes": minutes,
+                         "resets_at": resets_at, "observed_at": stamp}
+                if self._valid_quota(quota, now):
+                    self._quota(quota, device_id, local=device_id == "local")
+                    active.append(key)
+                    accepted += 1
+                else:
+                    rejected += 1
+            if payload.get("snapshot_complete") is True and not rejected:
+                status = self._finish_quota_snapshot("antigravity", device_id, "*", active, stamp, local=device_id == "local")
+                if status == "conflict":
+                    rejected += 1
+        return {"accepted": accepted, "rejected": rejected}
+
     def summary(self, now=None, device_ids=None):
         now = _now(now)
         today = now.astimezone(SHANGHAI).date()
@@ -1367,6 +1463,8 @@ class UsageLedger:
             providers = []
             antigravity_known = self.db.execute(
                 "SELECT max(observed_at) FROM usage_events WHERE tool='antigravity'" + scope_sql, scope_args
+            ).fetchone()[0] or self.db.execute(
+                "SELECT max(observed_at) FROM usage_quotas WHERE tool='antigravity' AND present=1" + quota_sql, scope_args
             ).fetchone()[0]
             tools = ("codex", "claude", "antigravity") if antigravity_known else ("codex", "claude")
             for tool in tools:
@@ -1636,7 +1734,7 @@ class UsageLedger:
     @staticmethod
     def _validate_quota_snapshot(value, now):
         if (not isinstance(value, dict) or not isinstance(value.get("tool"), str)
-                or value["tool"] not in {"codex", "claude"} or value.get("complete") is not True):
+                or value["tool"] not in {"codex", "claude", "antigravity"} or value.get("complete") is not True):
             return None
         bucket, stamp = value.get("bucket_id"), _stamp(value.get("observed_at"), now)
         if not isinstance(bucket, str) or (bucket != "*" and not HEX64.fullmatch(bucket)) or stamp is None:

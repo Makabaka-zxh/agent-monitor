@@ -1,5 +1,14 @@
 # 更新记录
 
+## 1.0.9 — 2026-11-19
+
+- 补齐 Antigravity 官方额度、桌面会话按模型 Token 占比与快速模型选择：只读连接当前用户本机回环 Antigravity Language Server 读取真实官方额度池（如 Gemini 5 小时额度、Claude / GPT-OSS 周额度），剔除账号姓名、邮箱与头像字段后同步至手机、macOS 与桌面小组件；只读解析 `conversations/<id>.db` `gen_metadata` 精确还原桌面会话每一步的公开模型标识并无损回填历史记录；桌面运行期间秒级返回与 `agy acp` 一致的模型与思考强度目录，消除长耗时拉取与索引短暂锁竞争导致的模型不可选。
+- 原生 macOS 与 Android 用量及登录体验拉齐：macOS「用量」页升级为「官方额度」与「本地 Token（含按日模型 Token 占比）」双分区，任务详情新增「本次对话已记录」Token 明细卡片，登录页支持直接填写 HTTPS 服务地址并遵循 macOS 圆角图标规范；尚未登录或暂未返回额度的工具在「官方额度」下明确显示读取状态说明。
+
+验证范围：跨平台 Python／Web／Swift／Android 离线测试与 GitHub Actions CI 通过，并在 Windows 主机、Android 真机及 Mac mini 完成实机核验。
+
+验证边界：Antigravity 官方额度依赖对应电脑正在运行已登录的 Antigravity 桌面端；Claude Code 未登录时不猜测额度，按实际读取状态提示。
+
 ## 1.0.8 — 2026-11-19
 
 - 新增 Antigravity 本地用量统计与配套附件同步：只读增量解析 `brain/<id>/.system_generated/logs/transcript.jsonl` 中已完成步骤的 Token 明细与公开模型占比，覆盖任务详情会话卡片、顶层「用量」页及桌面小组件；本地对话日志不含官方套餐滚动额度窗口，界面明确标注边界。结果同步补齐经路径与大小校验的本轮工作区交付文件、`brain/<id>/` 顶层显式引用文件及 `userFacing: true` 顶层报告产物，排除 `.system_generated`、`scratch`、`browser_sandbox` 与 `.metadata.json`。
