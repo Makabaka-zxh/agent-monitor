@@ -261,7 +261,7 @@ def present_usage(summary, *, now=None):
             if valid and clean and type(unknown) is int and unknown >= 0 and known + unknown == denominator:
                 shares = [{"label": model, "tokens": tokens, "percent": tokens * 100 / denominator} for model, tokens in clean if tokens]
                 if shares and unknown:
-                    shares.append({"label": "未识别模型", "tokens": unknown, "percent": unknown * 100 / denominator})
+                    shares.append({"label": "其他模型", "tokens": unknown, "percent": unknown * 100 / denominator})
         if total is not None or quotas or shares:
             title = "Codex" if tool == "codex" else "Antigravity" if tool == "antigravity" else "Claude Code"
             cards.append({"tool": tool, "title": title,

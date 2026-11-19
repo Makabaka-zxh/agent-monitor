@@ -69,7 +69,7 @@ public final class NativeUsagePresentation {
         public final double percent;
         private ModelShare(String model, long tokens, long total) {
             this.model = model; this.tokens = tokens; this.percent = (double) tokens / total * 100;
-            this.displayName = model == null ? "未识别模型" : NativeUsageFormat.modelName(model);
+            this.displayName = model == null ? "其他模型" : NativeUsageFormat.modelName(model);
         }
     }
     /** Distinct snapshots may share a product name; keep their recorded amounts separate. */

@@ -225,7 +225,7 @@ struct UsageDay: Codable, Identifiable {
                                    tokens: item.tokens, percent: item.percent, variantNote: note)
         }
         if unknown > 0 {
-            shares.append(UsageModelShare(model: nil, displayName: "未识别模型",
+            shares.append(UsageModelShare(model: nil, displayName: "其他模型",
                                           tokens: unknown, percent: Double(unknown) / Double(total) * 100, variantNote: nil))
         }
         return shares

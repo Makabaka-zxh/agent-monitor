@@ -160,7 +160,7 @@ class DesktopWindow:
                 for model in card["models"]:
                     tk.Label(box, text=f"{model['label']}   {model['percent']:.1f}%", wraplength=310, justify="left", bg=CARD, fg=INK).pack(anchor="w", pady=(2, 0))
                     tk.Label(box, text=f"{model['tokens']:,} Token", bg=CARD, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 5))
-                tk.Label(box, text="分母含未识别模型；这不是账号额度百分比", wraplength=310, justify="left", bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(5, 0))
+                tk.Label(box, text="分母含其他模型；这不是账号额度百分比", wraplength=310, justify="left", bg=CARD, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(5, 0))
 
     @staticmethod
     def wrap_card(panel, width, inset=44):

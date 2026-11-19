@@ -260,7 +260,7 @@ final class UsageTests: XCTestCase {
         XCTAssertEqual(shares[0].tokens, 13000)
         XCTAssertEqual(shares[1].displayName, "Gemini 4 Carbon")
         XCTAssertEqual(shares[1].tokens, 10500)
-        XCTAssertEqual(shares[2].displayName, "未识别模型")
+        XCTAssertEqual(shares[2].displayName, "其他模型")
         XCTAssertEqual(shares[2].tokens, 1000)
 
         // Mismatched partial model sum fails closed rather than normalizing a misleading 100%.

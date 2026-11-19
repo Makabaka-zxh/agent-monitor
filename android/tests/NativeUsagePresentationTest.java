@@ -127,7 +127,7 @@ public final class NativeUsagePresentationTest {
         equal(3, variants.length);
         equal("Claude Sonnet 4.5", variants[0].displayName);
         equal("claude-sonnet-4-5-20250929", variants[0].model);
-        equal("未识别模型", variants[2].displayName);
+        equal("其他模型", variants[2].displayName);
         equal(60d, variants[0].percent); equal(20d, variants[1].percent);
         java.util.Map<String, String> notes = NativeUsagePresentation.modelVariantNotes(variants);
         equal(2, notes.size()); equal("2025-09-29", notes.get(variants[0].model)); equal("未指定快照", notes.get(variants[1].model));

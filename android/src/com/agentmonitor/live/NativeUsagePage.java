@@ -18,7 +18,7 @@ import org.json.JSONObject;
 
 /** Native calendar history and source-scoped quotas. Ticks never rebuild charts. */
 public final class NativeUsagePage {
-    public static final String HELP = "Token 按北京时间统计已连接电脑采集到的记录，可能有历史缺口，并非完整账单\n柱状图以周一至周日为一周，最多查看最近 90 天；— 表示未提供，0 表示已记录为零\n点选日期可查看准确数字\n\n模型构成是所选日期各模型占已采集 Token 总量的比例，未识别模型也计入分母；不是官方额度消耗比例\n未提供模型记录时不显示该区块\n\n官方额度显示服务方实际返回的窗口及额度组，已用百分比只使用真实读数，不用 Token 推算\n未提供的窗口或模型不显示，也不按套餐名称猜测\n额度按来源电脑分别查看，各电脑可能登录不同账号，不能合并\n模型专属或共享额度组与全账号窗口分别计量\n\n未过期的旧读数会标为上次已用\n无有效读数或已到重置时间的窗口不显示，收到新的有效额度后再显示；不会自动当作已恢复\n缓存读取已包含在 Token 总量中，不重复相加";
+    public static final String HELP = "Token 按北京时间统计已连接电脑采集到的记录，可能有历史缺口，并非完整账单\n柱状图以周一至周日为一周，最多查看最近 90 天；— 表示未提供，0 表示已记录为零\n点选日期可查看准确数字\n\n模型构成是所选日期各模型占已采集 Token 总量的比例，其他模型也计入分母；不是官方额度消耗比例\n未提供模型记录时不显示该区块\n\n官方额度显示服务方实际返回的窗口及额度组，已用百分比只使用真实读数，不用 Token 推算\n未提供的窗口或模型不显示，也不按套餐名称猜测\n额度按来源电脑分别查看，各电脑可能登录不同账号，不能合并\n模型专属或共享额度组与全账号窗口分别计量\n\n未过期的旧读数会标为上次已用\n无有效读数或已到重置时间的窗口不显示，收到新的有效额度后再显示；不会自动当作已恢复\n缓存读取已包含在 Token 总量中，不重复相加";
     public interface Help { void show(String title, String message); }
     public final LinearLayout view;
     private final NativeUi ui;
@@ -220,7 +220,7 @@ public final class NativeUsagePage {
                     number(day, "unknown_model_tokens"), history.get(dayKey));
             modelArea.setVisibility(shares.length == 0 ? View.GONE : View.VISIBLE); if (shares.length == 0) return;
             modelArea.addView(ui.space(24)); TextView modelTitle = ui.heading("模型 Token 占比", 16);
-            modelTitle.setContentDescription("模型构成 · 所选日期各模型占已采集 Token 总量的比例，未识别模型也计入分母，不是官方额度消耗比例");
+            modelTitle.setContentDescription("模型构成 · 所选日期各模型占已采集 Token 总量的比例，其他模型也计入分母，不是官方额度消耗比例");
             modelArea.addView(modelTitle, wrap());
             Map<String, String> variantNotes = NativeUsagePresentation.modelVariantNotes(shares);
             for (NativeUsagePresentation.ModelShare share : shares) {

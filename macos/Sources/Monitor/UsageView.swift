@@ -383,7 +383,7 @@ private struct UsageProviderCard: View {
             lines.append("最近记录：" + UsageViewText.observed(date))
         }
         lines.append("按北京时间统计，周一至周日为一周，最多查看最近 90 天。点选柱状图可查看该日准确数字与模型 Token 占比；— 表示未提供，0 表示已记录为零。")
-        lines.append("模型构成是所选日期各模型占已采集 Token 总量的比例，未识别模型也计入分母，不是官方额度消耗比例。缓存读取已包含在总量中，不重复相加。")
+        lines.append("模型构成是所选日期各模型占已采集 Token 总量的比例，其他模型也计入分母，不是官方额度消耗比例。缓存读取已包含在总量中，不重复相加。")
         return lines.joined(separator: "\n\n")
     }
 }
