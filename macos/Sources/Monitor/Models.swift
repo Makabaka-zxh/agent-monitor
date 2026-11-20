@@ -122,6 +122,33 @@ struct PairingPoll: Decodable {
     let mode: String?
     let expiresAt: String?
 }
+struct QRPairingStartResponse: Decodable {
+    let requestId: String
+    let pollSecret: String
+    let verificationUrl: String
+    let expiresAt: String
+    let interval: Int?
+    let includeCollector: Bool?
+    let includeReader: Bool?
+}
+struct QRPairingPollResponse: Decodable {
+    let status: String
+    let readerToken: String?
+    let readerExpiresAt: String?
+    let readerMode: String?
+    let collectorCode: String?
+    let collectorCodeExpiresAt: String?
+    let interval: Int?
+}
+struct QRLoginSession: Equatable {
+    let id: String
+    let pollSecret: String
+    let verifier: String
+    let verificationURL: String
+    let expiresAt: Date
+    let includeCollector: Bool
+    let intervalSeconds: Int
+}
 struct ComputerPairingCode: Decodable {
     let code: String
     let expiresAt: String

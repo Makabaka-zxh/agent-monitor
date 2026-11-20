@@ -179,18 +179,23 @@ private struct LoginView: View {
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color.accentColor.opacity(0.06), Color.clear, Color.purple.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing)
-            VStack(spacing: 22) {
+            VStack(spacing: 18) {
                 if let image = MonitorResources.image("AppIcon") {
-                    Image(nsImage: image).resizable().scaledToFit().frame(width: 84, height: 84)
+                    Image(nsImage: image).resizable().scaledToFit().frame(width: 72, height: 72)
                 }
-                Text("工作，尽在眼前").font(.custom("MiSans-Regular", size: 32)).fontWeight(.semibold)
+                Text("工作，尽在眼前").font(.custom("MiSans-Regular", size: 30)).fontWeight(.semibold)
                 Text(envLocked && store.origin.isEmpty
                      ? "环境变量 MONITOR_SERVER_URL 无效，请改为有效的 HTTPS 根地址后重启 Monitor。"
                      : store.pendingLogin
                      ? "请在打开的浏览器页面确认本次连接，确认后自动进入工作台"
+                     : !store.origin.isEmpty && !showingEditor
+                     ? (store.qrLogin?.includeCollector == true
+                        ? "打开手机 Monitor 点右上角「扫一扫」，一键登录并连接这台 Mac"
+                        : "打开手机 Monitor 点右上角「扫一扫」，确认登录桌面端")
                      : "查看每台电脑上的 Claude Code、Codex 与 Antigravity")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .frame(maxWidth: 460)
 
                 if showingEditor {
                     VStack(alignment: .leading, spacing: 8) {
@@ -201,11 +206,11 @@ private struct LoginView: View {
                             .textFieldStyle(.roundedBorder)
                             .controlSize(.large)
                             .frame(width: 340)
-                            .disabled(store.loginBusy)
+                            .disabled(store.loginBusy || store.qrBusy)
                             .onSubmit {
                                 guard canSubmitLogin else { return }
                                 Task {
-                                    await store.beginLogin(serverInput: serverDraft)
+                                    await store.startQRLogin(serverInput: serverDraft)
                                     if !store.origin.isEmpty { editingServer = false }
                                 }
                             }
@@ -214,13 +219,17 @@ private struct LoginView: View {
                                 Button("取消修改") {
                                     serverDraft = store.origin
                                     editingServer = false
+                                    if store.qrLogin == nil { Task { await store.startQRLogin() } }
                                 }
                                 .buttonStyle(.plain)
                                 .font(.custom("MiSans-Regular", size: 12))
                                 .foregroundStyle(.secondary)
                                 Spacer()
                                 Button("仅保存地址") {
-                                    if store.saveServerOrigin(serverDraft) { editingServer = false }
+                                    if store.saveServerOrigin(serverDraft) {
+                                        editingServer = false
+                                        Task { await store.startQRLogin() }
+                                    }
                                 }
                                 .buttonStyle(.plain)
                                 .font(.custom("MiSans-Regular", size: 12))
@@ -228,6 +237,32 @@ private struct LoginView: View {
                             }
                             .frame(width: 340)
                         }
+                    }
+                    HStack(spacing: 14) {
+                        Button {
+                            Task {
+                                await store.startQRLogin(serverInput: serverDraft)
+                                if !store.origin.isEmpty { editingServer = false }
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if store.qrBusy { ProgressView().controlSize(.small) }
+                                Text("扫码登录")
+                            }
+                            .frame(width: 150)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(!canSubmitLogin || store.qrBusy)
+
+                        Button("浏览器登录") {
+                            Task {
+                                await store.beginLogin(serverInput: serverDraft)
+                                if !store.origin.isEmpty { editingServer = false }
+                            }
+                        }
+                        .controlSize(.large)
+                        .disabled(!canSubmitLogin || store.qrBusy)
                     }
                 } else if !store.origin.isEmpty {
                     HStack(spacing: 8) {
@@ -241,59 +276,96 @@ private struct LoginView: View {
                         if !envLocked && !store.pendingLogin {
                             Button("更改") {
                                 serverDraft = store.origin
+                                store.clearQRLogin()
                                 editingServer = true
                             }
                             .buttonStyle(.plain)
                             .font(.custom("MiSans-Regular", size: 13))
                             .foregroundStyle(Color.accentColor)
+                            .disabled(store.loginBusy || store.qrBusy)
+                        }
+                    }
+
+                    if store.pendingLogin {
+                        Button {
+                            Task { await store.beginLogin() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if store.loginBusy { ProgressView().controlSize(.small) }
+                                Text("重新打开浏览器确认")
+                            }
+                            .frame(width: 210)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(!canSubmitLogin)
+
+                        HStack(spacing: 18) {
+                            Button(copiedLink ? "已复制确认链接" : "复制确认链接") {
+                                store.copyVerificationURL()
+                                copiedLink = true
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                            Button("改用手机扫码") {
+                                copiedLink = false
+                                store.cancelLogin()
+                                Task { await store.startQRLogin() }
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                             .disabled(store.loginBusy)
                         }
-                    }
-                }
+                        .font(.custom("MiSans-Regular", size: 13))
+                    } else {
+                        if let qr = store.qrLogin {
+                            QRCodeCardView(payload: qr.verificationURL, size: 188)
+                        } else if store.qrBusy {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .fill(.regularMaterial)
+                                VStack(spacing: 10) {
+                                    ProgressView()
+                                    Text("正在生成二维码…")
+                                        .font(.custom("MiSans-Regular", size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(width: 188, height: 188)
+                        } else if !store.qrError.isEmpty {
+                            Text(store.qrError)
+                                .font(.custom("MiSans-Regular", size: 13))
+                                .foregroundStyle(.orange)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 360)
+                        }
 
-                Button {
-                    Task {
-                        if showingEditor {
-                            await store.beginLogin(serverInput: serverDraft)
-                            if !store.origin.isEmpty { editingServer = false }
-                        } else {
-                            await store.beginLogin()
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        if store.loginBusy { ProgressView().controlSize(.small) }
-                        Text(store.pendingLogin ? "重新打开浏览器确认" : "登录 Monitor")
-                    }
-                    .frame(width: 210)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!canSubmitLogin)
+                        HStack(spacing: 18) {
+                            Button(store.qrLogin == nil ? "生成二维码" : "刷新二维码") {
+                                Task { await store.startQRLogin() }
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                            .disabled(store.qrBusy || store.loginBusy)
 
-                if store.pendingLogin {
-                    HStack(spacing: 18) {
-                        Button(copiedLink ? "已复制确认链接" : "复制确认链接") {
-                            store.copyVerificationURL()
-                            copiedLink = true
+                            Button("改用浏览器确认登录") {
+                                Task { await store.beginLogin() }
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .disabled(store.loginBusy || store.qrBusy)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Color.accentColor)
-                        Button("取消") {
-                            copiedLink = false
-                            store.cancelLogin()
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .disabled(store.loginBusy)
+                        .font(.custom("MiSans-Regular", size: 13))
                     }
-                    .font(.custom("MiSans-Regular", size: 13))
                 }
             }
-            .padding(40)
+            .padding(36)
             .onAppear {
                 if !store.origin.isEmpty {
                     serverDraft = store.origin
+                    if !store.pendingLogin && store.qrLogin == nil && !store.qrBusy {
+                        Task { await store.startQRLogin() }
+                    }
                 } else if serverDraft.isEmpty, let suggested = ServerOrigin.suggestedCollectorOrigin() {
                     serverDraft = suggested
                 }
@@ -433,7 +505,15 @@ private struct TaskDetailView: View {
 @MainActor
 private struct ComputersView: View {
     @EnvironmentObject var store: MonitorStore
-    @StateObject private var collector = LocalCollector()
+    var body: some View {
+        ComputersContentView(collector: store.localCollector)
+    }
+}
+
+@MainActor
+private struct ComputersContentView: View {
+    @EnvironmentObject var store: MonitorStore
+    @ObservedObject var collector: LocalCollector
     @State private var showingPairing = false
     @State private var showingCollectorSettings = false
     var body: some View {
@@ -450,7 +530,7 @@ private struct ComputersView: View {
                                     Button("同步设置", systemImage: "slider.horizontal.3") { showingCollectorSettings = true }.disabled(collector.busy)
                                 }
                             } else {
-                                Button("连接这台 Mac") {
+                                Button("一键连接这台 Mac") {
                                     Task {
                                         store.pairingCode = nil
                                         await store.createPairingCode()
@@ -490,11 +570,17 @@ private struct PairingCodeView: View {
     @EnvironmentObject var store: MonitorStore
     @Environment(\.dismiss) var dismiss
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("添加电脑").font(.custom("MiSans-Regular", size: 25)).fontWeight(.semibold)
-            Text("在要连接的电脑上输入配对码").foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 20) {
+            Text("添加其他电脑").font(.custom("MiSans-Regular", size: 25)).fontWeight(.semibold)
+            Text("推荐方式：在要连接的 Windows 或 Mac 电脑上打开 Monitor 桌面端，直接用手机 Monitor 右上角「扫一扫」即可一键登录并绑定采集器。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text("备用方式：在命令行采集器输入一次性配对码")
+                .font(.custom("MiSans-Regular", size: 13))
+                .foregroundStyle(.secondary)
             if let code = store.pairingCode {
-                Text(code.code).font(.system(size: 28, weight: .medium, design: .monospaced)).tracking(3).textSelection(.enabled).frame(maxWidth: .infinity).padding(.vertical, 12)
+                Text(code.code).font(.system(size: 28, weight: .medium, design: .monospaced)).tracking(3).textSelection(.enabled).frame(maxWidth: .infinity).padding(.vertical, 8)
                 Text("10 分钟内有效，仅可使用一次").foregroundStyle(.secondary)
             }
             HStack {
@@ -502,7 +588,7 @@ private struct PairingCodeView: View {
                 Spacer()
                 Button("完成") { dismiss() }.buttonStyle(.borderedProminent)
             }.controlSize(.large)
-        }.padding(30).frame(width: 390)
+        }.padding(30).frame(width: 420)
     }
 }
 

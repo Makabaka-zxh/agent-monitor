@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .store import digest, iso
+from .store import PairingRequestError, digest, iso
 
 PAIRING_SECONDS = 600
 READER_SECONDS = 30 * 24 * 60 * 60
@@ -233,6 +233,26 @@ class NativeAccess:
                 result.update(mode="full_app", web_session_ticket=ticket,
                               web_session_ticket_expires_at=iso(ticket_expires))
             return result
+
+    def issue_reader(self, *, parent_session_id: str, name: str, mode: str = "full_app", now: float | None = None):
+        if mode not in SCOPES:
+            raise PairingRequestError(422, "连接权限无效")
+        now = time.time() if now is None else now
+        with self.store.lock, self.store.db:
+            parent = self._parent(parent_session_id, now)
+            if not parent:
+                raise PairingRequestError(410, "批准此连接的登录已失效，请重新生成二维码")
+            self._clean(now)
+            if self.store.db.execute("SELECT COUNT(*) FROM native_readers").fetchone()[0] >= MAX_READERS:
+                raise PairingRequestError(429, "原生连接已达上限，请先在登录设备中移除旧连接")
+            token, reader_id = "nrd_" + secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+            expires_at = min(now + READER_SECONDS, parent["expires_at"])
+            self.store.db.execute(
+                """INSERT INTO native_readers(id,token_hash,name,last_seen,expires_at,parent_session_id,mode)
+                VALUES (?,?,?,?,?,?,?)""",
+                (reader_id, digest(token), name, now, expires_at, parent["id"], mode),
+            )
+            return {"reader_token": token, "reader_expires_at": iso(expires_at), "reader_mode": mode}
 
     def _reader(self, token):
         if not TOKEN_PATTERN.fullmatch(token):

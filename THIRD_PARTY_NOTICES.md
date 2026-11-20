@@ -56,4 +56,4 @@ Python 依赖由 `requirements.txt`、`requirements-tested.txt` 和 `macos/scrip
 - 该版本随附的 C 库为 [Zstandard 1.5.7](https://github.com/indygreg/python-zstandard/blob/0.25.0/zstd/zstd.h)，版权归 Meta Platforms, Inc. and affiliates。上游提供 BSD 或 GPLv2 二选一授权；本项目采用其 [BSD 许可](https://github.com/indygreg/python-zstandard/blob/0.25.0/zstd/LICENSE)。分发包含该依赖的运行环境时，应保留 Python 绑定和 C 库各自的版权、完整许可条件及免责声明，不以 Monitor 的 MIT 许可替代。
 - PyPI 提供 CPython 3.12 的 Windows x86、x64、ARM64，以及 macOS x86-64（10.13+）和 ARM64（11.0+）wheel。此处记录上游提供的兼容包，不表示 Monitor 已完成这些平台的运行验收。
 
-JDK、Android SDK、Apple 工具链等构建工具未随本源码提供，其授权不属于本项目 MIT 许可证的范围。
+JDK、Android SDK、Apple 工具链、.NET SDK 等构建工具未随本源码提供，其授权不属于本项目 MIT 许可证的范围。Windows 桌面端构建时由 NuGet 获取 `QRCoder` 1.6.0（MIT License，https://github.com/codebude/QRCoder）。

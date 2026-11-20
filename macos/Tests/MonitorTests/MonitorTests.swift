@@ -97,4 +97,20 @@ final class MonitorTests: XCTestCase {
         let verifier = try MonitorSecurity.verifier()
         XCTAssertTrue(MonitorSecurity.matches(verifier, "[A-Za-z0-9_-]{43}"))
     }
+    func testUnifiedQRPairingEndpointsAndRendering() throws {
+        let startURL = try Endpoint.qrPairingStart.url(origin: testOrigin)
+        XCTAssertEqual(startURL.absoluteString, testOrigin + "/api/agent/pairing/start")
+        let validId = String(repeating: "b", count: 32)
+        let pollURL = try Endpoint.qrPairingPoll(validId).url(origin: testOrigin)
+        XCTAssertEqual(pollURL.absoluteString, testOrigin + "/api/agent/pairing/\(validId)/poll")
+        XCTAssertThrowsError(try Endpoint.qrPairingPoll("../evil").url(origin: testOrigin))
+        let start = try decode(QRPairingStartResponse.self, #"{"request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","poll_secret":"cccccccccccccccccccccccccccccccc","verification_url":"https://monitor.example.com/#/pairing-confirm/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","expires_at":"2026-09-18T12:00:00Z","interval":3,"include_collector":true,"include_reader":true}"#)
+        XCTAssertEqual(start.includeCollector, true)
+        XCTAssertEqual(start.includeReader, true)
+        let poll = try decode(QRPairingPollResponse.self, #"{"status":"approved","reader_token":"nrd_ddddddddddddddddddddddddddddddddddddddddddd","reader_expires_at":"2026-10-18T12:00:00Z","reader_mode":"full_app","collector_code":"AABBCCDDEEFF"}"#)
+        XCTAssertEqual(poll.readerMode, "full_app")
+        XCTAssertEqual(poll.collectorCode, "AABBCCDDEEFF")
+        XCTAssertNotNil(QRCodeRenderer.image(for: start.verificationUrl))
+        XCTAssertNil(QRCodeRenderer.image(for: ""))
+    }
 }

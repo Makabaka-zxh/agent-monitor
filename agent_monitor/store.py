@@ -89,9 +89,26 @@ class Store:
           CREATE TABLE IF NOT EXISTS qr_pairing (
             id TEXT PRIMARY KEY, poll_hash TEXT NOT NULL,
             name TEXT NOT NULL, platform TEXT NOT NULL,
-            expires_at REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending'
+            expires_at REAL NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            include_collector INTEGER NOT NULL DEFAULT 1,
+            issue_collector_code INTEGER NOT NULL DEFAULT 0,
+            include_reader INTEGER NOT NULL DEFAULT 0,
+            reader_name TEXT NOT NULL DEFAULT '',
+            challenge_hash TEXT NOT NULL DEFAULT '',
+            parent_session_id TEXT
           );
         """)
+        qr_columns = {row[1] for row in self.db.execute("PRAGMA table_info(qr_pairing)")}
+        for column, definition in (
+            ("include_collector", "INTEGER NOT NULL DEFAULT 1"),
+            ("issue_collector_code", "INTEGER NOT NULL DEFAULT 0"),
+            ("include_reader", "INTEGER NOT NULL DEFAULT 0"),
+            ("reader_name", "TEXT NOT NULL DEFAULT ''"),
+            ("challenge_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("parent_session_id", "TEXT"),
+        ):
+            if column not in qr_columns:
+                self.db.execute(f"ALTER TABLE qr_pairing ADD COLUMN {column} {definition}")
         self.db.commit()
 
     def close(self):
@@ -249,7 +266,27 @@ class Store:
             self.db.execute("INSERT INTO devices (id,name,platform,token_hash,last_seen) VALUES (?,?,?,?,?)", (device_id, name, platform, digest(token), now))
         return {"device_id": device_id, "token": token, "sync_output": self.preferences()["sync_output"]}
 
-    def create_qr_pairing(self, name: str, platform: str):
+    def create_qr_pairing(
+        self,
+        name: str,
+        platform: str,
+        *,
+        include_collector: bool = True,
+        issue_collector_code: bool = False,
+        include_reader: bool = False,
+        reader_name: str | None = None,
+        code_challenge: str | None = None,
+    ):
+        if not include_collector and not include_reader:
+            raise PairingRequestError(422, "配对请求至少需要包含电脑采集或桌面端登录")
+        if issue_collector_code and not include_collector:
+            raise PairingRequestError(422, "仅在绑定电脑采集器时可签发配对码")
+        if include_reader and not code_challenge:
+            raise PairingRequestError(422, "桌面端扫码登录需要提供安全验证摘要")
+        if not include_reader and code_challenge:
+            raise PairingRequestError(422, "未启用桌面端登录时不可提交验证摘要")
+        effective_reader_name = (reader_name or f"{name} · 桌面端").strip()[:60] if include_reader else ""
+        challenge_digest = digest(code_challenge) if include_reader and code_challenge else ""
         request_id, poll_secret = secrets.token_urlsafe(24), secrets.token_urlsafe(32)
         now = time.time()
         with self.lock, self.db:
@@ -257,9 +294,32 @@ class Store:
             active = self.db.execute("SELECT COUNT(*) FROM qr_pairing WHERE expires_at>? AND status IN ('pending','approved')", (now,)).fetchone()[0]
             if active >= 100:
                 raise PairingRequestError(429, "待确认的配对过多，请稍后再试")
-            self.db.execute("INSERT INTO qr_pairing (id,poll_hash,name,platform,expires_at) VALUES (?,?,?,?,?)",
-                            (request_id, digest(poll_secret), name, platform, now + QR_PAIRING_SECONDS))
-        return {"request_id": request_id, "poll_secret": poll_secret, "expires_at": iso(now + QR_PAIRING_SECONDS), "interval": 3}
+            self.db.execute(
+                """INSERT INTO qr_pairing (
+                    id, poll_hash, name, platform, expires_at,
+                    include_collector, issue_collector_code, include_reader, reader_name, challenge_hash
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    request_id,
+                    digest(poll_secret),
+                    name,
+                    platform,
+                    now + QR_PAIRING_SECONDS,
+                    int(bool(include_collector)),
+                    int(bool(issue_collector_code)),
+                    int(bool(include_reader)),
+                    effective_reader_name,
+                    challenge_digest,
+                ),
+            )
+        return {
+            "request_id": request_id,
+            "poll_secret": poll_secret,
+            "expires_at": iso(now + QR_PAIRING_SECONDS),
+            "interval": 3,
+            "include_collector": bool(include_collector),
+            "include_reader": bool(include_reader),
+        }
 
     def _qr_request(self, request_id: str):
         row = self.db.execute("SELECT * FROM qr_pairing WHERE id=?", (request_id,)).fetchone()
@@ -272,27 +332,52 @@ class Store:
     def qr_pairing_details(self, request_id: str):
         with self.lock:
             row = self._qr_request(request_id)
-            return {"request_id": row["id"], "name": row["name"], "platform": row["platform"],
-                    "expires_at": iso(row["expires_at"]), "status": row["status"]}
+            details = {
+                "request_id": row["id"],
+                "name": row["name"],
+                "platform": row["platform"],
+                "expires_at": iso(row["expires_at"]),
+                "status": row["status"],
+                "include_collector": bool(row["include_collector"]),
+                "include_reader": bool(row["include_reader"]),
+            }
+            if row["include_reader"]:
+                details["reader_name"] = row["reader_name"] or f"{row['name']} · 桌面端"
+            return details
 
-    def decide_qr_pairing(self, request_id: str, approved: bool):
+    def decide_qr_pairing(self, request_id: str, approved: bool, *, parent_session_id: str | None = None):
         with self.lock, self.db:
             row = self._qr_request(request_id)
             if row["status"] != "pending":
                 raise PairingRequestError(409, "这个配对请求已经处理")
+            now = time.time()
+            if approved and row["include_reader"]:
+                if not parent_session_id or not self.valid_session_id(parent_session_id, now):
+                    raise PairingRequestError(401, "请重新登录后再批准桌面端连接")
             status = "approved" if approved else "denied"
-            changed = self.db.execute("UPDATE qr_pairing SET status=? WHERE id=? AND status='pending' AND expires_at>?",
-                                      (status, request_id, time.time()))
+            saved_parent = parent_session_id if (approved and parent_session_id) else None
+            changed = self.db.execute(
+                "UPDATE qr_pairing SET status=?, parent_session_id=? WHERE id=? AND status='pending' AND expires_at>?",
+                (status, saved_parent, request_id, now),
+            )
             if changed.rowcount != 1:
                 raise PairingRequestError(409, "这个配对请求已经处理或过期")
         return {"ok": True, "status": status}
 
-    def poll_qr_pairing(self, request_id: str, poll_secret: str):
+    def poll_qr_pairing(self, request_id: str, poll_secret: str, *, code_verifier: str | None = None, native_access=None):
         with self.lock, self.db:
+            self.db.execute("UPDATE qr_pairing SET status=status WHERE id=?", (request_id,))
             # Verify the independent secret before disclosing status or expiry.
             row = self.db.execute("SELECT * FROM qr_pairing WHERE id=?", (request_id,)).fetchone()
             if not row or not hmac.compare_digest(row["poll_hash"], digest(poll_secret)):
                 raise PairingRequestError(401, "配对验证失败，请重新生成二维码")
+            if row["include_reader"]:
+                if not code_verifier:
+                    raise PairingRequestError(401, "桌面端连接缺少安全验证参数")
+                from .native_access import challenge_for
+                expected_challenge = digest(challenge_for(code_verifier))
+                if not row["challenge_hash"] or not hmac.compare_digest(expected_challenge, row["challenge_hash"]):
+                    raise PairingRequestError(401, "桌面端安全验证失败，请重新生成二维码")
             row = self._qr_request(request_id)
             if row["status"] == "pending":
                 return {"status": "pending", "interval": 3}
@@ -300,15 +385,40 @@ class Store:
                 raise PairingRequestError(403, "手机已拒绝此配对")
             if row["status"] == "consumed":
                 raise PairingRequestError(410, "配对凭据已经领取，请重新生成二维码")
-            claimed = self.db.execute("UPDATE qr_pairing SET status='consumed' WHERE id=? AND status='approved' AND expires_at>?",
-                                      (request_id, time.time()))
+            now = time.time()
+            claimed = self.db.execute(
+                "UPDATE qr_pairing SET status='consumed' WHERE id=? AND status='approved' AND expires_at>?",
+                (request_id, now),
+            )
             if claimed.rowcount != 1:
                 raise PairingRequestError(410, "配对已过期或凭据已经领取")
-            token, device_id = secrets.token_urlsafe(32), str(uuid.uuid4())
-            self.db.execute("INSERT INTO devices (id,name,platform,token_hash,last_seen) VALUES (?,?,?,?,?)",
-                            (device_id, row["name"], row["platform"], digest(token), time.time()))
-            return {"status": "approved", "device_id": device_id, "token": token,
-                    "sync_output": self.preferences()["sync_output"]}
+            result: dict = {"status": "approved", "sync_output": self.preferences()["sync_output"]}
+            if row["include_reader"]:
+                if native_access is None:
+                    raise PairingRequestError(503, "当前服务未启用桌面端原生登录")
+                issued = native_access.issue_reader(
+                    parent_session_id=row["parent_session_id"] or "",
+                    name=row["reader_name"] or f"{row['name']} · 桌面端",
+                    mode="full_app",
+                    now=now,
+                )
+                result.update(issued)
+            if row["include_collector"]:
+                if row["issue_collector_code"]:
+                    code = secrets.token_hex(6).upper()
+                    self.db.execute("DELETE FROM pairing WHERE expires_at<=?", (now,))
+                    self.db.execute("INSERT INTO pairing VALUES (?,?)", (digest(code), now + 600))
+                    result["collector_code"] = code
+                    result["collector_code_expires_at"] = iso(now + 600)
+                else:
+                    token, device_id = secrets.token_urlsafe(32), str(uuid.uuid4())
+                    self.db.execute(
+                        "INSERT INTO devices (id,name,platform,token_hash,last_seen) VALUES (?,?,?,?,?)",
+                        (device_id, row["name"], row["platform"], digest(token), now),
+                    )
+                    result["device_id"] = device_id
+                    result["token"] = token
+            return result
 
     def agent_device(self, token: str):
         if not token or len(token) > 256:

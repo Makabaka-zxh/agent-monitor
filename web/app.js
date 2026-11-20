@@ -994,12 +994,23 @@
     render();
   }
   function renderPairingConfirm() {
-    heading("确认电脑", "", back("pairing", "添加电脑"));
     const request = state.pairingRequest;
+    const includeReader = Boolean(request?.include_reader);
+    const includeCollector = request ? request.include_collector !== false : true;
+    const headingText = includeReader && includeCollector ? "确认登录并连接电脑"
+      : includeReader ? "确认桌面端登录" : "确认电脑";
+    const actionLabel = includeReader && includeCollector ? "确认登录并连接"
+      : includeReader ? "确认登录桌面端" : "连接这台电脑";
+    const permissionSummary = includeReader && includeCollector
+      ? '<div class="card spaced"><h3>一键登录并连接</h3><p class="spaced">同时登录这台电脑的 Monitor 桌面端完整工作台，并连接本机任务采集器。</p></div>'
+      : includeReader
+      ? '<div class="card spaced"><h3>登录桌面端工作台</h3><p class="spaced">这台电脑的 Monitor 桌面端将获得完整工作台权限，可查看任务、用量并管理设置。</p></div>'
+      : "";
+    heading(headingText, "", back("pairing", "添加电脑"));
     if (!request) { setMain(empty(state.pairingError || "正在读取电脑信息", "", "monitor")); return; }
     const active = request.status === "pending" && new Date(request.expires_at).getTime() > Date.now();
     const done = ["approved", "consumed"].includes(request.status);
-    setMain(`<div class="card pairing-confirm-card">${icon("monitor")}<h2>${esc(request.name)}</h2><p class="subtitle">${esc(request.platform)}</p></div>${active ? `<div class="stack spaced"><button class="button full" type="button" data-action="approve-pairing" ${state.busy ? "disabled" : ""}>连接这台电脑</button><button class="button secondary full" type="button" data-action="reject-pairing" ${state.busy ? "disabled" : ""}>取消配对</button></div>` : `<div class="empty"><h2>${done ? "已确认连接" : request.status === "denied" ? "已取消配对" : "二维码已过期"}</h2>${done ? '<p>电脑连接程序将自动完成连接。</p>' : '<p>请在电脑上重新发起配对。</p>'}<button type="button" class="button secondary" data-page="devices">查看电脑</button></div>`}`);
+    setMain(`<div class="card pairing-confirm-card">${icon("monitor")}<h2>${esc(request.name)}</h2><p class="subtitle">${esc(request.platform)}</p></div>${permissionSummary}${active ? `<div class="stack spaced"><button class="button full" type="button" data-action="approve-pairing" ${state.busy ? "disabled" : ""}>${actionLabel}</button><button class="button secondary full" type="button" data-action="reject-pairing" ${state.busy ? "disabled" : ""}>取消配对</button></div>` : `<div class="empty"><h2>${done ? "已确认连接" : request.status === "denied" ? "已取消配对" : "二维码已过期"}</h2>${done ? '<p>电脑端将自动完成登录或连接。</p>' : '<p>请在电脑上重新发起配对。</p>'}<button type="button" class="button secondary" data-page="devices">查看电脑</button></div>`}`);
   }
   async function decidePairing(approve) {
     if (state.busy || !state.pairingRequest) return;

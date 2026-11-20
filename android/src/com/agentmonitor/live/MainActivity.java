@@ -542,12 +542,15 @@ public final class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, -2, 1);
         headingParams.gravity = Gravity.CENTER_VERTICAL; titleBar.addView(titleHeading, headingParams);
-        if (page.equals("tasks")) {
+        if (page.equals("tasks") || page.equals("devices")) {
             titleActions = ui.headerActions();
             LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-2, -2);
             actionParams.gravity = Gravity.CENTER_VERTICAL; actionParams.leftMargin = ui.dp(12); titleBar.addView(titleActions, actionParams);
-            taskSearchToggle = ui.headerIconButton("search", "展开搜索", () -> setTaskSearchExpanded(!taskSearchExpanded, true));
-            addTitleAction(taskSearchToggle); updateSearchToggle();
+            addTitleAction(ui.headerIconButton("scan", "扫码连接电脑", this::scanComputerPairing));
+            if (page.equals("tasks")) {
+                taskSearchToggle = ui.headerIconButton("search", "展开搜索", () -> setTaskSearchExpanded(!taskSearchExpanded, true));
+                addTitleAction(taskSearchToggle); updateSearchToggle();
+            }
         }
         buildNavigation();
         switch (page) {
@@ -995,7 +998,11 @@ public final class MainActivity extends Activity {
     }
     private void buildDevices() {
         LinearLayout column = ui.column(); body.addView(column, new FrameLayout.LayoutParams(-1, -1)); deviceAdapter = new NativePages.DeviceAdapter(ui, device -> navigate("device", device.optString("id"))); list = NativePages.list(ui, deviceAdapter); attachList(column);
-        LinearLayout action = ui.column(); action.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(8)); action.addView(ui.button("添加电脑", false, () -> navigate("pairing", "")), wrap()); column.addView(action, wrap()); fixedBottomAction = action;
+        LinearLayout action = ui.column(); action.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(8));
+        action.addView(ui.button("扫码连接电脑", this::scanComputerPairing), wrap());
+        action.addView(ui.space(4));
+        action.addView(ui.quietButton("其他配对方式", () -> navigate("pairing", "")), wrap());
+        column.addView(action, wrap()); fixedBottomAction = action;
     }
     private void buildTask() {
         LinearLayout column = content(); JSONObject task = findTask(selectedId), device = task == null ? null : findDevice(task.optString("device_id"));
@@ -1588,7 +1595,7 @@ public final class MainActivity extends Activity {
     }
     private boolean openComputerPairing(String text, boolean scannerResult) {
         // Activity results may arrive before onResume; the scanner callback already checks token, page and epoch.
-        if ((!visible && !scannerResult) || isFinishing() || isDestroyed() || !page.equals("pairing")
+        if ((!visible && !scannerResult) || isFinishing() || isDestroyed() || (!scannerResult && !page.equals("pairing"))
                 || loadedToken.isEmpty() || text == null || text.length() > 1024) return false;
         String requestId = NativeScreenPolicy.pairingId(text);
         if (requestId == null) return false;
@@ -1650,12 +1657,17 @@ public final class MainActivity extends Activity {
                 column.addView(ui.button("重试", false, () -> showPage(false)), wrap()); return;
             }
             String status = result.optString("status"), name = result.optString("name", "新电脑"), platform = result.optString("platform", "电脑"), expires = result.optString("expires_at");
+            boolean includeReader = result.optBoolean("include_reader");
+            boolean includeCollector = !result.has("include_collector") || result.optBoolean("include_collector");
+            if (title != null) {
+                title.setText(includeReader && includeCollector ? "确认登录并连接" : includeReader ? "确认桌面端登录" : "确认电脑");
+            }
             LinearLayout card = ui.card(); card.addView(ui.icon("monitor", 28)); card.addView(ui.space(10));
             card.addView(ui.heading(name, 20), wrap()); card.addView(ui.body(platform, 15), wrap());
             column.addView(card, wrap()); column.addView(ui.space(14));
             if (!status.equals("pending") || NativeApi.time(expires) <= System.currentTimeMillis()) {
                 if (status.equals("approved") || status.equals("consumed")) {
-                    placeholder(column, status.equals("approved") ? "已确认，电脑端将完成连接" : "这台电脑已配对");
+                    placeholder(column, status.equals("approved") ? "已确认，电脑端将自动完成登录或连接" : "这台电脑已完成连接");
                     column.addView(ui.button("查看电脑", false, () -> navigate("devices", "")), wrap());
                 } else {
                     placeholder(column, status.equals("denied") ? "已拒绝此配对请求" : "配对已过期，请在电脑端重新发起");
@@ -1663,17 +1675,23 @@ public final class MainActivity extends Activity {
                 }
                 return;
             }
-            column.addView(ui.body("仅连接你认得的电脑。确认后，这台电脑可以向个人服务同步任务。", 14), wrap());
+            String explain = includeReader && includeCollector
+                    ? "确认后，这台电脑将同时登录 Monitor 桌面端完整工作台，并连接本机任务采集器。仅连接你认得的电脑。"
+                    : includeReader
+                    ? "确认后，这台电脑的 Monitor 桌面端将登录完整工作台，可查看任务、用量并管理设置。"
+                    : "仅连接你认得的电脑。确认后，这台电脑可以向个人服务同步任务。";
+            String approveLabel = includeReader && includeCollector ? "确认登录并连接" : includeReader ? "确认登录桌面端" : "连接这台电脑";
+            column.addView(ui.body(explain, 14), wrap());
             column.addView(ui.space(12));
-            TextView approve = ui.button("连接这台电脑", null), reject = ui.quietButton("拒绝", null);
-            approve.setOnClickListener(v -> decideComputerPairing(requestId, expires, true, approve, reject));
-            reject.setOnClickListener(v -> decideComputerPairing(requestId, expires, false, approve, reject));
+            TextView approve = ui.button(approveLabel, null), reject = ui.quietButton("拒绝", null);
+            approve.setOnClickListener(v -> decideComputerPairing(requestId, expires, true, approveLabel, approve, reject));
+            reject.setOnClickListener(v -> decideComputerPairing(requestId, expires, false, approveLabel, approve, reject));
             boolean ready = !mutations.contains("pairing-decision:" + requestId);
             approve.setEnabled(ready); reject.setEnabled(ready);
             column.addView(approve, wrap()); column.addView(reject, wrap());
         });
     }
-    private void decideComputerPairing(String requestId, String expires, boolean approved, TextView approve, TextView reject) {
+    private void decideComputerPairing(String requestId, String expires, boolean approved, String approveLabel, TextView approve, TextView reject) {
         if (!visible || !page.equals("pairing-confirm") || !requestId.equals(selectedId) || loadedToken.isEmpty()) return;
         if (NativeApi.time(expires) <= System.currentTimeMillis()) { notice("配对已过期，请在电脑端重新发起"); return; }
         String key = "pairing-decision:" + requestId;
@@ -1687,19 +1705,19 @@ public final class MainActivity extends Activity {
                 return;
             }
             if (result != null && result.optBoolean("ok") && result.optString("status").equals(approved ? "approved" : "denied")) {
-                if (approved) { nextSnapshot = 0; if (visible) notice("已确认，电脑端将完成连接"); }
+                if (approved) { nextSnapshot = 0; if (visible) notice("已确认，电脑端将自动完成登录或连接"); }
                 navigate(approved ? "devices" : "pairing", "");
                 return;
             }
-            resetPairingDecision(approve, reject);
+            resetPairingDecision(approve, reject, approveLabel);
         });
         if (!handled) {
             mutations.remove(key);
-            resetPairingDecision(approve, reject);
+            resetPairingDecision(approve, reject, approveLabel);
         }
     }
-    private void resetPairingDecision(TextView approve, TextView reject) {
-        approve.setText("连接这台电脑"); reject.setText("拒绝");
+    private void resetPairingDecision(TextView approve, TextView reject, String approveLabel) {
+        approve.setText(approveLabel); reject.setText("拒绝");
         approve.setEnabled(true); reject.setEnabled(true);
     }
     private void external(String url) {

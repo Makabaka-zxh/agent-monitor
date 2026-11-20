@@ -117,3 +117,20 @@ jobs:
           persist-credentials: false
       - name: Test the native Swift package
         run: xcrun swift test --package-path macos
+
+  windows-desktop:
+    name: Windows WPF desktop build and tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Run Windows C# unit tests
+        run: dotnet test windows/MonitorApp.Tests/MonitorApp.Tests.csproj -c Release --nologo
+      - name: Publish single-file Monitor.exe
+        shell: pwsh
+        run: ./windows/scripts/build_app.ps1

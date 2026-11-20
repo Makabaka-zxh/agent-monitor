@@ -26,6 +26,9 @@ android/.signing/
 *.pem
 macos/.build/
 macos/dist/
+windows/**/bin/
+windows/**/obj/
+windows/dist/
 .DS_Store
 Thumbs.db
 .idea/

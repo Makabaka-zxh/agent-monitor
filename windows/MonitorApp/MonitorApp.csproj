@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Monitor</AssemblyName>
+    <RootNamespace>MonitorApp</RootNamespace>
+    <Version>1.1.0</Version>
+    <ApplicationIcon>Resources\AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <PackageReference Include="QRCoder" Version="1.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\AppIcon.png" />
+    <Resource Include="Resources\AppIcon.ico" />
+    <Resource Include="Resources\Claude.png" />
+    <Resource Include="Resources\Codex.png" />
+    <Resource Include="Resources\Antigravity.png" />
+  </ItemGroup>
+</Project>

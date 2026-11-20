@@ -2,6 +2,7 @@ import Foundation
 
 enum Endpoint {
     case workbench, usage, account, profile, preferences, session, pairingStart, pairingPoll(String), pairingCode
+    case qrPairingStart, qrPairingPoll(String)
     case archive, result(String), resultTXT(String, String), file(String, String, String), reply(String, String?), sendReply
     case controls(String), controlDecision
 
@@ -15,6 +16,8 @@ enum Endpoint {
         case .session: "/api/native/session"
         case .pairingStart: "/api/native/pairing/start"
         case let .pairingPoll(id): "/api/native/pairing/\(id)/poll"
+        case .qrPairingStart: "/api/agent/pairing/start"
+        case let .qrPairingPoll(id): "/api/agent/pairing/\(id)/poll"
         case .pairingCode: "/api/native/computers/pairing"
         case .archive: "/api/native/tasks/archive"
         case .result: "/api/native/tasks/result"
@@ -28,7 +31,7 @@ enum Endpoint {
     func url(origin: String = MonitorAPI.origin) throws -> URL {
         var query: [URLQueryItem] = []
         switch self {
-        case let .pairingPoll(id):
+        case let .pairingPoll(id), let .qrPairingPoll(id):
             guard MonitorSecurity.matches(id, "[A-Za-z0-9_-]{32}") else { throw MonitorError.invalidRoute }
         case let .result(task), let .controls(task): query = [URLQueryItem(name: "task_id", value: task)]
         case let .resultTXT(task, result):

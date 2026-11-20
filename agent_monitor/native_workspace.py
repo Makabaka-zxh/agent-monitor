@@ -124,7 +124,15 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
 
     @app.post("/api/native/computers/pairing/{request_id}/approve")
     def approve_pairing(request_id: str, request: Request):
-        return perform(request, lambda reader: store.decide_qr_pairing(identity(request_id, native=True), True), write=True)
+        return perform(
+            request,
+            lambda reader: store.decide_qr_pairing(
+                identity(request_id, native=True),
+                True,
+                parent_session_id=reader["parent_session_id"],
+            ),
+            write=True,
+        )
 
     @app.post("/api/native/computers/pairing/{request_id}/reject")
     def reject_pairing(request_id: str, request: Request):

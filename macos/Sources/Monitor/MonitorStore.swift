@@ -23,7 +23,11 @@ final class MonitorStore: ObservableObject {
     @Published private(set) var usageNavigationRequest: UUID?
     var openMainWindow: (() -> Void)?
     let usageAlerts = UsageNotifications()
+    let localCollector = LocalCollector()
     @Published var pairingCode: ComputerPairingCode?
+    @Published private(set) var qrLogin: QRLoginSession?
+    @Published private(set) var qrBusy = false
+    @Published private(set) var qrError = ""
     @Published var tool: ToolFilter { didSet { UserDefaults.standard.set(tool.rawValue, forKey: "tool") } }
     @Published var scope: TaskScope { didSet { UserDefaults.standard.set(scope.rawValue, forKey: "scope") } }
 
@@ -36,6 +40,8 @@ final class MonitorStore: ObservableObject {
     private var preferenceGeneration = 0
     private var loopStarted = false
     private var pairingLoopTask: Task<Void, Never>?
+    private var qrLoopTask: Task<Void, Never>?
+    private var qrPollInFlight = false
     private var usageRetryAfter = Date.distantPast
 
     init() {
@@ -92,6 +98,7 @@ final class MonitorStore: ObservableObject {
     func saveServerOrigin(_ input: String) -> Bool {
         guard !connected, !loginBusy, !ServerOrigin.isEnvironmentControlled else { return false }
         if pendingLogin { clearPendingLogin() }
+        clearQRLogin()
         guard let normalized = ServerOrigin.save(input) else {
             notice = "请输入有效的 HTTPS 服务器根地址（如 https://monitor.example.com，不带路径或查询参数）"
             return false
@@ -103,6 +110,161 @@ final class MonitorStore: ObservableObject {
         loadCredentialsForCurrentOrigin()
         usageAlerts.setAccount(connected ? tokenFingerprint : nil)
         return true
+    }
+
+    func clearQRLogin() {
+        qrLoopTask?.cancel()
+        qrLoopTask = nil
+        qrLogin = nil
+        qrBusy = false
+        qrPollInFlight = false
+        qrError = ""
+    }
+
+    func startQRLogin(serverInput: String? = nil) async {
+        guard !connected, !qrBusy else { return }
+        if let serverInput, !ServerOrigin.isEnvironmentControlled {
+            let trimmed = serverInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if origin.isEmpty || (!trimmed.isEmpty && ServerOrigin.normalize(trimmed) != origin) {
+                guard saveServerOrigin(trimmed) else { return }
+                if connected {
+                    await refresh()
+                    await refreshAccount()
+                    return
+                }
+            }
+        }
+        guard !origin.isEmpty else {
+            qrError = "请先填写有效的 HTTPS 服务器地址"
+            return
+        }
+        guard Date() >= cooldownUntil else {
+            qrError = "请求较多，请稍后再试"
+            return
+        }
+        clearQRLogin()
+        qrBusy = true
+        let epoch = generation
+        defer { if epoch == generation { qrBusy = false } }
+        await localCollector.refresh()
+        guard epoch == generation, !connected else { return }
+        let needsCollector = (localCollector.status?.supportsServerBinding == true) && (localCollector.status?.paired != true)
+        do {
+            let verifier = try MonitorSecurity.verifier()
+            let hostName = String((Host.current().localizedName ?? "Mac").prefix(44))
+            let readerName = String(("Monitor · " + hostName).prefix(60))
+            let payload: [String: Any] = [
+                "name": hostName,
+                "platform": "macOS",
+                "include_collector": needsCollector,
+                "issue_collector_code": needsCollector,
+                "include_reader": true,
+                "reader_name": readerName,
+                "code_challenge": MonitorSecurity.challenge(verifier)
+            ]
+            let value = try await api.json(QRPairingStartResponse.self, .qrPairingStart, method: "POST", body: payload)
+            guard epoch == generation, !connected else { return }
+            let expectedURL = origin + "/#/pairing-confirm/" + value.requestId
+            guard MonitorSecurity.matches(value.requestId, "[A-Za-z0-9_-]{32}"),
+                  MonitorSecurity.matches(value.pollSecret, "[A-Za-z0-9_-]{32,128}"),
+                  value.verificationUrl == expectedURL,
+                  let expiry = MonitorDate.parse(value.expiresAt),
+                  expiry > Date() else { throw MonitorError.invalidResponse }
+            let interval = max(3, min(10, value.interval ?? 3))
+            qrLogin = QRLoginSession(
+                id: value.requestId,
+                pollSecret: value.pollSecret,
+                verifier: verifier,
+                verificationURL: value.verificationUrl,
+                expiresAt: expiry,
+                includeCollector: needsCollector,
+                intervalSeconds: interval
+            )
+            qrError = ""
+            startQRPollingLoop(intervalSeconds: interval)
+        } catch {
+            guard epoch == generation else { return }
+            if let failure = error as? MonitorError, failure.status == 429 {
+                cooldownUntil = Date().addingTimeInterval(failure.retryAfter)
+            }
+            qrError = error is MonitorError ? error.localizedDescription : "暂时无法生成登录二维码，请检查服务器地址或改用浏览器登录"
+        }
+    }
+
+    private func startQRPollingLoop(intervalSeconds: Int) {
+        qrLoopTask?.cancel()
+        let epoch = generation
+        qrLoopTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled, let self, self.generation == epoch, self.qrLogin != nil, !self.connected {
+                try? await Task.sleep(for: .seconds(intervalSeconds))
+                guard !Task.isCancelled, self.generation == epoch, self.qrLogin != nil, !self.connected else { return }
+                await self.pollQRLogin()
+            }
+        }
+    }
+
+    func pollQRLogin() async {
+        guard !qrPollInFlight, !loginBusy, let active = qrLogin, !connected, !origin.isEmpty, Date() >= cooldownUntil else { return }
+        guard active.expiresAt > Date() else {
+            clearQRLogin()
+            qrError = "二维码已过期，请点击刷新重新生成"
+            return
+        }
+        qrPollInFlight = true
+        let epoch = generation
+        defer { if epoch == generation { qrPollInFlight = false } }
+        do {
+            let value = try await api.json(
+                QRPairingPollResponse.self,
+                .qrPairingPoll(active.id),
+                method: "POST",
+                body: ["poll_secret": active.pollSecret, "code_verifier": active.verifier]
+            )
+            guard epoch == generation, qrLogin?.id == active.id, !connected else { return }
+            if value.status == "pending" { return }
+            guard value.status == "approved",
+                  value.readerMode == "full_app",
+                  let token = value.readerToken,
+                  MonitorSecurity.matches(token, "nrd_[A-Za-z0-9_-]{43}"),
+                  let stamp = value.readerExpiresAt,
+                  let expiry = MonitorDate.parse(stamp),
+                  expiry > Date() else { throw MonitorError.invalidResponse }
+            let login = LoginSecret(token: token, expiresAt: expiry)
+            do { try Keychain.write(login, key: "login") }
+            catch {
+                try? await api.mutate(.session, method: "DELETE", token: token)
+                throw error
+            }
+            if pendingLogin { try? Keychain.remove("pairing") }
+            pairingLoopTask?.cancel()
+            pairingLoopTask = nil
+            clearQRLogin()
+            credential = login
+            pairing = nil
+            pendingLogin = false
+            connected = true
+            usageAlerts.setAccount(tokenFingerprint)
+            connectionMessage = ""
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            if let collectorCode = value.collectorCode, MonitorSecurity.matches(collectorCode, "[A-F0-9]{12}") {
+                await localCollector.pair(code: collectorCode)
+            }
+            await refresh()
+            await refreshAccount()
+        } catch {
+            guard epoch == generation else { return }
+            if let failure = error as? MonitorError {
+                if failure.status == 429 {
+                    cooldownUntil = Date().addingTimeInterval(failure.retryAfter)
+                    return
+                }
+                if [401, 403, 404, 410].contains(failure.status) {
+                    clearQRLogin()
+                    qrError = failure.localizedDescription
+                    return
+                }
+            }
+        }
     }
 
     func copyVerificationURL() {
@@ -126,6 +288,7 @@ final class MonitorStore: ObservableObject {
     }
 
     private func startFastPairingPoll() {
+        clearQRLogin()
         pairingLoopTask?.cancel()
         let epoch = generation
         pairingLoopTask = Task { @MainActor [weak self] in
@@ -203,7 +366,8 @@ final class MonitorStore: ObservableObject {
                 throw error
             }
             try? Keychain.remove("pairing")
-            pairingLoopTask?.cancel()
+            clearQRLogin()
+        pairingLoopTask?.cancel()
             pairingLoopTask = nil
             credential = login
             self.pairing = nil
@@ -234,6 +398,7 @@ final class MonitorStore: ObservableObject {
         clearPendingLogin()
     }
     private func clearPendingLogin() {
+        clearQRLogin()
         pairingLoopTask?.cancel()
         pairingLoopTask = nil
         if !origin.isEmpty {
@@ -367,6 +532,7 @@ final class MonitorStore: ObservableObject {
     func invalidate(_ token: String) {
         guard credential?.token == token else { return }
         do { try Keychain.remove("login") } catch { notice = error.localizedDescription }
+        clearQRLogin()
         pairingLoopTask?.cancel()
         pairingLoopTask = nil
         generation = UUID()

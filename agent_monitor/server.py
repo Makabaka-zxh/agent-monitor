@@ -81,6 +81,11 @@ class QRPairingStart(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=60)
     platform: str = Field(min_length=1, max_length=60)
+    include_collector: StrictBool = True
+    issue_collector_code: StrictBool = False
+    include_reader: StrictBool = False
+    reader_name: str | None = Field(default=None, min_length=1, max_length=60)
+    code_challenge: str | None = Field(default=None, min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
 
     @field_validator("name", "platform")
     @classmethod
@@ -89,10 +94,31 @@ class QRPairingStart(BaseModel):
             raise ValueError("电脑名称或平台格式无效")
         return value.strip()
 
+    @field_validator("reader_name")
+    @classmethod
+    def valid_reader_name(cls, value):
+        if value is None:
+            return None
+        if not value.strip() or any(unicodedata.category(c) in {"Cc", "Cf"} for c in value):
+            raise ValueError("桌面端设备名称格式无效")
+        return value.strip()
+
+    @field_validator("code_challenge")
+    @classmethod
+    def valid_challenge(cls, value):
+        if value is None:
+            return None
+        import base64
+        decoded = base64.urlsafe_b64decode(value + "=")
+        if len(decoded) != 32 or base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != value:
+            raise ValueError("连接验证格式无效")
+        return value
+
 
 class QRPairingPoll(BaseModel):
     model_config = ConfigDict(extra="forbid")
     poll_secret: str = Field(min_length=32, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    code_verifier: str | None = Field(default=None, min_length=43, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class Registration(BaseModel):
@@ -402,7 +428,15 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
         if not store.has_account():
             raise HTTPException(409, "请先在服务电脑建立账号")
         attempts.check((request.client.host, "qr-start"), 5, 60)
-        result = store.create_qr_pairing(payload.name, payload.platform)
+        result = store.create_qr_pairing(
+            payload.name,
+            payload.platform,
+            include_collector=payload.include_collector,
+            issue_collector_code=payload.issue_collector_code,
+            include_reader=payload.include_reader,
+            reader_name=payload.reader_name,
+            code_challenge=payload.code_challenge,
+        )
         result["verification_url"] = public_url.rstrip("/") + "/#/pairing-confirm/" + result["request_id"]
         return result
 
@@ -412,7 +446,7 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
 
     @app.post("/api/pairing/requests/{request_id}/approve")
     def qr_approve(request_id: str, session=Depends(authenticated)):
-        return store.decide_qr_pairing(qr_id(request_id), True)
+        return store.decide_qr_pairing(qr_id(request_id), True, parent_session_id=session["id"])
 
     @app.post("/api/pairing/requests/{request_id}/reject")
     def qr_reject(request_id: str, session=Depends(authenticated)):
@@ -424,7 +458,12 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
         same_origin(request)
         attempts.check((request.client.host, "qr-poll"), 200, 60)
         attempts.check((request_id, "qr-poll-request"), 30, 60)
-        return store.poll_qr_pairing(request_id, payload.poll_secret)
+        return store.poll_qr_pairing(
+            request_id,
+            payload.poll_secret,
+            code_verifier=payload.code_verifier,
+            native_access=getattr(app.state, "native_access", None),
+        )
 
     @app.delete("/api/devices/{device_id}")
     def remove_device(device_id: str, session=Depends(authenticated)):
