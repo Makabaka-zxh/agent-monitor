@@ -5,6 +5,7 @@ namespace MonitorApp.Core;
 public sealed class MonitorController : IDisposable
 {
     public event Action? StateChanged;
+    public event Action? LoginCompleted;
     public event Action<string, string>? QuotaAlertTriggered;
 
     public MonitorApi Api { get; } = new();
@@ -42,6 +43,8 @@ public sealed class MonitorController : IDisposable
     private DateTimeOffset _cooldownUntil = DateTimeOffset.MinValue;
     private CancellationTokenSource? _qrLoopCts;
     private CancellationTokenSource? _browserLoopCts;
+    private bool _qrPollInFlight;
+    private bool _filterInitialized;
 
     public MonitorController()
     {
@@ -53,6 +56,9 @@ public sealed class MonitorController : IDisposable
     public int OnlineDeviceCount => IsFresh ? Devices.Count(d => d.Online) : 0;
     public string TokenFingerprint => _credential is { } c ? MonitorSecurity.Sha256Hex(c.Token) : "";
     public string? ActiveToken => Connected ? _credential?.Token : null;
+
+    public ComputerPairingCodeDto? ActivePairingCode =>
+        PairingCode is { } p && MonitorDate.Parse(p.ExpiresAt) is { } exp && exp > DateTimeOffset.UtcNow ? p : null;
 
     public List<MonitorTask> VisibleTasks =>
         Tasks.Where(t => t.Matches(Tool, Scope, IsFresh, SearchQuery)).ToList();
@@ -105,6 +111,7 @@ public sealed class MonitorController : IDisposable
     public async Task SaveToolFilterAsync(ToolFilter next)
     {
         Tool = next;
+        _filterInitialized = true;
         NotifyChanged();
         if (_credential is not { } login || !Connected) return;
         try
@@ -235,6 +242,7 @@ public sealed class MonitorController : IDisposable
         Origin = normalized;
         _generation = Guid.NewGuid();
         _cooldownUntil = DateTimeOffset.MinValue;
+        _filterInitialized = false;
         Notice = null;
         LoadCredentialsForOrigin();
         NotifyChanged();
@@ -247,6 +255,7 @@ public sealed class MonitorController : IDisposable
         _qrLoopCts = null;
         QrLogin = null;
         QrBusy = false;
+        _qrPollInFlight = false;
         QrError = "";
         NotifyChanged();
     }
@@ -363,14 +372,15 @@ public sealed class MonitorController : IDisposable
                 }
                 catch (OperationCanceledException) { return; }
                 if (cts.IsCancellationRequested || _generation != epoch || QrLogin is null || Connected) return;
-                await System.Windows.Application.Current.Dispatcher.InvokeAsync(PollQrLoginAsync).Task.Unwrap();
+                if (System.Windows.Application.Current?.Dispatcher is not { HasShutdownStarted: false } disp) return;
+                await disp.InvokeAsync(PollQrLoginAsync).Task.Unwrap();
             }
         });
     }
 
     public async Task PollQrLoginAsync()
     {
-        if (LoginBusy || QrLogin is not { } active || Connected || string.IsNullOrEmpty(Origin) || DateTimeOffset.UtcNow < _cooldownUntil)
+        if (_qrPollInFlight || LoginBusy || QrLogin is not { } active || Connected || string.IsNullOrEmpty(Origin) || DateTimeOffset.UtcNow < _cooldownUntil)
             return;
         if (active.ExpiresAt <= DateTimeOffset.UtcNow)
         {
@@ -379,6 +389,7 @@ public sealed class MonitorController : IDisposable
             NotifyChanged();
             return;
         }
+        _qrPollInFlight = true;
         var epoch = _generation;
         try
         {
@@ -401,7 +412,15 @@ public sealed class MonitorController : IDisposable
             }
 
             var secret = new LoginSecret { Token = res.ReaderToken, ExpiresAt = expiry.Value };
-            DpapiVault.Write(Origin, "login", secret);
+            try
+            {
+                DpapiVault.Write(Origin, "login", secret);
+            }
+            catch
+            {
+                try { await Api.MutateAsync(Origin, "/api/native/session", System.Net.Http.HttpMethod.Delete, token: res.ReaderToken); } catch { }
+                throw;
+            }
             DpapiVault.Remove(Origin, "pairing");
             _browserLoopCts?.Cancel();
             ClearQrLogin();
@@ -410,6 +429,7 @@ public sealed class MonitorController : IDisposable
             PendingBrowserLogin = false;
             Connected = true;
             ConnectionMessage = "";
+            LoginCompleted?.Invoke();
             NotifyChanged();
 
             if (!string.IsNullOrEmpty(res.CollectorCode) && MonitorSecurity.Matches(res.CollectorCode, "[A-F0-9]{12}"))
@@ -418,6 +438,7 @@ public sealed class MonitorController : IDisposable
             }
             await RefreshWorkbenchAsync();
             await RefreshAccountAsync();
+            await RefreshUsageAsync();
         }
         catch (MonitorApiException apiEx)
         {
@@ -435,6 +456,10 @@ public sealed class MonitorController : IDisposable
             }
         }
         catch { }
+        finally
+        {
+            if (epoch == _generation) _qrPollInFlight = false;
+        }
     }
 
     public async Task BeginBrowserLoginAsync(string? serverInput = null)
@@ -519,7 +544,8 @@ public sealed class MonitorController : IDisposable
             {
                 try { await Task.Delay(2500, cts.Token); } catch { return; }
                 if (cts.IsCancellationRequested || _generation != epoch || !PendingBrowserLogin || Connected) return;
-                await System.Windows.Application.Current.Dispatcher.InvokeAsync(PollBrowserLoginAsync).Task.Unwrap();
+                if (System.Windows.Application.Current?.Dispatcher is not { HasShutdownStarted: false } disp) return;
+                await disp.InvokeAsync(PollBrowserLoginAsync).Task.Unwrap();
             }
         });
     }
@@ -548,16 +574,26 @@ public sealed class MonitorController : IDisposable
                 throw new MonitorApiException(0, "登录验证未通过");
             }
             var secret = new LoginSecret { Token = res.ReaderToken, ExpiresAt = expiry.Value };
-            DpapiVault.Write(Origin, "login", secret);
+            try
+            {
+                DpapiVault.Write(Origin, "login", secret);
+            }
+            catch
+            {
+                try { await Api.MutateAsync(Origin, "/api/native/session", System.Net.Http.HttpMethod.Delete, token: res.ReaderToken); } catch { }
+                throw;
+            }
             DpapiVault.Remove(Origin, "pairing");
             _browserLoopCts?.Cancel();
             _credential = secret;
             _browserPairing = null;
             PendingBrowserLogin = false;
             Connected = true;
+            LoginCompleted?.Invoke();
             NotifyChanged();
             await RefreshWorkbenchAsync();
             await RefreshAccountAsync();
+            await RefreshUsageAsync();
         }
         catch (MonitorApiException apiEx)
         {
@@ -595,13 +631,45 @@ public sealed class MonitorController : IDisposable
         {
             var res = await Api.JsonAsync<WorkbenchResponse>(Origin, "/api/native/workbench", System.Net.Http.HttpMethod.Get, token: login.Token);
             if (epoch != _generation || _credential?.Token != login.Token) return;
+            var devMap = res.Devices
+                .Where(d => !string.IsNullOrEmpty(d.Id))
+                .GroupBy(d => d.Id, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
+            foreach (var task in res.Tasks)
+            {
+                if (string.IsNullOrWhiteSpace(task.DeviceName) && devMap.TryGetValue(task.DeviceId, out var resolvedName))
+                {
+                    task.DeviceName = resolvedName;
+                }
+            }
             Devices = res.Devices;
             Tasks = res.Tasks;
             SyncOutput = res.Preferences.SyncOutput;
+            if (!_filterInitialized && !string.IsNullOrWhiteSpace(res.Preferences.ToolFilter))
+            {
+                Tool = ToolFilterExtensions.ParseTool(res.Preferences.ToolFilter);
+                _filterInitialized = true;
+            }
             LastSuccess = DateTimeOffset.UtcNow;
             ConnectionMessage = "";
             if (res.Usage is not null)
             {
+                if (Usage is null)
+                {
+                    Usage = res.Usage;
+                }
+                else if (res.Usage.Providers is { Count: > 0 } liveProviders && Usage.Providers is not null)
+                {
+                    foreach (var lp in liveProviders)
+                    {
+                        var existing = Usage.Providers.FirstOrDefault(p => p.Tool == lp.Tool);
+                        if (existing is not null)
+                        {
+                            if (lp.TodayTokens is not null) existing.TodayTokens = lp.TodayTokens;
+                            if (lp.Quotas is not null) existing.Quotas = lp.Quotas;
+                        }
+                    }
+                }
                 ProcessUsageAlerts(res.Usage);
             }
         }
@@ -832,6 +900,7 @@ public sealed class MonitorController : IDisposable
         Usage = null;
         UsageRefreshing = false;
         UsageError = "";
+        _filterInitialized = false;
         NotifyChanged();
     }
 

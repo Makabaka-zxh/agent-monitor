@@ -41,6 +41,13 @@ public static class MonitorSecurity
         return Base64Url(hash);
     }
 
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
     public static string SafeFileName(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "附件";
@@ -54,7 +61,13 @@ public static class MonitorSecurity
         }
         var cleaned = sb.ToString().Trim('.', ' ');
         if (string.IsNullOrEmpty(cleaned)) return "附件";
-        return cleaned.Length <= 180 ? cleaned : cleaned[..180];
+        var dot = cleaned.IndexOf('.');
+        var stem = dot >= 0 ? cleaned[..dot] : cleaned;
+        if (ReservedDeviceNames.Contains(stem))
+        {
+            cleaned = "_" + cleaned;
+        }
+        return cleaned.Length <= 180 ? cleaned : cleaned[..180].TrimEnd('.', ' ');
     }
 }
 

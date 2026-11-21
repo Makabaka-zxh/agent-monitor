@@ -378,6 +378,8 @@ class Store:
                 expected_challenge = digest(challenge_for(code_verifier))
                 if not row["challenge_hash"] or not hmac.compare_digest(expected_challenge, row["challenge_hash"]):
                     raise PairingRequestError(401, "桌面端安全验证失败，请重新生成二维码")
+            elif code_verifier is not None:
+                raise PairingRequestError(401, "未启用桌面端登录时不可提交安全验证参数")
             row = self._qr_request(request_id)
             if row["status"] == "pending":
                 return {"status": "pending", "interval": 3}
@@ -396,7 +398,8 @@ class Store:
             if row["include_reader"]:
                 if native_access is None:
                     raise PairingRequestError(503, "当前服务未启用桌面端原生登录")
-                issued = native_access.issue_reader(
+                issuer = getattr(native_access, "issue_reader_in_transaction", native_access.issue_reader)
+                issued = issuer(
                     parent_session_id=row["parent_session_id"] or "",
                     name=row["reader_name"] or f"{row['name']} · 桌面端",
                     mode="full_app",

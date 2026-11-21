@@ -9,6 +9,7 @@ public final class MonitorApplication extends Application {
         super.onCreate();
         ServerSettings.initialize(this);
         MonitorWidgetBridge.setListener(MonitorWidgetUpdater::refreshAll);
+        MonitorWidgetBridge.setSnapshotListener(MonitorWidgetUpdater::cacheWorkbench);
     }
 
     @Override public void onConfigurationChanged(Configuration newConfig) {

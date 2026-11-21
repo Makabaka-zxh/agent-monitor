@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -407,11 +408,67 @@ public static class UiKit
         return btn;
     }
 
+    public static void SetButtonState(Button btn, string label, bool enabled, bool primary = true)
+    {
+        btn.IsEnabled = enabled;
+        btn.Cursor = enabled ? Cursors.Hand : Cursors.Arrow;
+        if (btn.Content is Border border)
+        {
+            border.Opacity = enabled ? 1.0 : (primary ? 0.55 : 0.5);
+            if (primary)
+                border.Background = enabled ? AccentBrush : SoftBrush;
+            if (border.Child is TextBlock tb)
+                tb.Text = label;
+            else if (border.Child is StackPanel sp && sp.Children.OfType<TextBlock>().FirstOrDefault() is { } rowTb)
+                rowTb.Text = label;
+        }
+    }
+
     public static TextBox StyledTextBox(string initial = "", string placeholder = "", bool multiline = false)
     {
-        var box = new TextBox
+        var template = new ControlTemplate(typeof(TextBox));
+        var bd = new FrameworkElementFactory(typeof(Border), "Bd");
+        bd.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        bd.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+        bd.SetValue(Border.BorderThicknessProperty, new TemplateBindingExtension(Control.BorderThicknessProperty));
+        bd.SetValue(Border.CornerRadiusProperty, new CornerRadius(12));
+
+        var grid = new FrameworkElementFactory(typeof(Grid));
+        var contentHost = new FrameworkElementFactory(typeof(ScrollViewer), "PART_ContentHost");
+        contentHost.SetValue(FrameworkElement.MarginProperty, new Thickness(0));
+        grid.AppendChild(contentHost);
+
+        var watermark = new FrameworkElementFactory(typeof(TextBlock), "Watermark");
+        watermark.SetValue(TextBlock.TextProperty, new TemplateBindingExtension(FrameworkElement.TagProperty));
+        watermark.SetValue(TextBlock.FontFamilyProperty, AppFont);
+        watermark.SetValue(TextBlock.FontSizeProperty, 13.5);
+        watermark.SetValue(TextBlock.ForegroundProperty, MutedBrush);
+        watermark.SetValue(TextBlock.PaddingProperty, new Thickness(12, 9, 12, 9));
+        watermark.SetValue(UIElement.IsHitTestVisibleProperty, false);
+        watermark.SetValue(UIElement.VisibilityProperty, Visibility.Collapsed);
+        watermark.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+        grid.AppendChild(watermark);
+
+        bd.AppendChild(grid);
+        template.VisualTree = bd;
+
+        var emptyTrigger = new Trigger { Property = TextBox.TextProperty, Value = "" };
+        emptyTrigger.Setters.Add(new Setter(UIElement.VisibilityProperty, Visibility.Visible, "Watermark"));
+        template.Triggers.Add(emptyTrigger);
+
+        var nullTrigger = new Trigger { Property = TextBox.TextProperty, Value = null };
+        nullTrigger.Setters.Add(new Setter(UIElement.VisibilityProperty, Visibility.Visible, "Watermark"));
+        template.Triggers.Add(nullTrigger);
+
+        var focusTrigger = new Trigger { Property = UIElement.IsKeyboardFocusWithinProperty, Value = true };
+        focusTrigger.Setters.Add(new Setter(Border.BorderBrushProperty, AccentBrush, "Bd"));
+        template.Triggers.Add(focusTrigger);
+
+        return new TextBox
         {
             Text = initial,
+            Tag = placeholder,
+            Template = template,
             FontFamily = AppFont,
             FontSize = 13.5,
             Foreground = TextBrush,
@@ -419,13 +476,146 @@ public static class UiKit
             Background = SurfaceBrush,
             BorderBrush = LineBrush,
             BorderThickness = new Thickness(1),
-            Padding = new Thickness(11, 9, 11, 9),
+            Padding = new Thickness(10, 8, 10, 8),
             AcceptsReturn = multiline,
             TextWrapping = multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
             VerticalScrollBarVisibility = multiline ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden
         };
-        if (!string.IsNullOrEmpty(placeholder))
-            box.ToolTip = placeholder;
-        return box;
+    }
+
+    public static ComboBox StyledComboBox()
+    {
+        var itemTemplate = new ControlTemplate(typeof(ComboBoxItem));
+        var itemBd = new FrameworkElementFactory(typeof(Border), "ItemBd");
+        itemBd.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        itemBd.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+        itemBd.SetValue(Border.PaddingProperty, new Thickness(10, 7, 10, 7));
+        itemBd.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 2, 4, 2));
+        var itemPresenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        itemBd.AppendChild(itemPresenter);
+        itemTemplate.VisualTree = itemBd;
+
+        var hoverTrigger = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty, HoverBrush, "ItemBd"));
+        itemTemplate.Triggers.Add(hoverTrigger);
+
+        var selTrigger = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
+        selTrigger.Setters.Add(new Setter(Border.BackgroundProperty, SoftBrush, "ItemBd"));
+        itemTemplate.Triggers.Add(selTrigger);
+
+        var itemStyle = new Style(typeof(ComboBoxItem));
+        itemStyle.Setters.Add(new Setter(Control.ForegroundProperty, TextBrush));
+        itemStyle.Setters.Add(new Setter(Control.FontFamilyProperty, AppFont));
+        itemStyle.Setters.Add(new Setter(Control.FontSizeProperty, 13.0));
+        itemStyle.Setters.Add(new Setter(Control.TemplateProperty, itemTemplate));
+
+        var toggleTemplate = new ControlTemplate(typeof(ToggleButton));
+        var toggleBd = new FrameworkElementFactory(typeof(Border), "ToggleBd");
+        toggleBd.SetValue(Border.BackgroundProperty, SurfaceBrush);
+        toggleBd.SetValue(Border.BorderBrushProperty, LineBrush);
+        toggleBd.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        toggleBd.SetValue(Border.CornerRadiusProperty, new CornerRadius(12));
+        var arrow = new FrameworkElementFactory(typeof(TextBlock));
+        arrow.SetValue(TextBlock.TextProperty, "▾");
+        arrow.SetValue(TextBlock.FontSizeProperty, 12.0);
+        arrow.SetValue(TextBlock.ForegroundProperty, MutedBrush);
+        arrow.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Right);
+        arrow.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        arrow.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 0, 12, 0));
+        toggleBd.AppendChild(arrow);
+        toggleTemplate.VisualTree = toggleBd;
+
+        var toggleHover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        toggleHover.Setters.Add(new Setter(Border.BorderBrushProperty, AccentBrush, "ToggleBd"));
+        toggleTemplate.Triggers.Add(toggleHover);
+
+        var comboTemplate = new ControlTemplate(typeof(ComboBox));
+        var rootGrid = new FrameworkElementFactory(typeof(Grid));
+
+        var toggleBtn = new FrameworkElementFactory(typeof(ToggleButton), "ToggleButton");
+        toggleBtn.SetValue(Control.TemplateProperty, toggleTemplate);
+        toggleBtn.SetValue(UIElement.FocusableProperty, false);
+        toggleBtn.SetValue(ToggleButton.ClickModeProperty, ClickMode.Press);
+        toggleBtn.SetBinding(ToggleButton.IsCheckedProperty, new System.Windows.Data.Binding("IsDropDownOpen")
+        {
+            Mode = System.Windows.Data.BindingMode.TwoWay,
+            RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
+        });
+        rootGrid.AppendChild(toggleBtn);
+
+        var contentSite = new FrameworkElementFactory(typeof(ContentPresenter), "ContentSite");
+        contentSite.SetValue(UIElement.IsHitTestVisibleProperty, false);
+        contentSite.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ComboBox.SelectionBoxItemProperty));
+        contentSite.SetValue(ContentPresenter.ContentTemplateProperty, new TemplateBindingExtension(ComboBox.SelectionBoxItemTemplateProperty));
+        contentSite.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 8, 28, 8));
+        contentSite.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        contentSite.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+        rootGrid.AppendChild(contentSite);
+
+        var popup = new FrameworkElementFactory(typeof(Popup), "Popup");
+        popup.SetValue(Popup.PlacementProperty, PlacementMode.Bottom);
+        popup.SetValue(Popup.AllowsTransparencyProperty, true);
+        popup.SetValue(UIElement.FocusableProperty, false);
+        popup.SetValue(Popup.PopupAnimationProperty, PopupAnimation.Fade);
+        popup.SetBinding(Popup.IsOpenProperty, new System.Windows.Data.Binding("IsDropDownOpen")
+        {
+            RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
+        });
+
+        var dropBorder = new FrameworkElementFactory(typeof(Border));
+        dropBorder.SetValue(Border.BackgroundProperty, SurfaceBrush);
+        dropBorder.SetValue(Border.BorderBrushProperty, LineBrush);
+        dropBorder.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        dropBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(12));
+        dropBorder.SetValue(Border.PaddingProperty, new Thickness(0, 4, 0, 4));
+        dropBorder.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 4, 0, 0));
+        dropBorder.SetBinding(FrameworkElement.MinWidthProperty, new System.Windows.Data.Binding("ActualWidth")
+        {
+            RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
+        });
+        dropBorder.SetValue(FrameworkElement.MaxHeightProperty, 280.0);
+
+        var dropScroll = new FrameworkElementFactory(typeof(ScrollViewer));
+        dropScroll.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
+        var itemsHost = new FrameworkElementFactory(typeof(StackPanel));
+        itemsHost.SetValue(Panel.IsItemsHostProperty, true);
+        dropScroll.AppendChild(itemsHost);
+        dropBorder.AppendChild(dropScroll);
+        popup.AppendChild(dropBorder);
+        rootGrid.AppendChild(popup);
+
+        comboTemplate.VisualTree = rootGrid;
+
+        var disabledTrigger = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+        disabledTrigger.Setters.Add(new Setter(UIElement.OpacityProperty, 0.5));
+        comboTemplate.Triggers.Add(disabledTrigger);
+
+        return new ComboBox
+        {
+            Template = comboTemplate,
+            ItemContainerStyle = itemStyle,
+            FontFamily = AppFont,
+            FontSize = 13.5,
+            Foreground = TextBrush,
+            Cursor = Cursors.Hand
+        };
+    }
+
+    public static ComboBoxItem AddComboItem(ComboBox combo, string label, object? tag = null)
+    {
+        var item = new ComboBoxItem
+        {
+            Content = new TextBlock
+            {
+                Text = label,
+                FontFamily = AppFont,
+                FontSize = 13.0,
+                Foreground = TextBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            },
+            Tag = tag
+        };
+        combo.Items.Add(item);
+        return item;
     }
 }

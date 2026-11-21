@@ -138,6 +138,67 @@ public final class MonitorWidgetPolicyTest {
                 && "claude:task-wait-02".equals(fixedTasksIdle.clickTaskId),
                 "fixed_tasks deep-links to lead active task");
 
+        // 7. Fresh standalone usage from UsageAlertJobService wins over older workbench.usage
+        JSONArray newerQuotas = new JSONArray()
+                .put(new JSONObject()
+                        .put("key", "5h")
+                        .put("window_minutes", 300L)
+                        .put("remaining_percent", 7.0)
+                        .put("resets_at", nowSec + 1800L)
+                        .put("stale", false)
+                        .put("source_name", "Mac Studio"));
+        JSONObject newerStandaloneUsage = new JSONObject().put(
+                "providers",
+                new JSONArray().put(new JSONObject().put("tool", "claude").put("today_tokens", 510_000L).put("quotas", newerQuotas)));
+        MonitorWidgetPolicy.Model jobRefreshed = MonitorWidgetPolicy.evaluate(
+                MonitorWidgetPolicy.MODE_AUTO,
+                true,
+                workbench,
+                newerStandaloneUsage,
+                true,
+                true,
+                MonitorWidgetBridge.TrackingSnapshot.idle(),
+                nowMillis);
+        check("剩余 7%".equals(jobRefreshed.primaryValue) && "claude".equals(jobRefreshed.brandTool),
+                "newer standalone usage overrides older workbench usage: " + jobRefreshed.primaryValue);
+        check(jobRefreshed.wideBadge.contains("正在同步") && jobRefreshed.smallBadge.contains("同步中"),
+                "refreshing flag surfaces live visual sync state");
+
+        // Conversely, newer workbench.usage wins when preferStandaloneUsage == false
+        MonitorWidgetPolicy.Model workbenchRefreshed = MonitorWidgetPolicy.evaluate(
+                MonitorWidgetPolicy.MODE_AUTO,
+                true,
+                workbench,
+                newerStandaloneUsage,
+                false,
+                false,
+                MonitorWidgetBridge.TrackingSnapshot.idle(),
+                nowMillis);
+        check("剩余 12%".equals(workbenchRefreshed.primaryValue) && "antigravity".equals(workbenchRefreshed.brandTool),
+                "newer workbench usage wins when workbench timestamp is fresher: " + workbenchRefreshed.primaryValue);
+
+        // 8. Online error tasks surface in fixed_tasks as "需要关注"
+        JSONObject errorWorkbench = new JSONObject()
+                .put("devices", new JSONArray().put(new JSONObject().put("id", "dev-win").put("name", "主力工作站").put("online", true)))
+                .put("tasks", new JSONArray().put(new JSONObject()
+                        .put("id", "codex:err-99")
+                        .put("title", "CI 部署失败待排查")
+                        .put("tool", "codex")
+                        .put("device_id", "dev-win")
+                        .put("status", "error")
+                        .put("archived", false)));
+        MonitorWidgetPolicy.Model errorTaskModel = MonitorWidgetPolicy.evaluate(
+                MonitorWidgetPolicy.MODE_FIXED_TASKS,
+                true,
+                errorWorkbench,
+                null,
+                MonitorWidgetBridge.TrackingSnapshot.idle(),
+                nowMillis);
+        check("CI 部署失败待排查".equals(errorTaskModel.primaryValue)
+                && errorTaskModel.title.contains("需要关注")
+                && errorTaskModel.valueWarning,
+                "online error task surfaces as attention-needed on widget: " + errorTaskModel.title);
+
         System.out.println("MonitorWidgetPolicyTest passed (" + checks + " checks)");
     }
 

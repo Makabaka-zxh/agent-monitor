@@ -131,21 +131,60 @@ public sealed class WindowsCollectorManager
         return ok;
     }
 
+    private static (string FileName, List<string> PrefixArgs) ResolveManagedCommand()
+    {
+        try
+        {
+            var baseDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Monitor", "collector");
+            var currentPath = Path.Combine(baseDir, "current.json");
+            var releasesRoot = Path.GetFullPath(Path.Combine(baseDir, "releases"));
+            if (File.Exists(currentPath))
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(currentPath, Encoding.UTF8));
+                if (doc.RootElement.TryGetProperty("release", out var relProp)
+                    && relProp.GetString() is { } rel
+                    && MonitorSecurity.Matches(rel, "[0-9a-f]{32}"))
+                {
+                    var runtimeDir = Path.GetFullPath(Path.Combine(releasesRoot, rel));
+                    if (runtimeDir.StartsWith(releasesRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var pythonExe = Path.Combine(runtimeDir, "venv", "Scripts", "python.exe");
+                        var scriptPy = Path.Combine(runtimeDir, "scripts", "collector_service.py");
+                        if (File.Exists(pythonExe) && File.Exists(scriptPy))
+                        {
+                            return (pythonExe, ["-I", scriptPy]);
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+        return ("cmd.exe", ["/c", ExecutablePath]);
+    }
+
     private static async Task<string> RunAsync(IReadOnlyList<string> args, string? origin, string? stdinText, TimeSpan timeout)
     {
         var scoped = ServerOrigin.CollectorArguments(args, origin);
+        var (exe, prefix) = ResolveManagedCommand();
         var psi = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
+            FileName = exe,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
-        psi.ArgumentList.Add("/c");
-        psi.ArgumentList.Add(ExecutablePath);
+        psi.Environment["PYTHONUTF8"] = "1";
+        psi.Environment["PYTHONIOENCODING"] = "utf-8";
+        foreach (var item in prefix)
+        {
+            psi.ArgumentList.Add(item);
+        }
         foreach (var arg in scoped)
         {
             psi.ArgumentList.Add(arg);
@@ -159,11 +198,21 @@ public sealed class WindowsCollectorManager
         process.StandardInput.Close();
 
         using var cts = new CancellationTokenSource(timeout);
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
-        await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
-        var stdout = await stdoutTask.ConfigureAwait(false);
-        if (process.ExitCode != 0 || stdout.Length > 16 * 1024)
-            throw new InvalidOperationException("本机连接器返回异常");
-        return stdout;
+        try
+        {
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+            var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            _ = await stderrTask.ConfigureAwait(false);
+            if (process.ExitCode != 0 || stdout.Length > 16 * 1024)
+                throw new InvalidOperationException("本机连接器返回异常");
+            return stdout;
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw;
+        }
     }
 }

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
@@ -26,6 +27,14 @@ public static class Dialogs
             FontFamily = UiKit.AppFont
         };
         win.SourceInitialized += (_, _) => DwmInterop.ApplyWindowStyling(win, UiKit.IsDark);
+        win.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape)
+            {
+                e.Handled = true;
+                win.Close();
+            }
+        };
         return win;
     }
 
@@ -99,11 +108,12 @@ public static class Dialogs
         var catalog = detail.Controls?.Catalog;
         var models = catalog?.Models ?? [];
 
-        var modelCombo = new ComboBox { FontFamily = UiKit.AppFont, FontSize = 13.5, Padding = new Thickness(10, 7, 10, 7), Margin = new Thickness(0, 6, 0, 14) };
-        modelCombo.Items.Add(new ComboBoxItem { Content = "继承电脑当前设置", Tag = "" });
+        var modelCombo = UiKit.StyledComboBox();
+        modelCombo.Margin = new Thickness(0, 6, 0, 14);
+        UiKit.AddComboItem(modelCombo, "继承电脑当前设置", "");
         foreach (var opt in models)
         {
-            modelCombo.Items.Add(new ComboBoxItem { Content = string.IsNullOrWhiteSpace(opt.Label) ? opt.Id : opt.Label, Tag = opt.Id });
+            UiKit.AddComboItem(modelCombo, string.IsNullOrWhiteSpace(opt.Label) ? opt.Id : opt.Label, opt.Id);
         }
 
         var currentSelectedModel = detail.ModelOverrides.Selection?.Model ?? "";
@@ -117,20 +127,21 @@ public static class Dialogs
             }
         }
 
-        var effortCombo = new ComboBox { FontFamily = UiKit.AppFont, FontSize = 13.5, Padding = new Thickness(10, 7, 10, 7), Margin = new Thickness(0, 6, 0, 14) };
+        var effortCombo = UiKit.StyledComboBox();
+        effortCombo.Margin = new Thickness(0, 6, 0, 14);
         var fastCheck = new CheckBox { Content = "下一轮启用 Codex Fast 快速层", Foreground = UiKit.TextBrush, IsChecked = detail.ModelOverrides.FastNext, Margin = new Thickness(0, 4, 0, 8), FontSize = 13 };
         var planCheck = new CheckBox { Content = "下一轮启用 Plan 规划模式", Foreground = UiKit.TextBrush, IsChecked = detail.ModelOverrides.PlanNext, Margin = new Thickness(0, 0, 0, 14), FontSize = 13 };
 
         void RebuildEfforts(string? preferredEffort)
         {
             effortCombo.Items.Clear();
-            effortCombo.Items.Add(new ComboBoxItem { Content = "默认推理强度", Tag = "" });
+            UiKit.AddComboItem(effortCombo, "默认推理强度", "");
             var chosenId = (modelCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
             var opt = models.FirstOrDefault(m => m.Id == chosenId);
             if (opt?.Efforts is { Count: > 0 })
             {
                 foreach (var eff in opt.Efforts)
-                    effortCombo.Items.Add(new ComboBoxItem { Content = eff, Tag = eff });
+                    UiKit.AddComboItem(effortCombo, eff, eff);
             }
             effortCombo.SelectedIndex = 0;
             if (!string.IsNullOrEmpty(preferredEffort))
@@ -273,11 +284,11 @@ public static class Dialogs
         var enabledCheck = new CheckBox { Content = "开启低额度托盘提醒", Foreground = UiKit.TextBrush, IsChecked = current.Enabled, FontSize = 13.5, Margin = new Thickness(0, 0, 0, 12) };
         var resetCheck = new CheckBox { Content = "额度窗口重置恢复时通知我", Foreground = UiKit.TextBrush, IsChecked = current.NotifyReset, FontSize = 13.5, Margin = new Thickness(0, 0, 0, 14) };
 
-        var thresholdCombo = new ComboBox { FontFamily = UiKit.AppFont, FontSize = 13.5, Padding = new Thickness(10, 6, 10, 6), Margin = new Thickness(0, 6, 0, 18) };
+        var thresholdCombo = UiKit.StyledComboBox();
+        thresholdCombo.Margin = new Thickness(0, 6, 0, 18);
         foreach (var pct in new[] { 10, 15, 20, 30, 50 })
         {
-            var item = new ComboBoxItem { Content = $"剩余低于 {pct}% 时提醒", Tag = pct };
-            thresholdCombo.Items.Add(item);
+            var item = UiKit.AddComboItem(thresholdCombo, $"剩余低于 {pct}% 时提醒", pct);
             if (pct == current.ThresholdPercent) thresholdCombo.SelectedItem = item;
         }
         if (thresholdCombo.SelectedIndex < 0) thresholdCombo.SelectedIndex = 2;
@@ -343,23 +354,42 @@ public static class Dialogs
                 try
                 {
                     var info = new FileInfo(dlg.FileName);
-                    if (info.Length <= 15 * 1024 * 1024)
+                    if (info.Length > 10 * 1024 * 1024)
                     {
-                        var bmp = new BitmapImage();
-                        bmp.BeginInit();
-                        bmp.UriSource = new Uri(dlg.FileName);
-                        bmp.DecodePixelWidth = 256;
-                        bmp.CacheOption = BitmapCacheOption.OnLoad;
-                        bmp.EndInit();
-                        var encoder = new PngBitmapEncoder();
-                        encoder.Frames.Add(BitmapFrame.Create(bmp));
-                        using var ms = new MemoryStream();
-                        encoder.Save(ms);
-                        currentAvatar = "data:image/png;base64," + Convert.ToBase64String(ms.ToArray());
-                        avatarHolder.Content = UiKit.AvatarImage(currentAvatar, 80);
+                        ShowMessage(win, "图片过大", "请选择小于 10 MB 的 JPG 或 PNG 图片。");
+                        return;
                     }
+                    var bmp = new BitmapImage();
+                    bmp.BeginInit();
+                    bmp.UriSource = new Uri(dlg.FileName);
+                    bmp.CacheOption = BitmapCacheOption.OnLoad;
+                    bmp.EndInit();
+
+                    // Center-crop to square and scale to 256×256 JPEG (matching Android NativeAvatar 256KB limit)
+                    var edge = Math.Min(bmp.PixelWidth, bmp.PixelHeight);
+                    if (edge < 1) return;
+                    var cropped = new CroppedBitmap(
+                        bmp,
+                        new Int32Rect((bmp.PixelWidth - edge) / 2, (bmp.PixelHeight - edge) / 2, edge, edge));
+                    var scale = 256.0 / edge;
+                    var scaled = new TransformedBitmap(cropped, new ScaleTransform(scale, scale));
+                    var encoder = new JpegBitmapEncoder { QualityLevel = 88 };
+                    encoder.Frames.Add(BitmapFrame.Create(scaled));
+                    using var ms = new MemoryStream();
+                    encoder.Save(ms);
+                    var bytes = ms.ToArray();
+                    if (bytes.Length > 256 * 1024)
+                    {
+                        ShowMessage(win, "头像过大", "处理后的头像超过 256 KB 上限，请换一张图片。");
+                        return;
+                    }
+                    currentAvatar = "data:image/jpeg;base64," + Convert.ToBase64String(bytes);
+                    avatarHolder.Content = UiKit.AvatarImage(currentAvatar, 80);
                 }
-                catch { }
+                catch
+                {
+                    ShowMessage(win, "无法读取图片", "这张图片已损坏或格式暂不支持，请重新选择。");
+                }
             }
         }));
         var clearBtn = UiKit.SecondaryButton("移除头像", () =>
@@ -401,9 +431,10 @@ public static class Dialogs
         tip.Margin = new Thickness(0, 10, 0, 16);
         root.Children.Add(tip);
 
+        var activeCode = controller.ActivePairingCode;
         var codeDisplay = new TextBlock
         {
-            Text = controller.PairingCode?.Code ?? "尚未生成",
+            Text = activeCode?.Code ?? "尚未生成",
             FontFamily = UiKit.MonoFont,
             FontSize = 26,
             FontWeight = FontWeights.SemiBold,
@@ -413,7 +444,12 @@ public static class Dialogs
         };
         root.Children.Add(UiKit.Card(codeDisplay, 14, 14));
 
-        var sub = UiKit.Body("备用方式：在命令行连接器输入 12 位一次性配对码（10 分钟内有效）", 12.5, UiKit.MutedBrush);
+        string FormatCodeExpiry(ComputerPairingCodeDto? dto) =>
+            dto is not null && MonitorDate.Parse(dto.ExpiresAt) is { } exp
+                ? $"一次性配对码有效至 {exp.ToLocalTime():HH:mm}（已复制到剪贴板）"
+                : "备用方式：在命令行连接器输入 12 位一次性配对码（10 分钟内有效）";
+
+        var sub = UiKit.Body(FormatCodeExpiry(activeCode), 12.5, UiKit.MutedBrush);
         sub.HorizontalAlignment = HorizontalAlignment.Center;
         sub.Margin = new Thickness(0, 8, 0, 20);
         root.Children.Add(sub);
@@ -425,6 +461,7 @@ public static class Dialogs
             if (res is not null)
             {
                 codeDisplay.Text = res.Code;
+                sub.Text = FormatCodeExpiry(res);
                 Clipboard.SetText(res.Code);
             }
         });

@@ -1,6 +1,7 @@
 package com.agentmonitor.live;
 
 import android.content.Context;
+import org.json.JSONObject;
 
 /**
  * Lightweight zero-AppWidget-dependency bridge between {@link TrackingService} and home screen widgets.
@@ -10,6 +11,10 @@ import android.content.Context;
 public final class MonitorWidgetBridge {
     public interface Listener {
         void onWidgetStateChanged(Context context);
+    }
+
+    public interface SnapshotListener {
+        void onSnapshotObserved(Context context, JSONObject snapshot, String expectedToken);
     }
 
     public static final class TrackingSnapshot {
@@ -59,12 +64,27 @@ public final class MonitorWidgetBridge {
     }
 
     private static volatile Listener listener;
+    private static volatile SnapshotListener snapshotListener;
     private static volatile TrackingSnapshot current = TrackingSnapshot.idle();
 
     private MonitorWidgetBridge() { }
 
     public static void setListener(Listener value) {
         listener = value;
+    }
+
+    public static void setSnapshotListener(SnapshotListener value) {
+        snapshotListener = value;
+    }
+
+    public static void notifySnapshot(Context context, JSONObject snapshot, String expectedToken) {
+        SnapshotListener target = snapshotListener;
+        if (target == null || context == null || snapshot == null) return;
+        try {
+            Context app = context.getApplicationContext();
+            target.onSnapshotObserved(app != null ? app : context, snapshot, expectedToken);
+        } catch (RuntimeException ignored) {
+        }
     }
 
     public static TrackingSnapshot current() {

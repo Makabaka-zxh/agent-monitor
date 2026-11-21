@@ -178,23 +178,29 @@ public final class MonitorWidgetPolicy {
     private static final class TaskSummary {
         final int runningCount;
         final int waitingCount;
+        final int errorCount;
         final List<TaskItem> activeItems;
 
-        TaskSummary(int runningCount, int waitingCount, List<TaskItem> activeItems) {
+        TaskSummary(int runningCount, int waitingCount, int errorCount, List<TaskItem> activeItems) {
             this.runningCount = runningCount;
             this.waitingCount = waitingCount;
+            this.errorCount = errorCount;
             this.activeItems = activeItems;
         }
 
         int totalActive() {
-            return runningCount + waitingCount;
+            return runningCount + waitingCount + errorCount;
         }
 
         String shortStatus() {
-            if (runningCount > 0 && waitingCount > 0) return runningCount + " 执行 · " + waitingCount + " 待批";
-            if (runningCount > 0) return runningCount + " 项执行中";
-            if (waitingCount > 0) return waitingCount + " 项待批准";
-            return "当前空闲";
+            List<String> parts = new ArrayList<>();
+            if (waitingCount > 0) parts.add(waitingCount + " 待批");
+            if (errorCount > 0) parts.add(errorCount + " 需关注");
+            if (runningCount > 0) parts.add(runningCount + (parts.isEmpty() ? " 项执行中" : " 执行"));
+            if (parts.isEmpty()) return "当前空闲";
+            if (parts.size() == 1 && waitingCount > 0) return waitingCount + " 项待批准";
+            if (parts.size() == 1 && errorCount > 0) return errorCount + " 项需关注";
+            return join(parts, " · ");
         }
     }
 
@@ -203,6 +209,18 @@ public final class MonitorWidgetPolicy {
             boolean connected,
             JSONObject workbench,
             JSONObject usage,
+            MonitorWidgetBridge.TrackingSnapshot tracking,
+            long nowMillis) {
+        return evaluate(requestedMode, connected, workbench, usage, true, false, tracking, nowMillis);
+    }
+
+    public static Model evaluate(
+            String requestedMode,
+            boolean connected,
+            JSONObject workbench,
+            JSONObject usage,
+            boolean preferStandaloneUsage,
+            boolean refreshing,
             MonitorWidgetBridge.TrackingSnapshot tracking,
             long nowMillis) {
         String mode = sanitizeMode(requestedMode);
@@ -234,42 +252,65 @@ public final class MonitorWidgetPolicy {
         MonitorWidgetBridge.TrackingSnapshot live = tracking == null
                 ? MonitorWidgetBridge.TrackingSnapshot.idle()
                 : tracking;
-        JSONObject effectiveUsage = pickUsage(usage, workbench);
+        JSONObject effectiveUsage = pickUsage(usage, workbench, preferStandaloneUsage);
         List<QuotaCandidate> quotas = collectQuotas(effectiveUsage, nowMillis);
         TokenSummary tokens = summarizeTokens(effectiveUsage, nowMillis);
         TaskSummary tasks = summarizeTasks(workbench);
 
+        Model result;
         if (MODE_AUTO.equals(mode)) {
             if (live.active) {
-                return buildTrackingModel(mode, live, quotas, tokens, tasks, nowMillis, true);
+                result = buildTrackingModel(mode, live, quotas, tokens, tasks, nowMillis, true);
+            } else if (!quotas.isEmpty()) {
+                result = buildQuotaModel(mode, quotas, tokens, tasks, nowMillis, true);
+            } else {
+                result = buildTokensModel(mode, quotas, tokens, tasks, nowMillis, true);
             }
-            if (!quotas.isEmpty()) {
-                return buildQuotaModel(mode, quotas, tokens, tasks, nowMillis, true);
-            }
-            return buildTokensModel(mode, quotas, tokens, tasks, nowMillis, true);
+        } else if (MODE_FIXED_QUOTA.equals(mode)) {
+            result = buildQuotaModel(mode, quotas, tokens, tasks, nowMillis, false);
+        } else if (MODE_FIXED_TOKENS.equals(mode)) {
+            result = buildTokensModel(mode, quotas, tokens, tasks, nowMillis, false);
+        } else if (live.active) {
+            result = buildTrackingModel(mode, live, quotas, tokens, tasks, nowMillis, false);
+        } else {
+            result = buildTasksModel(mode, quotas, tokens, tasks, nowMillis);
         }
 
-        if (MODE_FIXED_QUOTA.equals(mode)) {
-            return buildQuotaModel(mode, quotas, tokens, tasks, nowMillis, false);
-        }
-        if (MODE_FIXED_TOKENS.equals(mode)) {
-            return buildTokensModel(mode, quotas, tokens, tasks, nowMillis, false);
-        }
-        if (live.active) {
-            return buildTrackingModel(mode, live, quotas, tokens, tasks, nowMillis, false);
-        }
-        return buildTasksModel(mode, quotas, tokens, tasks, nowMillis);
+        if (!refreshing) return result;
+        return new Model(
+                result.mode,
+                result.brandTool,
+                result.badgeTone,
+                result.valueWarning,
+                result.primaryCompactTitle,
+                result.smallBadge + " · 同步中",
+                result.wideBadge + " · 正在同步…",
+                result.primaryValue,
+                result.title,
+                result.footer,
+                result.showProgress,
+                result.progress,
+                result.sideLabel,
+                result.sideValue,
+                result.sectionHeading,
+                result.row1,
+                result.row2,
+                result.row3,
+                result.clickTarget,
+                result.clickTaskId,
+                result.clickGeneration);
     }
 
-    private static JSONObject pickUsage(JSONObject usage, JSONObject workbench) {
+    private static JSONObject pickUsage(JSONObject usage, JSONObject workbench, boolean preferStandaloneUsage) {
         JSONObject workbenchUsage = workbench == null ? null : workbench.optJSONObject("usage");
         if (usage == null) return workbenchUsage;
         if (workbenchUsage == null) return usage;
-        // Prefer whichever usage payload carries providers; workbench refreshes more frequently while open,
-        // whereas /api/native/usage includes 90-day history. Merge today_tokens from workbench if newer.
-        JSONArray usageProviders = usage.optJSONArray("providers");
-        if (usageProviders == null || usageProviders.length() == 0) return workbenchUsage;
-        return workbenchUsage.optJSONArray("providers") != null ? workbenchUsage : usage;
+        boolean standaloneHasProviders = usage.optJSONArray("providers") != null && usage.optJSONArray("providers").length() > 0;
+        boolean workbenchHasProviders = workbenchUsage.optJSONArray("providers") != null && workbenchUsage.optJSONArray("providers").length() > 0;
+        if (preferStandaloneUsage) {
+            return standaloneHasProviders ? usage : workbenchUsage;
+        }
+        return workbenchHasProviders ? workbenchUsage : usage;
     }
 
     private static Model buildTrackingModel(
@@ -516,7 +557,9 @@ public final class MonitorWidgetPolicy {
         if (!tasks.activeItems.isEmpty()) {
             TaskItem lead = tasks.activeItems.get(0);
             boolean waiting = "waiting".equals(lead.status);
-            String statusText = waiting ? "等待批准" : "执行中";
+            boolean errored = "error".equals(lead.status);
+            boolean needsAttention = waiting || errored;
+            String statusText = waiting ? "等待批准" : errored ? "需要关注" : "执行中";
             String subtitle = statusText
                     + (lead.computer.isEmpty() ? "" : " · " + lead.computer)
                     + (tasks.totalActive() > 1 ? " · 共 " + tasks.totalActive() + " 项活跃" : "");
@@ -540,8 +583,8 @@ public final class MonitorWidgetPolicy {
             return new Model(
                     mode,
                     lead.tool,
-                    waiting ? TONE_WARNING : "claude".equals(lead.tool) ? TONE_CLAUDE : TONE_RUNNING,
-                    waiting,
+                    needsAttention ? TONE_WARNING : "claude".equals(lead.tool) ? TONE_CLAUDE : TONE_RUNNING,
+                    needsAttention,
                     true,
                     statusText + " · " + toolLabel(lead.tool),
                     "活跃项目 · " + toolLabel(lead.tool),
@@ -719,7 +762,7 @@ public final class MonitorWidgetPolicy {
 
     private static TaskSummary summarizeTasks(JSONObject workbench) {
         List<TaskItem> active = new ArrayList<>();
-        if (workbench == null) return new TaskSummary(0, 0, active);
+        if (workbench == null) return new TaskSummary(0, 0, 0, active);
 
         Map<String, JSONObject> devices = new HashMap<>();
         JSONArray deviceList = workbench.optJSONArray("devices");
@@ -735,6 +778,7 @@ public final class MonitorWidgetPolicy {
         JSONArray taskList = workbench.optJSONArray("tasks");
         int running = 0;
         int waiting = 0;
+        int errored = 0;
         if (taskList != null) {
             for (int i = 0; i < Math.min(taskList.length(), 500); i++) {
                 JSONObject t = taskList.optJSONObject(i);
@@ -743,11 +787,12 @@ public final class MonitorWidgetPolicy {
                 boolean online = dev != null && dev.optBoolean("online");
                 if (!online) continue;
                 String status = t.optString("status");
-                if (!"running".equals(status) && !"waiting".equals(status)) continue;
+                if (!"running".equals(status) && !"waiting".equals(status) && !"error".equals(status)) continue;
                 if ("running".equals(status)) running++;
-                else waiting++;
+                else if ("waiting".equals(status)) waiting++;
+                else errored++;
 
-                if (active.size() < 4) {
+                if (active.size() < 8) {
                     String tool = t.optString("tool");
                     String title = LivePresentation.clean(t.optString("title"), 64);
                     if (title.isEmpty()) title = toolLabel(tool) + " 任务";
@@ -756,13 +801,19 @@ public final class MonitorWidgetPolicy {
                 }
             }
         }
-        // Put waiting approvals first so the user notices blocked tasks immediately.
-        active.sort((a, b) -> Integer.compare("waiting".equals(b.status) ? 1 : 0, "waiting".equals(a.status) ? 1 : 0));
-        return new TaskSummary(running, waiting, active);
+        // Prioritize waiting approvals first, then errors needing attention, then running tasks.
+        active.sort((a, b) -> Integer.compare(statusPriority(b.status), statusPriority(a.status)));
+        return new TaskSummary(running, waiting, errored, active);
+    }
+
+    private static int statusPriority(String status) {
+        if ("waiting".equals(status)) return 2;
+        if ("error".equals(status)) return 1;
+        return 0;
     }
 
     private static String formatTaskRow(TaskItem item) {
-        String state = "waiting".equals(item.status) ? "待批准" : "执行中";
+        String state = "waiting".equals(item.status) ? "待批准" : "error".equals(item.status) ? "需关注" : "执行中";
         return "[" + state + "] " + toolShortLabel(item.tool) + " · " + item.title;
     }
 

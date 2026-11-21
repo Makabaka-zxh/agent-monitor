@@ -178,6 +178,35 @@ def _set_autostart(command_line: str | None) -> None:
                 pass
 
 
+def _process_image_path(pid: int) -> Path | None:
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        size = ctypes.c_ulong(4096)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return Path(buffer.value[: size.value])
+        return None
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _is_managed_collector_process(pid: int, locations: dict[str, Path]) -> bool:
+    image = _process_image_path(pid)
+    if image is None or not image.name.lower().startswith("python"):
+        return False
+    try:
+        resolved_image = image.resolve()
+        resolved_releases = locations["releases"].resolve()
+        return resolved_image.is_relative_to(resolved_releases)
+    except OSError:
+        return False
+
+
 def _terminate_pid(pid: int) -> None:
     PROCESS_TERMINATE = 0x0001
     handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
@@ -192,10 +221,10 @@ def stop(locations: dict[str, Path], *, clear_autostart: bool = True) -> None:
     if clear_autostart:
         _set_autostart(None)
     pid_file = locations["state"] / "collector.pid"
-    if pid_file.is_file():
+    if pid_file.is_file() and collector_locked(locations):
         try:
             pid = int(pid_file.read_text(encoding="utf-8").strip())
-            if pid > 0:
+            if pid > 0 and _is_managed_collector_process(pid, locations):
                 _terminate_pid(pid)
         except (OSError, ValueError):
             pass

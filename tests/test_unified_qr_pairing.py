@@ -204,9 +204,52 @@ def test_collector_code_only_qr_and_validation_guards(hub):
         json={"name": "副机", "platform": "macOS", "include_collector": True, "issue_collector_code": True, "include_reader": False},
     ).json()
     assert browser.post(f"/api/pairing/requests/{started['request_id']}/approve", headers=csrf).status_code == 200
+    extra_verifier, _ = _pkce_pair()
+    assert desktop.post(
+        f"/api/agent/pairing/{started['request_id']}/poll",
+        json={"poll_secret": started["poll_secret"], "code_verifier": extra_verifier},
+    ).status_code == 401
     claimed = desktop.post(
         f"/api/agent/pairing/{started['request_id']}/poll",
         json={"poll_secret": started["poll_secret"]},
     ).json()
     assert "reader_token" not in claimed
     assert len(claimed["collector_code"]) == 12
+
+
+def test_unified_qr_max_readers_rolls_back_without_burning_approval(hub, monkeypatch):
+    import agent_monitor.native_access as na
+
+    app, _, phone, phone_headers, desktop, _ = hub
+    verifier, challenge = _pkce_pair()
+    started = desktop.post(
+        "/api/agent/pairing/start",
+        json={
+            "name": "工作站",
+            "platform": "Windows",
+            "include_collector": True,
+            "issue_collector_code": True,
+            "include_reader": True,
+            "code_challenge": challenge,
+        },
+    ).json()
+    assert phone.post(f"/api/native/computers/pairing/{started['request_id']}/approve", headers=phone_headers).status_code == 200
+
+    # Temporarily cap MAX_READERS to 1 (phone already holds 1 reader)
+    monkeypatch.setattr(na, "MAX_READERS", 1)
+    throttled = desktop.post(
+        f"/api/agent/pairing/{started['request_id']}/poll",
+        json={"poll_secret": started["poll_secret"], "code_verifier": verifier},
+    )
+    assert throttled.status_code == 429
+    row = app.state.store.db.execute("SELECT status FROM qr_pairing WHERE id=?", (started["request_id"],)).fetchone()
+    assert row["status"] == "approved"
+
+    # Raising cap allows the same approved QR session to complete cleanly
+    monkeypatch.setattr(na, "MAX_READERS", 50)
+    claimed = desktop.post(
+        f"/api/agent/pairing/{started['request_id']}/poll",
+        json={"poll_secret": started["poll_secret"], "code_verifier": verifier},
+    )
+    assert claimed.status_code == 200
+    assert claimed.json()["reader_token"].startswith("nrd_")

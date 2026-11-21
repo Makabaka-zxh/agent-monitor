@@ -165,9 +165,17 @@ public sealed class MonitorTask
         }
         if (!string.IsNullOrWhiteSpace(query))
         {
-            var needle = query.Trim();
-            var haystack = $"{Title} {Project} {DeviceName}";
-            if (!haystack.Contains(needle, StringComparison.OrdinalIgnoreCase)) return false;
+            var bounded = query.Length <= 240 ? query : query[..240];
+            var terms = bounded.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (terms.Length > 0)
+            {
+                var haystack = $"{Title} {Project} {DeviceName} {Brand}";
+                for (var i = 0; i < Math.Min(terms.Length, 16); i++)
+                {
+                    if (!haystack.Contains(terms[i], StringComparison.OrdinalIgnoreCase))
+                        return false;
+                }
+            }
         }
         return true;
     }

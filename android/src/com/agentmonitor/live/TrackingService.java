@@ -261,6 +261,7 @@ public final class TrackingService extends Service {
                 if (!cutoff.isEmpty()) { finish(cutoff, true); return; }
                 lastSuccess = now;
                 UsageAlerts.observe(this, value.optJSONObject("usage"), requestToken);
+                MonitorWidgetBridge.notifySnapshot(this, value, requestToken);
                 JSONObject task = NativeApi.task(value, taskId);
                 presentationData = LivePresentation.read(value, task, tool);
                 String reason = TrackingPolicy.terminal(now, started, lastSuccess, stateConfirmationTime(), false, task != null,

@@ -83,6 +83,8 @@ public final class MonitorWidgetUpdater {
                     .putString("account", currentAccount)
                     .remove("workbench")
                     .remove("usage")
+                    .remove("workbench_at")
+                    .remove("usage_at")
                     .remove("updated_at")
                     .apply();
         }
@@ -95,10 +97,12 @@ public final class MonitorWidgetUpdater {
         if (activeToken.isEmpty() || !activeToken.equals(expectedToken)) return;
         String account = sha256(activeToken);
         reconcileAccountCache(app, account);
+        long now = System.currentTimeMillis();
         cachePrefs(app).edit()
                 .putString("account", account)
                 .putString("workbench", workbench.toString())
-                .putLong("updated_at", System.currentTimeMillis())
+                .putLong("workbench_at", now)
+                .putLong("updated_at", now)
                 .apply();
         refreshAll(app);
     }
@@ -110,10 +114,12 @@ public final class MonitorWidgetUpdater {
         if (activeToken.isEmpty() || !activeToken.equals(expectedToken)) return;
         String account = sha256(activeToken);
         reconcileAccountCache(app, account);
+        long now = System.currentTimeMillis();
         cachePrefs(app).edit()
                 .putString("account", account)
                 .putString("usage", usage.toString())
-                .putLong("updated_at", System.currentTimeMillis())
+                .putLong("usage_at", now)
+                .putLong("updated_at", now)
                 .apply();
         refreshAll(app);
     }
@@ -143,11 +149,16 @@ public final class MonitorWidgetUpdater {
         SharedPreferences cache = cachePrefs(app);
         JSONObject workbench = parseJson(cache.getString("workbench", null));
         JSONObject usage = parseJson(cache.getString("usage", null));
+        long workbenchAt = cache.getLong("workbench_at", 0L);
+        long usageAt = cache.getLong("usage_at", 0L);
+        boolean preferStandaloneUsage = usageAt > 0L && usageAt >= workbenchAt;
         return MonitorWidgetPolicy.evaluate(
                 mode,
                 connected,
                 workbench,
                 usage,
+                preferStandaloneUsage,
+                false,
                 MonitorWidgetBridge.current(),
                 System.currentTimeMillis());
     }
@@ -179,27 +190,31 @@ public final class MonitorWidgetUpdater {
         SharedPreferences cache = cachePrefs(app);
         JSONObject workbench = connected ? parseJson(cache.getString("workbench", null)) : null;
         JSONObject usage = connected ? parseJson(cache.getString("usage", null)) : null;
+        long workbenchAt = cache.getLong("workbench_at", 0L);
+        long usageAt = cache.getLong("usage_at", 0L);
+        boolean preferStandaloneUsage = usageAt > 0L && usageAt >= workbenchAt;
+        boolean refreshing = REFRESH_IN_FLIGHT.get();
         MonitorWidgetBridge.TrackingSnapshot tracking = MonitorWidgetBridge.current();
         long now = System.currentTimeMillis();
 
         if (smallIds != null) {
             for (int id : smallIds) {
                 MonitorWidgetPolicy.Model model = MonitorWidgetPolicy.evaluate(
-                        getWidgetMode(app, id), connected, workbench, usage, tracking, now);
+                        getWidgetMode(app, id), connected, workbench, usage, preferStandaloneUsage, refreshing, tracking, now);
                 manager.updateAppWidget(id, buildSmallViews(app, id, model));
             }
         }
         if (mediumIds != null) {
             for (int id : mediumIds) {
                 MonitorWidgetPolicy.Model model = MonitorWidgetPolicy.evaluate(
-                        getWidgetMode(app, id), connected, workbench, usage, tracking, now);
+                        getWidgetMode(app, id), connected, workbench, usage, preferStandaloneUsage, refreshing, tracking, now);
                 manager.updateAppWidget(id, buildMediumViews(app, id, model));
             }
         }
         if (largeIds != null) {
             for (int id : largeIds) {
                 MonitorWidgetPolicy.Model model = MonitorWidgetPolicy.evaluate(
-                        getWidgetMode(app, id), connected, workbench, usage, tracking, now);
+                        getWidgetMode(app, id), connected, workbench, usage, preferStandaloneUsage, refreshing, tracking, now);
                 manager.updateAppWidget(id, buildLargeViews(app, id, model));
             }
         }
@@ -214,11 +229,10 @@ public final class MonitorWidgetUpdater {
             return;
         }
         final Context app = context.getApplicationContext();
-        // Paint cached state immediately so widgets never appear blank while network reads run.
-        refreshAll(app);
 
         final String token = connectedToken(app);
         if (token.isEmpty() || !ServerSettings.configured(app) || !hasAnyInstances(app)) {
+            refreshAll(app);
             if (pendingResult != null) pendingResult.finish();
             return;
         }
@@ -226,25 +240,42 @@ public final class MonitorWidgetUpdater {
         long lastUpdated = cachePrefs(app).getLong("updated_at", 0L);
         long age = System.currentTimeMillis() - lastUpdated;
         if (!manualTrigger && lastUpdated > 0L && age >= 0L && age < NETWORK_MIN_INTERVAL_MS) {
+            refreshAll(app);
             if (pendingResult != null) pendingResult.finish();
             return;
         }
 
         if (!REFRESH_IN_FLIGHT.compareAndSet(false, true)) {
+            refreshAll(app);
             if (pendingResult != null) pendingResult.finish();
             return;
         }
+
+        // Paint cached state (and manual "syncing" badge when tapped) immediately.
+        refreshAll(app);
 
         REFRESH_EXECUTOR.execute(() -> {
             try {
                 ServerSettings.initialize(app);
                 JSONObject workbench = NativeApi.call("GET", "/api/native/workbench", null, token);
+                REFRESH_IN_FLIGHT.set(false);
                 if (workbench != null && token.equals(connectedToken(app))) {
                     cacheWorkbench(app, workbench, token);
+                } else {
+                    refreshAll(app);
                 }
-            } catch (NativeApi.Failure ignored) {
-                // Keep showing last verified cache on transient network errors.
+            } catch (NativeApi.Failure failure) {
+                REFRESH_IN_FLIGHT.set(false);
+                if (failure.status == 401 || failure.status == 403) {
+                    // Immediately purge revoked session credentials and private widget cache.
+                    SessionStore.clearIfToken(app, token);
+                    reconcileAccountCache(app, "");
+                    UsageAlerts.sync(app);
+                }
+                refreshAll(app);
             } catch (RuntimeException ignored) {
+                REFRESH_IN_FLIGHT.set(false);
+                refreshAll(app);
             } finally {
                 REFRESH_IN_FLIGHT.set(false);
                 if (pendingResult != null) {

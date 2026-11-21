@@ -66,3 +66,28 @@ def test_windows_mode_read_write_and_status_json(tmp_path, capsys):
         assert out["server_scope_version"] == 1
         assert out["mode"] == "results"
         assert set(out["supported_modes"]) == {"status-only", "results", "full"}
+
+
+def test_windows_stop_never_terminates_unmanaged_recycled_pid(tmp_path, monkeypatch):
+    import os
+
+    service = _load("collector_service")
+    locs = service.paths(tmp_path)
+    for key in ("base", "state", "logs", "releases", "bin", "hooks"):
+        locs[key].mkdir(parents=True, exist_ok=True)
+    pid_file = locs["state"] / "collector.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    terminated: list[int] = []
+    monkeypatch.setattr(service, "_terminate_pid", lambda pid: terminated.append(pid))
+    # Even if lock appears held transiently, current test Python is outside locs["releases"]
+    calls = {"count": 0}
+
+    def fake_locked(_locations):
+        calls["count"] += 1
+        return calls["count"] == 1
+
+    monkeypatch.setattr(service, "collector_locked", fake_locked)
+    service.stop(locs, clear_autostart=False)
+    assert terminated == []
+    assert not pid_file.exists()

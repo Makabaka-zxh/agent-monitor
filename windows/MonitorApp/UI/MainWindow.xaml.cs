@@ -20,6 +20,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private readonly DispatcherTimer _secondTicker;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
+    private System.Drawing.Icon? _trayIconSource;
     private bool _allowExit;
 
     private NavPage _page = NavPage.Tasks;
@@ -45,16 +46,20 @@ public partial class MainWindow : Window
     private NavPage? _mountedPage;
     private StackPanel? _sidebarNavHost;
     private TextBlock? _sidebarOnlineText;
+    private TextBox? _taskSearchBox;
     private TextBlock? _searchMatchSummary;
     private StackPanel? _taskFilterHost;
     private StackPanel? _taskListHost;
     private ContentControl? _taskDetailRightHost;
     private string? _mountedDetailTaskId;
+    private string _mountedTaskCardsSignature = "";
     private StackPanel? _taskDetailCardsHost;
     private TextBlock? _replyModelSummaryText;
     private TextBlock? _replyStatusText;
     private TextBox? _replyInputBox;
+    private Button? _replySendBtn;
     private ContentControl? _pageBodyHost;
+    private readonly Dictionary<string, Dictionary<string, (HashSet<string> Choices, string FreeText)>> _attentionDrafts = new();
 
     public MainWindow()
     {
@@ -69,7 +74,9 @@ public partial class MainWindow : Window
         SetupSystemTray();
 
         _controller.StateChanged += OnControllerStateChanged;
+        _controller.LoginCompleted += () => Dispatcher.Invoke(RestoreMainWindow);
         _controller.QuotaAlertTriggered += OnQuotaAlertTriggered;
+        SystemEvents.UserPreferenceChanged += OnSystemPreferenceChanged;
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _timer.Tick += async (_, _) => await OnHeartbeatTickAsync();
@@ -83,8 +90,17 @@ public partial class MainWindow : Window
         };
         _secondTicker.Start();
 
-        SourceInitialized += (_, _) => DwmInterop.ApplyWindowStyling(this, UiKit.IsDark);
-        StateChanged += (_, _) => RebuildTitleBar();
+        SourceInitialized += (_, _) =>
+        {
+            ApplyMaximizedFramePadding();
+            DwmInterop.ApplyWindowStyling(this, UiKit.IsDark);
+        };
+        StateChanged += (_, _) =>
+        {
+            ApplyMaximizedFramePadding();
+            RebuildTitleBar();
+        };
+        PreviewKeyDown += OnWindowPreviewKeyDown;
 
         Loaded += async (_, _) =>
         {
@@ -115,6 +131,53 @@ public partial class MainWindow : Window
         UiKit.ApplyTheme(dark);
         Background = UiKit.BgBrush;
         if (applyDwm) DwmInterop.ApplyWindowStyling(this, dark);
+    }
+
+    private void OnSystemPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category is not (UserPreferenceCategory.General or UserPreferenceCategory.Color or UserPreferenceCategory.VisualStyle))
+            return;
+        Dispatcher.InvokeAsync(() =>
+        {
+            if (_controller.ReadUiSettings().ThemeMode != "system") return;
+            var prev = UiKit.IsDark;
+            SyncTheme(applyDwm: true);
+            if (prev != UiKit.IsDark)
+                RenderAll(forceShell: true);
+        });
+    }
+
+    private void ApplyMaximizedFramePadding()
+    {
+        if (WindowState == WindowState.Maximized)
+        {
+            var frame = SystemParameters.WindowResizeBorderThickness;
+            OuterFrame.Padding = new Thickness(frame.Left + 4, frame.Top + 4, frame.Right + 4, frame.Bottom + 4);
+        }
+        else
+        {
+            OuterFrame.Padding = new Thickness(0);
+        }
+    }
+
+    private async void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!_controller.Connected) return;
+        var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+        if (ctrl && e.Key == Key.F && !_compactMode && _page == NavPage.Tasks && _taskSearchBox is not null)
+        {
+            e.Handled = true;
+            _taskSearchBox.Focus();
+            _taskSearchBox.SelectAll();
+            return;
+        }
+        if (e.Key == Key.F5 || (ctrl && e.Key == Key.R))
+        {
+            e.Handled = true;
+            await _controller.RefreshWorkbenchAsync();
+            if (_page == NavPage.Usage || _compactMode) await _controller.RefreshUsageAsync();
+            if (_page == NavPage.Account) await _controller.RefreshAccountAsync();
+        }
     }
 
     // ==================== WINDOWS 11 FLUENT TITLEBAR ====================
@@ -270,15 +333,19 @@ public partial class MainWindow : Window
                 Close();
             }));
 
-            System.Drawing.Icon? trayIco = null;
             var streamInfo = Application.GetResourceStream(new Uri("pack://application:,,,/Resources/AppIcon.ico"));
             if (streamInfo?.Stream is { } s)
-                trayIco = new System.Drawing.Icon(s);
+            {
+                using (s)
+                {
+                    _trayIconSource = new System.Drawing.Icon(s);
+                }
+            }
 
             _trayIcon = new System.Windows.Forms.NotifyIcon
             {
                 Text = "Monitor · AI 工作台",
-                Icon = trayIco ?? System.Drawing.SystemIcons.Application,
+                Icon = _trayIconSource ?? System.Drawing.SystemIcons.Application,
                 ContextMenuStrip = menu,
                 Visible = true
             };
@@ -315,6 +382,7 @@ public partial class MainWindow : Window
             Hide();
             return;
         }
+        SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged;
         _timer.Stop();
         _secondTicker.Stop();
         _taskDetail?.Dispose();
@@ -323,6 +391,7 @@ public partial class MainWindow : Window
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
         }
+        _trayIconSource?.Dispose();
         _controller.Dispose();
         base.OnClosing(e);
     }
@@ -838,12 +907,24 @@ public partial class MainWindow : Window
         headerRow.Children.Add(_searchMatchSummary);
         topControls.Children.Add(headerRow);
 
-        // Family Search Bar with icon + clear button
+        // Family Search Bar with icon + placeholder + clear button
         var searchDock = new DockPanel();
         var searchIcon = new MonitorIcon("search", UiKit.MutedBrush, 16) { Margin = new Thickness(10, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
         DockPanel.SetDock(searchIcon, Dock.Left);
         searchDock.Children.Add(searchIcon);
 
+        var searchInputLayer = new Grid();
+        var searchPlaceholder = new TextBlock
+        {
+            Text = "搜索任务、项目或电脑（空格分隔多词）",
+            FontFamily = UiKit.AppFont,
+            FontSize = 13,
+            Foreground = UiKit.MutedBrush,
+            Padding = new Thickness(4, 8, 6, 8),
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
+            Visibility = string.IsNullOrEmpty(_controller.SearchQuery) ? Visibility.Visible : Visibility.Collapsed
+        };
         var searchBox = new TextBox
         {
             Text = _controller.SearchQuery,
@@ -856,20 +937,17 @@ public partial class MainWindow : Window
             Padding = new Thickness(2, 8, 6, 8),
             VerticalContentAlignment = VerticalAlignment.Center
         };
+        _taskSearchBox = searchBox;
+        searchInputLayer.Children.Add(searchPlaceholder);
+        searchInputLayer.Children.Add(searchBox);
+
         var clearBtn = UiKit.IconButton("close", "清除搜索", () => searchBox.Text = "");
         clearBtn.Width = 28;
         clearBtn.Height = 28;
         clearBtn.Visibility = string.IsNullOrEmpty(searchBox.Text) ? Visibility.Collapsed : Visibility.Visible;
         DockPanel.SetDock(clearBtn, Dock.Right);
         searchDock.Children.Add(clearBtn);
-        searchDock.Children.Add(searchBox);
-
-        searchBox.TextChanged += (_, _) =>
-        {
-            _controller.SearchQuery = searchBox.Text;
-            clearBtn.Visibility = string.IsNullOrEmpty(searchBox.Text) ? Visibility.Collapsed : Visibility.Visible;
-            UpdateTasksPageInPlace();
-        };
+        searchDock.Children.Add(searchInputLayer);
 
         var searchContainer = new Border
         {
@@ -880,6 +958,25 @@ public partial class MainWindow : Window
             Padding = new Thickness(2, 1, 6, 1),
             Margin = new Thickness(0, 0, 0, 12),
             Child = searchDock
+        };
+
+        searchBox.GotKeyboardFocus += (_, _) => searchContainer.BorderBrush = UiKit.AccentBrush;
+        searchBox.LostKeyboardFocus += (_, _) => searchContainer.BorderBrush = UiKit.LineBrush;
+        searchBox.KeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape && !string.IsNullOrEmpty(searchBox.Text))
+            {
+                e.Handled = true;
+                searchBox.Text = "";
+            }
+        };
+        searchBox.TextChanged += (_, _) =>
+        {
+            _controller.SearchQuery = searchBox.Text;
+            var empty = string.IsNullOrEmpty(searchBox.Text);
+            searchPlaceholder.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+            clearBtn.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+            UpdateTasksPageInPlace();
         };
         topControls.Children.Add(searchContainer);
 
@@ -1074,6 +1171,8 @@ public partial class MainWindow : Window
             _taskDetail?.Dispose();
             _taskDetail = null;
             _mountedDetailTaskId = null;
+            _mountedTaskCardsSignature = "";
+            _replySendBtn = null;
             if (_taskDetailRightHost is not null)
             {
                 var emptyRight = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -1095,6 +1194,8 @@ public partial class MainWindow : Window
             _taskDetail = new TaskDetailController(selectedTask, _controller);
             _taskDetail.Changed += () => Dispatcher.Invoke(RefreshMountedTaskDetail);
             _mountedDetailTaskId = selectedTask.Id;
+            _mountedTaskCardsSignature = "";
+            _replySendBtn = null;
             if (_taskDetailRightHost is not null)
                 _taskDetailRightHost.Content = BuildTaskDetailPane(selectedTask, _taskDetail);
             _taskDetail.StartPolling();
@@ -1139,7 +1240,11 @@ public partial class MainWindow : Window
             _replyInputBox = UiKit.StyledTextBox(detail.DraftText, "告诉它下一步做什么（Ctrl + Enter 快捷发送）…", multiline: true);
             _replyInputBox.MinHeight = 96;
             _replyInputBox.MaxHeight = 190;
-            _replyInputBox.TextChanged += (_, _) => detail.DraftText = _replyInputBox.Text;
+            _replyInputBox.TextChanged += (_, _) =>
+            {
+                detail.DraftText = _replyInputBox.Text;
+                UpdateReplyComposerControls(detail);
+            };
             _replyInputBox.KeyDown += async (_, e) =>
             {
                 if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
@@ -1163,6 +1268,7 @@ public partial class MainWindow : Window
                 if (string.IsNullOrEmpty(detail.DraftText) && _replyInputBox is not null)
                     _replyInputBox.Text = "";
             });
+            _replySendBtn = sendBtn;
             DockPanel.SetDock(sendBtn, Dock.Right);
             sendBtn.HorizontalAlignment = HorizontalAlignment.Right;
             footer.Children.Add(sendBtn);
@@ -1178,11 +1284,76 @@ public partial class MainWindow : Window
         return scroll;
     }
 
+    private void UpdateReplyComposerControls(TaskDetailController detail)
+    {
+        if (_replyModelSummaryText is not null)
+            _replyModelSummaryText.Text = detail.ModelSettingsSummary;
+        if (_replyStatusText is not null)
+            _replyStatusText.Text = detail.ReplyMessage;
+        if (_replySendBtn is not null)
+        {
+            var mayRetry = detail.PendingReply?.MayRetry == true;
+            var label = detail.ReplySending ? "正在发送…" : mayRetry ? "重试原消息" : "发送回复";
+            var hasDraft = !string.IsNullOrWhiteSpace(_replyInputBox?.Text ?? detail.DraftText);
+            var enabled = !detail.ReplySending && (mayRetry || (detail.ReplyAvailable && hasDraft));
+            UiKit.SetButtonState(_replySendBtn, label, enabled, primary: true);
+        }
+    }
+
+    private string ComputeTaskDetailSignature(MonitorTask task, TaskDetailController detail)
+    {
+        var sb = new System.Text.StringBuilder(256);
+        sb.Append(UiKit.IsDark ? 'D' : 'L').Append('|')
+          .Append(_controller.IsFresh ? '1' : '0').Append('|')
+          .Append(_controller.Mutating ? '1' : '0').Append('|')
+          .Append(_controller.SyncOutput ? '1' : '0').Append('|')
+          .Append(task.Id).Append('|')
+          .Append(task.Title).Append('|')
+          .Append(task.Status).Append('|')
+          .Append(task.Archived ? '1' : '0').Append('|')
+          .Append(task.Stale == true ? '1' : '0').Append('|')
+          .Append(UsageFormatting.RelativeTime(task.UpdatedAt)).Append('|')
+          .Append(task.DeviceName).Append('|')
+          .Append(task.Project).Append('|')
+          .Append(task.Preview).Append('|')
+          .Append(task.ErrorAnalysis?.Summary).Append('|')
+          .Append(task.ErrorAnalysis?.Suggestion).Append('|')
+          .Append(task.Usage?.TotalTokens).Append('|')
+          .Append(task.Usage?.Coverage).Append('|')
+          .Append(detail.ResultLoading ? '1' : '0').Append('|')
+          .Append(detail.Downloading ? '1' : '0').Append('|')
+          .Append(detail.ResultError).Append('|')
+          .Append(detail.Result?.Available == true ? '1' : '0').Append('|')
+          .Append(detail.Result?.ResultId).Append('|')
+          .Append(detail.Result?.Reason).Append('|')
+          .Append(detail.DecisionSending ? '1' : '0').Append('|')
+          .Append(detail.ControlsFeedback).Append('|');
+
+        if (detail.Result?.Files is { Count: > 0 } files)
+        {
+            foreach (var f in files)
+                sb.Append(f.Id).Append(':').Append(f.Ready == false ? '0' : '1').Append(';');
+        }
+        if (detail.Controls?.Pending is { Count: > 0 } pendings)
+        {
+            foreach (var p in pendings.Where(x => x.State is "pending" or "submitted"))
+                sb.Append(SessionControlPolicy.AttentionFingerprint(p)).Append(':').Append(p.State).Append(';');
+        }
+        return sb.ToString();
+    }
+
     private void RefreshMountedTaskDetail()
     {
         if (_taskDetailCardsHost is null || _taskDetail is null || _selectedTaskId is null) return;
         var liveTask = _controller.Tasks.FirstOrDefault(t => t.Id == _selectedTaskId);
         if (liveTask is null) return;
+
+        UpdateReplyComposerControls(_taskDetail);
+
+        var nextSignature = ComputeTaskDetailSignature(liveTask, _taskDetail);
+        if (nextSignature == _mountedTaskCardsSignature && _taskDetailCardsHost.Children.Count > 0)
+            return;
+        _mountedTaskCardsSignature = nextSignature;
 
         _taskDetailCardsHost.Children.Clear();
 
@@ -1433,9 +1604,23 @@ public partial class MainWindow : Window
 
         if (req.Kind == "question" && req.Questions is { Count: > 0 } questions)
         {
+            var fingerprint = SessionControlPolicy.AttentionFingerprint(req);
+            if (!_attentionDrafts.TryGetValue(fingerprint, out var draftMap))
+            {
+                draftMap = new Dictionary<string, (HashSet<string> Choices, string FreeText)>(StringComparer.Ordinal);
+                _attentionDrafts[fingerprint] = draftMap;
+            }
+
             var answerEditors = new List<(string QId, List<ToggleButton> Toggles, TextBox? FreeText)>();
             foreach (var q in questions)
             {
+                if (!draftMap.TryGetValue(q.Id, out var qDraft))
+                {
+                    qDraft = (new HashSet<string>(StringComparer.Ordinal), "");
+                    draftMap[q.Id] = qDraft;
+                }
+                var capturedQId = q.Id;
+
                 var qTitle = UiKit.Body(q.Text, 13.5);
                 qTitle.FontWeight = FontWeights.Medium;
                 qTitle.Margin = new Thickness(0, 12, 0, 6);
@@ -1448,9 +1633,17 @@ public partial class MainWindow : Window
                     foreach (var opt in q.Options)
                     {
                         var labelText = string.IsNullOrWhiteSpace(opt.Description) ? opt.Label : $"{opt.Label} — {opt.Description}";
+                        var isSavedChecked = qDraft.Choices.Contains(opt.Id);
                         ToggleButton tb = q.Multiple == true
-                            ? new CheckBox { Content = labelText, Tag = opt.Id, Foreground = UiKit.TextBrush, Margin = new Thickness(0, 3, 0, 4), FontSize = 13 }
-                            : new RadioButton { Content = labelText, GroupName = groupName, Tag = opt.Id, Foreground = UiKit.TextBrush, Margin = new Thickness(0, 3, 0, 4), FontSize = 13 };
+                            ? new CheckBox { Content = labelText, Tag = opt.Id, IsChecked = isSavedChecked, Foreground = UiKit.TextBrush, Margin = new Thickness(0, 3, 0, 4), FontSize = 13 }
+                            : new RadioButton { Content = labelText, GroupName = groupName, Tag = opt.Id, IsChecked = isSavedChecked, Foreground = UiKit.TextBrush, Margin = new Thickness(0, 3, 0, 4), FontSize = 13 };
+                        tb.Checked += (_, _) =>
+                        {
+                            var entry = draftMap[capturedQId];
+                            if (q.Multiple != true) entry.Choices.Clear();
+                            entry.Choices.Add((string)tb.Tag);
+                        };
+                        tb.Unchecked += (_, _) => draftMap[capturedQId].Choices.Remove((string)tb.Tag);
                         toggles.Add(tb);
                         stack.Children.Add(tb);
                     }
@@ -1458,8 +1651,14 @@ public partial class MainWindow : Window
                 TextBox? freeBox = null;
                 if (q.AllowsText == true || toggles.Count == 0)
                 {
-                    freeBox = UiKit.StyledTextBox("", "补充说明…");
+                    freeBox = UiKit.StyledTextBox(qDraft.FreeText, "补充说明…");
                     freeBox.Margin = new Thickness(0, 4, 0, 4);
+                    var capturedBox = freeBox;
+                    freeBox.TextChanged += (_, _) =>
+                    {
+                        var cur = draftMap[capturedQId];
+                        draftMap[capturedQId] = (cur.Choices, capturedBox.Text);
+                    };
                     stack.Children.Add(freeBox);
                 }
                 answerEditors.Add((q.Id, toggles, freeBox));
@@ -1867,11 +2066,11 @@ public partial class MainWindow : Window
         {
             if (sources.Count > 1)
             {
-                var picker = new ComboBox { FontFamily = UiKit.AppFont, FontSize = 12.5, Padding = new Thickness(8, 5, 8, 5), Margin = new Thickness(0, 0, 0, 12) };
+                var picker = UiKit.StyledComboBox();
+                picker.Margin = new Thickness(0, 0, 0, 12);
                 foreach (var s in sources)
                 {
-                    var item = new ComboBoxItem { Content = $"来源 · {s.Name}", Tag = s.Id };
-                    picker.Items.Add(item);
+                    var item = UiKit.AddComboItem(picker, $"来源 · {s.Name}", s.Id);
                     if (s.Id == activeSource.Id) picker.SelectedItem = item;
                 }
                 var capturedTool = tool;

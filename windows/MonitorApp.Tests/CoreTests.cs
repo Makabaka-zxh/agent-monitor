@@ -152,4 +152,32 @@ public class CoreTests
         Assert.Equal("#FFAFC8DF", UiKit.AccentBrush.Color.ToString());
         UiKit.ApplyTheme(false);
     }
+
+    [Fact]
+    public void TaskMatches_SupportsMultiKeywordSearchAcrossTitleProjectDeviceAndBrand()
+    {
+        var task = new MonitorTask
+        {
+            Id = "codex:1",
+            Title = "重构双端扫码配对协议",
+            Tool = "codex",
+            Status = "running",
+            DeviceName = "主力工作站",
+            Project = @"C:\Projects\agent-monitor"
+        };
+
+        Assert.True(task.Matches(ToolFilter.All, TaskScope.Active, fresh: true, query: "扫码 工作站"));
+        Assert.True(task.Matches(ToolFilter.All, TaskScope.Active, fresh: true, query: "codex agent-monitor"));
+        Assert.False(task.Matches(ToolFilter.All, TaskScope.Active, fresh: true, query: "扫码 不存在的词"));
+    }
+
+    [Fact]
+    public void SafeFileName_NeutralizesWindowsReservedDeviceNamesAndPathSeparators()
+    {
+        Assert.Equal("_CON.txt", MonitorSecurity.SafeFileName("CON.txt"));
+        Assert.Equal("_NUL", MonitorSecurity.SafeFileName("NUL"));
+        Assert.Equal("_LPT1.log", MonitorSecurity.SafeFileName("LPT1.log"));
+        Assert.Equal("report_2026_final_.md", MonitorSecurity.SafeFileName("report/2026:final?.md"));
+        Assert.Equal("附件", MonitorSecurity.SafeFileName("...   "));
+    }
 }
