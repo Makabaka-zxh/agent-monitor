@@ -1,0 +1,12 @@
+<resources>
+  <color name="widget_card_bg">#212A34</color>
+  <color name="widget_card_stroke">#354453</color>
+  <color name="widget_soft_bg">#2D3A48</color>
+  <color name="widget_text">#F2F5F8</color>
+  <color name="widget_muted">#A9B5C2</color>
+  <color name="widget_accent">#AFC8DF</color>
+  <color name="widget_claude">#CDA991</color>
+  <color name="widget_warning">#E1BE88</color>
+  <color name="widget_running">#6CCB98</color>
+  <color name="widget_divider">#2F3D4B</color>
+</resources>

@@ -24,5 +24,7 @@
     <Resource Include="Resources\Claude.png" />
     <Resource Include="Resources\Codex.png" />
     <Resource Include="Resources\Antigravity.png" />
+    <Resource Include="Resources\MiSans-Regular.ttf" />
+    <Content Include="Resources\MiSans-License.pdf" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

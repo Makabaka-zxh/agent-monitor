@@ -3,6 +3,59 @@ using System.Text;
 
 namespace MonitorApp.Core;
 
+public sealed record UsageSourceGroup(string Id, string Name, List<UsageQuotaDto> Quotas);
+
+public static class UsageCalendar
+{
+    private static readonly TimeSpan BeijingOffset = TimeSpan.FromHours(8);
+
+    public static DateOnly TodayBeijing(DateTimeOffset? now = null)
+    {
+        var bj = (now ?? DateTimeOffset.UtcNow).ToOffset(BeijingOffset);
+        return DateOnly.FromDateTime(bj.DateTime);
+    }
+
+    public static DateOnly? ParseDay(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.Length != 10) return null;
+        return DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : null;
+    }
+
+    public static string FormatDay(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    public static string ShortDay(DateOnly d) => $"{d.Month}.{d.Day}";
+
+    public static DateOnly MondayOf(DateOnly d)
+    {
+        var diff = ((int)d.DayOfWeek + 6) % 7;
+        return d.AddDays(-diff);
+    }
+
+    public static DateOnly ClampWeek(DateOnly? selectedWeek, DateOnly firstDay, DateOnly today)
+    {
+        var minMonday = MondayOf(firstDay);
+        var maxMonday = MondayOf(today);
+        var candidate = MondayOf(selectedWeek ?? today);
+        if (candidate < minMonday) return minMonday;
+        if (candidate > maxMonday) return maxMonday;
+        return candidate;
+    }
+
+    public static DateOnly ClampDayInWeek(DateOnly? selectedDay, DateOnly weekMonday, DateOnly firstDay, DateOnly today)
+    {
+        var lower = weekMonday > firstDay ? weekMonday : firstDay;
+        var sunday = weekMonday.AddDays(6);
+        var upper = sunday < today ? sunday : today;
+        if (selectedDay is { } s && s >= lower && s <= upper) return s;
+        return upper;
+    }
+
+    public static string WeekRangeLabel(DateOnly weekMonday, DateOnly today)
+    {
+        var prefix = weekMonday == MondayOf(today) ? "本周 · " : "";
+        return $"{prefix}{ShortDay(weekMonday)} – {ShortDay(weekMonday.AddDays(6))}";
+    }
+}
+
 public static class UsageFormatting
 {
     public const string OtherModelLabel = "其他模型";
@@ -11,18 +64,30 @@ public static class UsageFormatting
     {
         if (value is null or < 0) return "—";
         var n = value.Value;
-        if (n >= 1_000_000_000) return $"{n / 1_000_000_000.0:0.##}B";
-        if (n >= 1_000_000) return $"{n / 1_000_000.0:0.##}M";
-        if (n >= 1_000) return $"{n / 1_000.0:0.#}K";
-        return n.ToString("N0", CultureInfo.InvariantCulture);
+        if (n < 10_000) return ExactTokens(n);
+        if (n < 100_000_000)
+        {
+            var whole = n / 10_000;
+            var tenth = (n % 10_000) / 1_000;
+            return tenth == 0 ? $"{whole} 万" : $"{whole}.{tenth} 万";
+        }
+        else
+        {
+            var whole = n / 100_000_000;
+            var tenth = (n % 100_000_000) / 10_000_000;
+            return tenth == 0 ? $"{whole} 亿" : $"{whole}.{tenth} 亿";
+        }
     }
 
     public static string ExactTokens(long? value) =>
+        value is null or < 0 ? "—" : value.Value.ToString("N0", CultureInfo.InvariantCulture);
+
+    public static string ExactOrMissing(long? value) =>
         value is null or < 0 ? "未提供" : value.Value.ToString("N0", CultureInfo.InvariantCulture);
 
     public static string Percentage(double? value)
     {
-        if (value is null || double.IsNaN(value.Value) || double.IsInfinity(value.Value)) return "—";
+        if (value is null || double.IsNaN(value.Value) || double.IsInfinity(value.Value)) return "未提供";
         var clamped = Math.Clamp(value.Value, 0.0, 100.0);
         var rounded = Math.Round(clamped, 1);
         return Math.Abs(rounded - Math.Round(rounded)) < 0.05
@@ -30,19 +95,29 @@ public static class UsageFormatting
             : $"{rounded:0.0}%";
     }
 
+    public static string RelativeTime(string? isoText, DateTimeOffset? now = null)
+    {
+        if (MonitorDate.Parse(isoText) is not { } stamp) return "尚无记录";
+        var current = now ?? DateTimeOffset.UtcNow;
+        var age = current - stamp;
+        if (age < TimeSpan.FromMinutes(1)) return "刚刚";
+        if (age < TimeSpan.FromHours(1)) return $"{Math.Max(1, (int)age.TotalMinutes)} 分钟前";
+        if (age < TimeSpan.FromHours(24)) return $"{Math.Max(1, (int)age.TotalHours)} 小时前";
+        var local = stamp.ToLocalTime();
+        return $"{local.Month}/{local.Day} {local:HH:mm}";
+    }
+
     public static string WindowTitle(long? minutes, string? fallback)
     {
         if (minutes is > 0)
         {
             var m = minutes.Value;
-            if (m == 300) return "5 小时额度";
-            if (m == 10080) return "每周额度";
-            if (m == 1440) return "每日额度";
-            if (m % 1440 == 0) return $"{m / 1440} 天额度";
+            if (m % 10080 == 0) return m == 10080 ? "每周额度" : $"{m / 10080} 周额度";
+            if (m % 1440 == 0) return m == 1440 ? "每日额度" : $"{m / 1440} 天额度";
             if (m % 60 == 0) return $"{m / 60} 小时额度";
             return $"{m} 分钟额度";
         }
-        return string.IsNullOrWhiteSpace(fallback) ? "官方额度" : fallback!.Trim();
+        return string.IsNullOrWhiteSpace(fallback) ? "套餐额度" : fallback!.Trim();
     }
 
     public static string QuotaDisplayTitle(UsageQuotaDto quota)
@@ -55,25 +130,52 @@ public static class UsageFormatting
         return $"{clean} · {window}";
     }
 
-    public static string ResetText(UsageQuotaDto quota, DateTimeOffset now)
+    public static string ResetText(UsageQuotaDto quota, DateTimeOffset now, bool stale = false)
     {
-        if (quota.ResetDate is not { } reset) return "重置时间待定";
-        var diff = reset - now;
-        if (diff <= TimeSpan.Zero) return "即将刷新";
-        if (diff.TotalDays >= 1.0)
+        if (quota.IsExpired(now)) return "已到重置时间，等待新额度";
+        if (quota.ResetDate is not { } reset) return (stale || quota.Stale) ? "额度信息待更新" : "未提供重置时间";
+        var minutes = Math.Max(1, (int)Math.Ceiling((reset - now).TotalMinutes));
+        var duration = minutes >= 1440
+            ? $"{minutes / 1440} 天 {(minutes % 1440) / 60} 小时"
+            : minutes >= 60
+            ? $"{minutes / 60} 小时 {minutes % 60} 分钟"
+            : $"{minutes} 分钟";
+        var isOld = stale || quota.Stale;
+        return (isOld ? "预计 " : "") + duration + "后重置" + (isOld ? " · 待更新" : "");
+    }
+
+    public static string QuotaCheckText(string? state) => state switch
+    {
+        "waiting" => "等待后台读取",
+        "updated" => "最近一次读取成功",
+        "no_live_data" => "服务方暂未返回新额度",
+        "sign_in_required" or "unauthenticated" => "需要在来源电脑登录对应账号",
+        "update_required" => "来源电脑的额度读取组件需要更新",
+        _ => "暂时无法读取新额度"
+    };
+
+    public static List<UsageSourceGroup> VisibleSources(UsageProviderDto? provider, DateTimeOffset now)
+    {
+        if (provider?.Quotas is not { Count: > 0 } quotas) return [];
+        var map = new Dictionary<string, UsageSourceGroup>(StringComparer.Ordinal);
+        var order = new List<string>();
+        for (var i = 0; i < quotas.Count; i++)
         {
-            var days = (int)diff.TotalDays;
-            var hours = diff.Hours;
-            return hours > 0 ? $"约 {days} 天 {hours} 小时后重置" : $"约 {days} 天后重置";
+            var q = quotas[i];
+            if (q.Remaining is null || q.IsExpired(now)) continue;
+            var srcId = string.IsNullOrWhiteSpace(q.SourceDeviceId)
+                ? $"unknown:{q.Key}:{i}"
+                : $"device:{q.SourceDeviceId!.Trim()}";
+            var srcName = string.IsNullOrWhiteSpace(q.SourceName) ? "来源未命名" : q.SourceName!.Trim();
+            if (!map.TryGetValue(srcId, out var group))
+            {
+                group = new UsageSourceGroup(srcId, srcName, []);
+                map[srcId] = group;
+                order.Add(srcId);
+            }
+            group.Quotas.Add(q);
         }
-        if (diff.TotalHours >= 1.0)
-        {
-            var hours = (int)diff.TotalHours;
-            var mins = diff.Minutes;
-            return mins > 0 ? $"约 {hours} 小时 {mins} 分钟后重置" : $"约 {hours} 小时后重置";
-        }
-        var m = Math.Max(1, (int)Math.Ceiling(diff.TotalMinutes));
-        return $"约 {m} 分钟后重置";
+        return order.Select(k => map[k]).Where(g => g.Quotas.Count > 0).ToList();
     }
 
     public static string FormatModelName(string? raw)
@@ -195,6 +297,12 @@ public sealed class UsageAlertSettings
     public bool Enabled { get; set; } = true;
     public int ThresholdPercent { get; set; } = 20;
     public bool NotifyReset { get; set; } = true;
+}
+
+public sealed class LocalUiSettings
+{
+    public string ThemeMode { get; set; } = "system"; // "system" | "light" | "dark"
+    public bool CloseToTray { get; set; } = true;
 }
 
 public sealed class UsageAlertRecord

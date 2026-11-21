@@ -1,0 +1,9 @@
+<resources>
+  <string name="widget_label_config">小组件设置</string>
+  <string name="widget_label_small">Monitor · 2×2</string>
+  <string name="widget_label_medium">Monitor · 2×4</string>
+  <string name="widget_label_large">Monitor · 4×4</string>
+  <string name="widget_desc_small">2×2 桌面小组件：空闲自动显示最低剩余额度与重置时间或今日 Token，跟踪时显示当前项目进度</string>
+  <string name="widget_desc_medium">2×4 宽卡小组件：同时展示最低官方额度进度条、下次重置时间、今日 Token 与任务动态</string>
+  <string name="widget_desc_large">4×4 看板小组件：完整展示实时跟踪项目、多工具官方额度窗口、今日各工具 Token 与进行中任务</string>
+</resources>

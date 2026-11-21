@@ -24,7 +24,7 @@ if ([string]::IsNullOrWhiteSpace($JavaDirectory)) { throw 'Set JAVA_HOME to a JD
 
 function Assert-ReleaseManifest([string]$ManifestPath) {
     try {
-        [xml]$releaseManifest = Get-Content -LiteralPath $ManifestPath -Raw
+        [xml]$releaseManifest = Get-Content -LiteralPath $ManifestPath -Encoding UTF8 -Raw
         $releaseApplication = $releaseManifest.SelectSingleNode('/manifest/application')
         if ($null -eq $releaseApplication -or
             $releaseApplication.GetAttribute('debuggable', 'http://schemas.android.com/apk/res/android') -cne 'false') {
@@ -113,9 +113,9 @@ Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release
 Run-Checked (Join-Path $javaBin 'jar.exe') @('cf', (Join-Path $buildDirectory 'classes.jar'), '-C', (Join-Path $buildDirectory 'classes'), '.')
 Run-Checked (Join-Path $toolsDirectory 'd8.bat') @('--lib', $platformJar, '--min-api', '26', '--output', (Join-Path $buildDirectory 'dex'), (Join-Path $buildDirectory 'classes.jar'), $qrLibrary)
 Copy-Item -LiteralPath (Join-Path $buildDirectory 'base.apk') -Destination (Join-Path $buildDirectory 'unsigned.apk') -Force
-Run-Checked (Join-Path $javaBin 'jar.exe') @('uf', (Join-Path $buildDirectory 'unsigned.apk'), '-C', (Join-Path $buildDirectory 'dex'), 'classes.dex')
-# Windows aapt2 may write backslashes in asset ZIP entry names. Android AssetManager
-# looks up slash-separated names, so normalize archive names before alignment/signing.
+# Windows aapt2 may write backslashes in asset ZIP entry names. Normalize archive names FIRST
+# before jar.exe adds classes.dex so PowerShell 5.1 (.NET Framework) never strips classes.dex's
+# data descriptor while leaving GPBF bit 3 set, and leaves resources.arsc ZIP_STORED untouched.
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [System.IO.Compression.ZipFile]::Open((Join-Path $buildDirectory 'unsigned.apk'), [System.IO.Compression.ZipArchiveMode]::Update)
@@ -132,6 +132,7 @@ try {
         $entry.Delete()
     }
 } finally { $archive.Dispose() }
+Run-Checked (Join-Path $javaBin 'jar.exe') @('uf', (Join-Path $buildDirectory 'unsigned.apk'), '-C', (Join-Path $buildDirectory 'dex'), 'classes.dex')
 Run-Checked (Join-Path $toolsDirectory 'zipalign.exe') @('-f', '4', (Join-Path $buildDirectory 'unsigned.apk'), (Join-Path $buildDirectory 'aligned.apk'))
 if (-not $externalSigning -and -not (Test-Path -LiteralPath $signingFile)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $signingFile) | Out-Null
@@ -181,7 +182,7 @@ Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 
 # Compile the real notification/receiver implementation against offline recording stubs.
 # These classes stay outside build/classes and therefore never enter the APK.
 $notificationTestSources = @(Get-ChildItem -LiteralPath (Join-Path $projectDirectory 'tests/notification-stubs') -Filter '*.java' -Recurse -File | ForEach-Object { $_.FullName })
-foreach ($source in @('TrackingService', 'TrackingRequestDiagnostics', 'TrackingRemovalListener', 'NotificationRecoveryPolicy', 'StopReceiver', 'DismissReceiver', 'TrackingPolicy', 'NativeNavigationPolicy', 'NativeWebPolicy', 'NativeScreenPolicy', 'NativeListPresentation', 'LivePresentation', 'LivePresentationPreferences', 'UsageAlertNotification', 'DeviceBrand', 'XiaomiLiveCapabilities', 'XiaomiLiveNotification')) {
+foreach ($source in @('TrackingService', 'MonitorWidgetBridge', 'TrackingRequestDiagnostics', 'TrackingRemovalListener', 'NotificationRecoveryPolicy', 'StopReceiver', 'DismissReceiver', 'TrackingPolicy', 'NativeNavigationPolicy', 'NativeWebPolicy', 'NativeScreenPolicy', 'NativeListPresentation', 'LivePresentation', 'LivePresentationPreferences', 'UsageAlertNotification', 'DeviceBrand', 'XiaomiLiveCapabilities', 'XiaomiLiveNotification')) {
     $notificationTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java"
 }
 $notificationTestSources += Join-Path $projectDirectory 'tests/TrackingNotificationTest.java'
@@ -323,3 +324,14 @@ New-Item -ItemType Directory -Force -Path $settingsTestsDirectory | Out-Null
 $settingsSources = @((Join-Path $projectDirectory 'tests/notification-stubs/org/json/JSONObject.java'), (Join-Path $projectDirectory 'tests/notification-stubs/org/json/JSONArray.java'), (Join-Path $projectDirectory 'tests/ServerSettingsPolicyTest.java'))
 Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release', '8', '-classpath', "$(Join-Path $buildDirectory 'classes');$platformJar", '-d', $settingsTestsDirectory) + $settingsSources)
 Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', "$settingsTestsDirectory;$(Join-Path $buildDirectory 'classes');$platformJar", 'com.agentmonitor.live.ServerSettingsPolicyTest')
+
+# Home screen widget auto/fixed policy tests run offline with synthetic JSON fixtures.
+$widgetTestsDirectory = Join-Path $buildDirectory 'widget-policy-tests'
+New-Item -ItemType Directory -Force -Path $widgetTestsDirectory | Out-Null
+$widgetTestSources = @(
+    (Join-Path $projectDirectory 'tests/notification-stubs/org/json/JSONObject.java'),
+    (Join-Path $projectDirectory 'tests/notification-stubs/org/json/JSONArray.java'),
+    (Join-Path $projectDirectory 'tests/MonitorWidgetPolicyTest.java')
+)
+Run-Checked (Join-Path $javaBin 'javac.exe') (@('-encoding', 'UTF-8', '--release', '8', '-classpath', "$(Join-Path $buildDirectory 'classes');$platformJar", '-d', $widgetTestsDirectory) + $widgetTestSources)
+Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', "$widgetTestsDirectory;$(Join-Path $buildDirectory 'classes');$platformJar", 'com.agentmonitor.live.MonitorWidgetPolicyTest')

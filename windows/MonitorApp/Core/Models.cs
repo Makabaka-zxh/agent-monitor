@@ -92,6 +92,24 @@ public sealed class TaskUsageSummary
     [JsonPropertyName("observed_at")] public string? ObservedAt { get; set; }
 }
 
+public sealed class ErrorLocationDto
+{
+    [JsonPropertyName("file")] public string? File { get; set; }
+    [JsonPropertyName("line")] public int? Line { get; set; }
+    [JsonPropertyName("column")] public int? Column { get; set; }
+    [JsonPropertyName("step")] public string? Step { get; set; }
+}
+
+public sealed class ErrorAnalysisDto
+{
+    [JsonPropertyName("category")] public string? Category { get; set; }
+    [JsonPropertyName("summary")] public string? Summary { get; set; }
+    [JsonPropertyName("location")] public ErrorLocationDto? Location { get; set; }
+    [JsonPropertyName("suggestion")] public string? Suggestion { get; set; }
+    [JsonPropertyName("confidence")] public string? Confidence { get; set; }
+    [JsonPropertyName("source")] public string? Source { get; set; }
+}
+
 public sealed class MonitorTask
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";
@@ -106,6 +124,8 @@ public sealed class MonitorTask
     [JsonPropertyName("final_result_id")] public string? FinalResultId { get; set; }
     [JsonPropertyName("archived")] public bool Archived { get; set; }
     [JsonPropertyName("stale")] public bool? Stale { get; set; }
+    [JsonPropertyName("failure_code")] public string? FailureCode { get; set; }
+    [JsonPropertyName("error_analysis")] public ErrorAnalysisDto? ErrorAnalysis { get; set; }
     [JsonPropertyName("usage")] public TaskUsageSummary? Usage { get; set; }
 
     public static string BrandFor(string? tool) => tool switch
@@ -153,6 +173,14 @@ public sealed class MonitorTask
     }
 }
 
+public sealed class DeviceSourceDto
+{
+    [JsonPropertyName("tool")] public string Tool { get; set; } = "";
+    [JsonPropertyName("available")] public bool Available { get; set; }
+    [JsonPropertyName("mode")] public string? Mode { get; set; }
+    [JsonPropertyName("detail")] public string? Detail { get; set; }
+}
+
 public sealed class Computer
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";
@@ -161,6 +189,7 @@ public sealed class Computer
     [JsonPropertyName("online")] public bool Online { get; set; }
     [JsonPropertyName("local")] public bool Local { get; set; }
     [JsonPropertyName("last_seen")] public string? LastSeen { get; set; }
+    [JsonPropertyName("sources")] public List<DeviceSourceDto>? Sources { get; set; }
 }
 
 public sealed class PreferencesDto
@@ -189,7 +218,17 @@ public sealed class NativeConnectionDto
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";
     [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("last_seen")] public string? LastSeen { get; set; }
     [JsonPropertyName("current")] public bool? Current { get; set; }
+}
+
+public sealed class BrowserSessionDto
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("last_seen")] public string? LastSeen { get; set; }
+    [JsonPropertyName("current")] public bool? Current { get; set; }
+    [JsonPropertyName("authorizes_current")] public bool? AuthorizesCurrent { get; set; }
 }
 
 public sealed class AccountResponse
@@ -197,7 +236,9 @@ public sealed class AccountResponse
     [JsonPropertyName("user")] public ProfileDto User { get; set; } = new();
     [JsonPropertyName("preferences")] public PreferencesDto Preferences { get; set; } = new();
     [JsonPropertyName("google_linked")] public bool? GoogleLinked { get; set; }
+    [JsonPropertyName("sessions")] public List<BrowserSessionDto>? Sessions { get; set; }
     [JsonPropertyName("native_devices")] public List<NativeConnectionDto>? NativeDevices { get; set; }
+    [JsonPropertyName("current_reader_id")] public string? CurrentReaderId { get; set; }
 }
 
 public sealed class PairingStartDto
@@ -368,8 +409,12 @@ public sealed class UsageQuotaCheckDto
     [JsonPropertyName("tool")] public string Tool { get; set; } = "";
     [JsonPropertyName("source_device_id")] public string? SourceDeviceId { get; set; }
     [JsonPropertyName("source_name")] public string? SourceName { get; set; }
+    [JsonPropertyName("state")] public string? State { get; set; }
     [JsonPropertyName("status")] public string? Status { get; set; }
-    [JsonPropertyName("checked_at")] public string? CheckedAt { get; set; }
+    [JsonPropertyName("last_attempt_at")] public string? LastAttemptAt { get; set; }
+    [JsonPropertyName("retry_after_seconds")] public long? RetryAfterSeconds { get; set; }
+
+    [JsonIgnore] public string EffectiveState => !string.IsNullOrWhiteSpace(State) ? State! : (Status ?? "unavailable");
 }
 
 public sealed class UsageProviderDto

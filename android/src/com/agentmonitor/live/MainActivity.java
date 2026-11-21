@@ -270,6 +270,7 @@ public final class MainActivity extends Activity {
         usageSummary = null; usagePageState = null; nativeUsage = null; usageBusy = false; usageFailed = false; nextUsage = 0;
         usageRequestRevision = 0; usageAcceptedRevision = 0; usageAlertRevision = 0;
         UsageAlerts.sync(this);
+        MonitorWidgetUpdater.refreshAll(this);
         snapshotBusy = false; accountBusy = false; filterBusy = false; filterDirty = false; apiCooldownUntil = 0; avatarBusy = false; avatarGeneration++; mutations.clear(); listPositions.clear(); scrollPositions.clear(); workbenchHeaderScroll = 0; cancelDuration(); clearNotificationRequest();
         // A direct account switch has the same private-state boundary as logout.
         profileDraft = false; draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = "";
@@ -352,6 +353,7 @@ public final class MainActivity extends Activity {
             if (value == null) { logWorkbench("failure", null); failed = true; }
             else {
                 snapshot = value; failed = false; lastSuccess = SystemClock.elapsedRealtime(); JSONObject preferences = value.optJSONObject("preferences");
+                MonitorWidgetUpdater.cacheWorkbench(this, value, loadedToken);
                 acceptUsage(value.optJSONObject("usage"), requestedUsage);
                 logWorkbench("accepted", value);
                 if (preferences != null) applyOutputPreference(preferences.optBoolean("sync_output"));
@@ -420,6 +422,7 @@ public final class MainActivity extends Activity {
         if (revision < usageAcceptedRevision) return;
         usageAcceptedRevision = revision;
         usageSummary = value; usageFailed = false;
+        MonitorWidgetUpdater.cacheUsage(this, value, loadedToken);
         if (nativeUsage != null) nativeUsage.update(usageSummary, usageBusy, false);
     }
     private void fetchUsage() {
@@ -1841,7 +1844,7 @@ public final class MainActivity extends Activity {
         try { SessionStore.write(this, new JSONObject()); }
         catch (Exception failure) { notice("未能清除旧连接，请重试"); return; }
         visible = false; handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace);
-        TrackingService.requestStop(this, TrackingService.generation); UsageAlerts.sync(this);
+        TrackingService.requestStop(this, TrackingService.generation); UsageAlerts.sync(this); MonitorWidgetUpdater.refreshAll(this);
         sessionEpoch++; pageEpoch++; actionRevision++; loadedToken = ""; invalidToken = "";
         snapshot = null; account = null; usageSummary = null; profileDraft = false; taskQuery = "";
         draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = "";
@@ -1905,8 +1908,11 @@ public final class MainActivity extends Activity {
         if (avatarPickButton != null) { avatarPickButton.setEnabled(!avatarBusy); avatarPickButton.setText(avatarBusy ? "正在处理头像…" : "更换头像"); }
     }
     private boolean openNotification(Intent intent) {
-        if (intent != null && "com.agentmonitor.live.OPEN_USAGE".equals(intent.getAction())) {
+        if (intent != null && MonitorWidgetUpdater.ACTION_OPEN_USAGE.equals(intent.getAction())) {
             setIntent(new Intent(this, MainActivity.class)); page = "usage"; selectedId = ""; taskReturnDevice = ""; pageEpoch++; nextUsage = 0; return true;
+        }
+        if (intent != null && MonitorWidgetUpdater.ACTION_OPEN_TASKS.equals(intent.getAction())) {
+            setIntent(new Intent(this, MainActivity.class)); page = "tasks"; selectedId = ""; taskReturnDevice = ""; pageEpoch++; nextSnapshot = 0; return true;
         }
         if (intent == null || !NativeNavigationPolicy.NOTIFICATION_ACTION.equals(intent.getAction())) return false;
         String target = NativeNavigationPolicy.notificationUrl(intent.getAction(), intent.getDataString()); setIntent(new Intent(this, MainActivity.class));

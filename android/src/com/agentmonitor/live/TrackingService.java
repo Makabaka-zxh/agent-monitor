@@ -148,6 +148,7 @@ public final class TrackingService extends Service {
             current.handler.removeCallbacksAndMessages(null);
         }
         ++generation; trackedId = ""; trackingMessage = ""; endsAt = 0; untilTaskEnd = false;
+        MonitorWidgetBridge.clearTracking(context);
         context.stopService(new Intent(context, TrackingService.class));
         context.getSystemService(NotificationManager.class).cancel(NOTIFICATION_ID);
         NotificationDiagnostics.write(context, "stopped", false, null, reason);
@@ -197,8 +198,20 @@ public final class TrackingService extends Service {
             NotificationDiagnostics.write(this, "started", false, notification);
         } catch (RuntimeException ignored) { finish("", false); return START_NOT_STICKY; }
         if (trackedId.isEmpty() || token.isEmpty()) { finish("", false); return START_NOT_STICKY; }
+        pushWidgetTracking();
         refreshXiaomiCapabilities(epoch);
         handler.post(ticker); return START_NOT_STICKY;
+    }
+    private void pushWidgetTracking() {
+        if (!active || epoch != generation) return;
+        long now = SystemClock.elapsedRealtime();
+        long elapsed = Math.max(0L, now - started);
+        long remaining = untilTaskEnd || endsAt <= 0L ? 0L : Math.max(0L, endsAt - now);
+        MonitorWidgetBridge.updateTracking(this, true, notificationTaskId, title, tool,
+                presentationData == null ? "" : presentationData.computer, trackingMessage, epoch,
+                elapsed, remaining, untilTaskEnd,
+                presentationData == null ? null : presentationData.session,
+                presentationData == null ? null : presentationData.today);
     }
     private void refreshXiaomiCapabilities(long requestEpoch) {
         if (deviceBrand != DeviceBrand.XIAOMI) return;
@@ -259,6 +272,7 @@ public final class TrackingService extends Service {
                     confirmingState = false; lastConfirmedRunning = lastConfirmedTask = now;
                     title = clean(task.optString("title", title), 160);
                     trackingMessage = "等待批准";
+                    pushWidgetTracking();
                     publish(notification(trackingMessage, true, false));
                     return;
                 }
@@ -270,12 +284,14 @@ public final class TrackingService extends Service {
                         lastConfirmedTask = now;
                     }
                     trackingMessage = "正在确认任务状态";
+                    pushWidgetTracking();
                     publish(notification(trackingMessage, true, false));
                     return;
                 }
                 confirmingState = false; lastConfirmedRunning = lastConfirmedTask = now;
                 title = clean(task.optString("title", title), 160);
                 trackingMessage = "执行中";
+                pushWidgetTracking();
                 publish(notification(trackingMessage, true, true));
             });
         });
@@ -298,6 +314,7 @@ public final class TrackingService extends Service {
         String cutoff = TrackingPolicy.deadline(now, started, lastSuccess, stateConfirmationTime(), confirmingState, durationMs);
         if (!cutoff.isEmpty()) { finish(cutoff, true); return; }
         trackingMessage = "更新暂停，正在重连";
+        pushWidgetTracking();
         publish(notification(trackingMessage, true, false));
     }
     private void publish(Notification notification) {
@@ -489,6 +506,7 @@ public final class TrackingService extends Service {
         leaveNotice = leaveNotice && (recovery == null || !recovery.isPending());
         active = false; invalidateNotification(); handler.removeCallbacksAndMessages(null);
         if (epoch == generation) { ++generation; trackedId = ""; trackingMessage = ""; endsAt = 0; untilTaskEnd = false; }
+        MonitorWidgetBridge.clearTracking(this);
         stopForeground(STOP_FOREGROUND_REMOVE); manager.cancel(NOTIFICATION_ID);
         if (leaveNotice && manager.areNotificationsEnabled()) {
             try { manager.notify(NOTIFICATION_ID, notification(message, false, false)); } catch (RuntimeException ignored) { }
@@ -504,6 +522,7 @@ public final class TrackingService extends Service {
             try { unregisterReceiver(screenReceiver); } catch (RuntimeException ignored) { }
         }
         if (epoch == generation) { ++generation; trackedId = ""; trackingMessage = ""; endsAt = 0; untilTaskEnd = false; }
+        MonitorWidgetBridge.clearTracking(this);
         if (instance == this) instance = null;
         super.onDestroy();
     }

@@ -74,6 +74,127 @@ public sealed class MonitorController : IDisposable
         NotifyChanged();
     }
 
+    public LocalUiSettings ReadUiSettings()
+    {
+        var path = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Monitor", "ui-settings.json");
+        try
+        {
+            if (System.IO.File.Exists(path))
+                return System.Text.Json.JsonSerializer.Deserialize<LocalUiSettings>(System.IO.File.ReadAllText(path)) ?? new LocalUiSettings();
+        }
+        catch { }
+        return new LocalUiSettings();
+    }
+
+    public void SaveUiSettings(LocalUiSettings settings)
+    {
+        var path = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Monitor", "ui-settings.json");
+        try
+        {
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            System.IO.File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(settings));
+        }
+        catch { }
+        NotifyChanged();
+    }
+
+    public async Task SaveToolFilterAsync(ToolFilter next)
+    {
+        Tool = next;
+        NotifyChanged();
+        if (_credential is not { } login || !Connected) return;
+        try
+        {
+            await Api.MutateAsync(Origin, "/api/native/preferences", System.Net.Http.HttpMethod.Patch,
+                new Dictionary<string, object?> { ["tool_filter"] = next.WireKey() }, login.Token);
+        }
+        catch { }
+    }
+
+    public async Task<bool> RemoveComputerAsync(string deviceId)
+    {
+        if (_credential is not { } login || Mutating || !MonitorSecurity.Matches(deviceId, "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"))
+            return false;
+        Mutating = true;
+        var epoch = _generation;
+        NotifyChanged();
+        try
+        {
+            await Api.MutateAsync(Origin, $"/api/native/computers/{deviceId}", System.Net.Http.HttpMethod.Delete, token: login.Token);
+            if (epoch == _generation) await RefreshWorkbenchAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            HandleApiError(ex, login.Token, showAlert: true);
+            return false;
+        }
+        finally
+        {
+            if (epoch == _generation) Mutating = false;
+            NotifyChanged();
+        }
+    }
+
+    public async Task<bool> RevokeNativeConnectionAsync(string readerId)
+    {
+        if (_credential is not { } login || Mutating || !MonitorSecurity.Matches(readerId, "[A-Za-z0-9_-]{32}"))
+            return false;
+        Mutating = true;
+        var epoch = _generation;
+        NotifyChanged();
+        try
+        {
+            await Api.MutateAsync(Origin, $"/api/native/connections/{readerId}", System.Net.Http.HttpMethod.Delete, token: login.Token);
+            if (epoch == _generation) await RefreshAccountAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            HandleApiError(ex, login.Token, showAlert: true);
+            return false;
+        }
+        finally
+        {
+            if (epoch == _generation) Mutating = false;
+            NotifyChanged();
+        }
+    }
+
+    public async Task<bool> RevokeBrowserSessionAsync(string sessionId, bool authorizesCurrent)
+    {
+        if (_credential is not { } login || Mutating || !MonitorSecurity.Matches(sessionId, "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"))
+            return false;
+        Mutating = true;
+        var epoch = _generation;
+        NotifyChanged();
+        try
+        {
+            await Api.MutateAsync(Origin, $"/api/native/sessions/{sessionId}", System.Net.Http.HttpMethod.Delete, token: login.Token);
+            if (authorizesCurrent)
+            {
+                Invalidate(login.Token);
+                return true;
+            }
+            if (epoch == _generation) await RefreshAccountAsync();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            HandleApiError(ex, login.Token, showAlert: true);
+            return false;
+        }
+        finally
+        {
+            if (epoch == _generation) Mutating = false;
+            NotifyChanged();
+        }
+    }
+
     private void LoadCredentialsForOrigin()
     {
         _credential = null;

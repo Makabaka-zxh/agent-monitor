@@ -9,8 +9,8 @@
 - 字体内的版权声明：Copyright © 2020-2025 Beijing Xiaomi Mobile Software Co.,Ltd. All Rights Reserved.
 - 授权文件：[MiSans 字体知识产权许可协议](licenses/MiSans-License.pdf)。它是小米专有字体许可，**不是 MIT 或 SIL OFL**。
 - [官方字体下载页](https://hyperos.mi.com/font/zh/download/)与[官方许可 PDF](https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf)。来源记录随 Android 和 macOS 资源提供。
-- 文件：`web/assets/fonts/MiSans-Regular.ttf`、`android/assets/fonts/MiSans-Regular.ttf`、`android/res/font/misans_regular.ttf`、`macos/Sources/Monitor/Resources/MiSans-Regular.ttf`。
-- 四处均保留同一原始字体，未转换、修改或子集化。SHA-256：`9c120f0a849bc0aa5048daae2a3c0f6eecd828b5b33fce682a9622833f5feea6`。
+- 文件：`web/assets/fonts/MiSans-Regular.ttf`、`android/assets/fonts/MiSans-Regular.ttf`、`android/res/font/misans_regular.ttf`、`macos/Sources/Monitor/Resources/MiSans-Regular.ttf`、`windows/MonitorApp/Resources/MiSans-Regular.ttf`。
+- 五处均保留同一原始字体，未转换、修改或子集化。SHA-256：`9c120f0a849bc0aa5048daae2a3c0f6eecd828b5b33fce682a9622833f5feea6`。
 
 协议第 2 条允许分发使用该字体创作的应用，同时要求在软件中特别注明使用 MiSans，保留版权声明和协议，且不得改编或二次开发字体。原文的署名要求是：“您应在软件中特别注明使用了 MiSans 字体。” 字体不得作为独立字体产品重新许可或分发。本项目随应用提供原字体，不将其重新许可为 MIT；完整条件以随附协议为准。
 

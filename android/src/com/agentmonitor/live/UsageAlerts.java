@@ -57,7 +57,8 @@ public final class UsageAlerts {
                 if (n.getTag() != null && n.getTag().startsWith("usage:")) nm.cancel(n.getTag(), n.getId());
             p.edit().putString("account", account).remove("sent").apply();
         }
-        if (!enabled(c)) { scheduler.cancel(JOB_ID); return; }
+        boolean needsBackgroundCheck = enabled(c) || (!token.isEmpty() && MonitorWidgetUpdater.hasAnyInstances(c));
+        if (!needsBackgroundCheck) { scheduler.cancel(JOB_ID); return; }
         if (scheduler.getPendingJob(JOB_ID) == null) scheduler.schedule(new JobInfo.Builder(JOB_ID,
                 new ComponentName(c, UsageAlertJobService.class)).setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setPeriodic(15 * 60 * 1000L).build());

@@ -127,4 +127,29 @@ public class CoreTests
         Assert.NotNull(img);
         Assert.Null(QrDrawing.CreateImage(""));
     }
+
+    [Fact]
+    public void FamilyFormatting_UsesChineseCompactUnitsAndBeijingCalendar()
+    {
+        Assert.Equal("9,876", UsageFormatting.CompactTokens(9876));
+        Assert.Equal("12.8 万", UsageFormatting.CompactTokens(128_400));
+        Assert.Equal("2 亿", UsageFormatting.CompactTokens(200_000_000));
+
+        var friday = new DateOnly(2026, 11, 20);
+        var monday = UsageCalendar.MondayOf(friday);
+        Assert.Equal(new DateOnly(2026, 11, 16), monday);
+        Assert.StartsWith("本周 · 11.16 – 11.22", UsageCalendar.WeekRangeLabel(monday, friday));
+    }
+
+    [Fact]
+    public void FamilyTheme_MatchesMonitorNordicSlatePalette()
+    {
+        UiKit.ApplyTheme(false);
+        Assert.Equal("#FF466987", UiKit.AccentBrush.Color.ToString());
+        Assert.Equal("#FF96664F", UiKit.ClaudeInkBrush.Color.ToString());
+
+        UiKit.ApplyTheme(true);
+        Assert.Equal("#FFAFC8DF", UiKit.AccentBrush.Color.ToString());
+        UiKit.ApplyTheme(false);
+    }
 }

@@ -4,7 +4,7 @@
 
 **在手机上，看到每台电脑的 AI 编程任务。**
 
-Monitor 是面向个人部署的开源工作台，将多台 Windows / Mac 上的 Codex、Claude Code 与 Antigravity 桌面任务汇总到原生 Android App、原生 macOS 客户端和浏览器。离开电脑后，可以查看任务状态和可同步的结果，并在已支持且授权的会话中继续回复。
+Monitor 是面向个人部署的开源工作台，将多台 Windows / Mac 上的 Codex、Claude Code 与 Antigravity 桌面任务汇总到原生 Android App、原生 Windows 客户端、原生 macOS 客户端和浏览器。离开电脑后，可以查看任务状态和可同步的结果，并在已支持且授权的会话中继续回复。
 
 [下载 Android](https://github.com/Makabaka-zxh/agent-monitor/releases/latest) · [部署](docs/DEPLOYMENT.md) · [构建](docs/BUILDING.md) · [App 内更新](docs/UPDATES.md) · [English](README.en.md)
 
@@ -14,7 +14,8 @@ Monitor 是面向个人部署的开源工作台，将多台 Windows / Mac 上的
 - **任务搜索（1.0.4 起）**：Android 支持按任务名称、项目或电脑名称搜索已加载的列表，多个关键词用空格分开，并与现有筛选组合；不搜索正文，也不上传搜索词。
 - **结果与附件**：查看最终答复，下载 TXT 和明确关联的配套文件；按设备授权结果同步和同会话回复。
 - **用量与提醒**：查看可采集的当日 Token、每周趋势、会话用量，以及各模型占本地已采集 Token 的比例。官方额度另行显示账号实际提供的窗口和已用百分比，不按套餐名称猜测；无有效读数或已到重置时间的窗口隐藏，真实的 0% 保留。未过期的旧读数会标明“上次已用”，不当作当前额度。两种比例含义不同，Token 统计不代替官方额度。
-- **原生 Android**：MiSans 字体、原生导航、扫码配对、账号资料、跟踪时长滚轮和“直至任务结束”。
+- **原生 Android 与桌面小组件**：MiSans 字体、原生导航、一扫完成电脑登录与配对、账号资料、跟踪时长滚轮和“直至任务结束”；提供 **2×2、2×4、4×4** 桌面小组件，支持自动切换（空闲显示最低剩余官方额度与下次重置时间或今日 Token，开启跟踪后显示实时项目进度）或固定显示指定内容。
+- **Windows / macOS 原生桌面端**：延续 Monitor 家族设计（MiSans 字体、Nordic Slate 配色与统一线条图标），完整提供任务工作台、同会话续接与结构化问答审批、电脑诊断与采集器管理、官方额度与 90 天本地模型 Token 统计，并支持直接生成二维码由手机一扫完成登录与连接。
 - **实况内容自定义**：简洁／均衡／丰富预设，六项独立开关，Claude Code / Codex 的展开与锁屏预览。
 - **App 内更新**：读取本仓库的正式 GitHub Release，显示说明与进度，校验安装包后交给 Android 确认安装。
 - **自己掌握数据**：自建 Python 服务和本地 SQLite，不依赖作者的个人服务。Google 登录是可选功能，需要部署者自己的 OAuth 配置。
@@ -26,6 +27,7 @@ flowchart LR
   A[Windows / Mac 连接器] -->|HTTPS · 配对凭据| H[自建 Monitor 服务]
   H --> D[(SQLite · 私有状态目录)]
   P[Android 原生 App] <-->|HTTPS · 用户授权| H
+  K[Windows 原生客户端] <-->|HTTPS · 用户授权| H
   M[macOS 原生客户端] <-->|HTTPS · 用户授权| H
   W[浏览器] <-->|同源会话| H
   G[本仓库 GitHub Release] -->|匿名读取 · 校验 APK| P
@@ -75,7 +77,8 @@ Android 更新是完整 APK 升级，需要系统安装确认，保留相同签�
 | --- | --- |
 | `agent_monitor/` | 服务、采集、配对、结果／回复、用量 |
 | `web/` | 浏览器工作台和离线静态资源 |
-| `android/` | 原生 Java Android App、测试和构建脚本 |
+| `android/` | 原生 Java Android App、桌面小组件、测试和构建脚本 |
+| `windows/` | 原生 WPF Windows 客户端、测试、采集服务与构建脚本 |
 | `macos/` | SwiftUI 客户端及用户级连接器工具 |
 | `tests/` | 使用合成数据的服务与采集测试 |
 | `docs/` | 部署、构建、更新和项目说明 |

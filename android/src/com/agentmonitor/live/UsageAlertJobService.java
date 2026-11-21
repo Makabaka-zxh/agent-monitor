@@ -15,9 +15,12 @@ public final class UsageAlertJobService extends JobService {
         new Thread(() -> {
             try {
                 String token = UsageAlerts.connectedToken(this);
-                if (!cancel.get() && UsageAlerts.enabled(this)) {
+                if (!cancel.get() && (UsageAlerts.enabled(this) || MonitorWidgetUpdater.hasAnyInstances(this))) {
                     JSONObject usage = NativeApi.call("GET", "/api/native/usage", null, token);
-                    if (!cancel.get() && token.equals(UsageAlerts.connectedToken(this))) UsageAlerts.observe(this, usage, token);
+                    if (!cancel.get() && token.equals(UsageAlerts.connectedToken(this))) {
+                        UsageAlerts.observe(this, usage, token);
+                        MonitorWidgetUpdater.cacheUsage(this, usage, token);
+                    }
                 }
             } catch (NativeApi.Failure failure) {
                 // Never retry writes or log credentials. A future periodic check retries reads.

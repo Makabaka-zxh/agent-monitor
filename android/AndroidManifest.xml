@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.agentmonitor.live" android:versionCode="79" android:versionName="1.1.0">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.agentmonitor.live" android:versionCode="80" android:versionName="1.1.0">
   <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -17,6 +17,9 @@
     </activity>
     <activity android:name=".NativeQrScanner" android:exported="false" android:screenOrientation="portrait" />
     <activity android:name=".NativeUpdateActivity" android:exported="false" />
+    <activity android:name=".MonitorWidgetConfigActivity" android:exported="true" android:label="@string/widget_label_config">
+      <intent-filter><action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" /></intent-filter>
+    </activity>
     <provider android:name=".UpdateInstallProvider" android:authorities="com.agentmonitor.live.updates" android:exported="false" android:grantUriPermissions="true"><grant-uri-permission android:pathPrefix="/verified/" /></provider>
     <service android:name=".TrackingService" android:exported="false" android:foregroundServiceType="dataSync" />
     <service android:name=".UsageAlertJobService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
@@ -26,6 +29,27 @@
     </service>
     <receiver android:name=".StopReceiver" android:exported="false" />
     <receiver android:name=".DismissReceiver" android:exported="false" />
+    <receiver android:name=".MonitorWidgetSmallProvider" android:label="@string/widget_label_small" android:exported="true">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+        <action android:name="com.agentmonitor.live.ACTION_WIDGET_REFRESH" />
+      </intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info_small" />
+    </receiver>
+    <receiver android:name=".MonitorWidgetMediumProvider" android:label="@string/widget_label_medium" android:exported="true">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+        <action android:name="com.agentmonitor.live.ACTION_WIDGET_REFRESH" />
+      </intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info_medium" />
+    </receiver>
+    <receiver android:name=".MonitorWidgetLargeProvider" android:label="@string/widget_label_large" android:exported="true">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+        <action android:name="com.agentmonitor.live.ACTION_WIDGET_REFRESH" />
+      </intent-filter>
+      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info_large" />
+    </receiver>
   </application>
 </manifest>
 
