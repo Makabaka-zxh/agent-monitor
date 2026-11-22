@@ -127,6 +127,14 @@ public sealed class MonitorIcon : FrameworkElement
                 DrawGeometry(dc, pen, "M 9.5,5.8 L 15.8,12 L 9.5,18.2");
                 break;
 
+            case "chevron-up":
+                DrawGeometry(dc, pen, "M 5.8,14.5 L 12,8.2 L 18.2,14.5");
+                break;
+
+            case "chevron-down":
+                DrawGeometry(dc, pen, "M 5.8,9.5 L 12,15.8 L 18.2,9.5");
+                break;
+
             case "check":
                 DrawGeometry(dc, pen, "M 5,12.5 L 9.5,17 L 19,7.5");
                 break;

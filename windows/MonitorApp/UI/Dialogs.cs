@@ -529,7 +529,7 @@ public static class Dialogs
             var head = UiKit.Heading("精简小窗定制", 20);
             head.Margin = new Thickness(0, 0, 28, 0);
             root.Children.Add(head);
-            var desc = UiKit.Body("实时调整小窗尺寸预设与显示模块，改动立即生效。", 12.5, UiKit.MutedBrush);
+            var desc = UiKit.Body("单屏叠放卡片设计（无滚动条），支持鼠标滚轮、方向键 ↑/↓ 或底部按钮上下切换卡片。", 12.5, UiKit.MutedBrush);
             desc.Margin = new Thickness(0, 6, 0, 14);
             root.Children.Add(desc);
 
