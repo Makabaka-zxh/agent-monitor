@@ -503,7 +503,9 @@ public sealed class LocalUiSettings
 
     // Personalizable Background ("cloud" | "blue" | "sand" | "mist" | "bing" | "custom")
     public string BackgroundMode { get; set; } = "cloud";
-    public string WallpaperStyle { get; set; } = "balanced"; // "clear" | "balanced" | "frosted"
+    public string WallpaperStyle { get; set; } = "balanced"; // "frosted" | "balanced" | "clear" | "vivid" | "custom"
+    public double? WallpaperOpacity { get; set; } // 0.05 .. 0.95 (stepless transparency / show-through)
+    public double? WallpaperBlur { get; set; } // 0.0 .. 32.0 px (stepless Gaussian blur)
 
     // Compact Mini-Window Size & Content Customization
     public string CompactSizePreset { get; set; } = "medium"; // "nano" | "small" | "medium" | "large"
@@ -512,6 +514,41 @@ public sealed class LocalUiSettings
     public bool CompactShowToolStrip { get; set; } = true;
     public bool CompactShowTodayTokens { get; set; } = true;
     public bool CompactShowTaskMeta { get; set; } = true;
+
+    public static (double Opacity, double Blur) PresetValues(string? style) => style switch
+    {
+        "frosted" => (0.24, 22.0),
+        "clear" => (0.70, 3.0),
+        "vivid" => (0.88, 0.0),
+        _ => (0.48, 10.0) // "balanced"
+    };
+
+    public double GetEffectiveWallpaperOpacity() =>
+        Math.Clamp(WallpaperOpacity ?? PresetValues(WallpaperStyle).Opacity, 0.05, 0.95);
+
+    public double GetEffectiveWallpaperBlur() =>
+        Math.Clamp(WallpaperBlur ?? PresetValues(WallpaperStyle).Blur, 0.0, 32.0);
+
+    public void ApplyWallpaperPreset(string preset)
+    {
+        WallpaperStyle = preset;
+        var (op, bl) = PresetValues(preset);
+        WallpaperOpacity = op;
+        WallpaperBlur = bl;
+    }
+
+    public string MatchingWallpaperPreset()
+    {
+        var op = GetEffectiveWallpaperOpacity();
+        var bl = GetEffectiveWallpaperBlur();
+        foreach (var k in new[] { "frosted", "balanced", "clear", "vivid" })
+        {
+            var (po, pb) = PresetValues(k);
+            if (Math.Abs(op - po) <= 0.025 && Math.Abs(bl - pb) <= 1.5)
+                return k;
+        }
+        return "custom";
+    }
 
     public (double Width, double Height) GetCompactDimensions() => CompactSizePreset switch
     {

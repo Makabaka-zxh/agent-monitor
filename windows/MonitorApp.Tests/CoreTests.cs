@@ -375,4 +375,33 @@ public class CoreTests
             new SessionAnswerPayloadDto { QuestionId = "q2", Choices = [], Text = "webhook" }
         ]));
     }
+
+    [Fact]
+    public void WallpaperSteplessSettings_SupportPresetsClampingAndCustomSliderValues()
+    {
+        var ui = new LocalUiSettings();
+        Assert.Equal("balanced", ui.MatchingWallpaperPreset());
+        Assert.Equal(0.48, ui.GetEffectiveWallpaperOpacity(), 3);
+        Assert.Equal(10.0, ui.GetEffectiveWallpaperBlur(), 3);
+
+        ui.ApplyWallpaperPreset("vivid");
+        Assert.Equal("vivid", ui.MatchingWallpaperPreset());
+        Assert.Equal(0.88, ui.GetEffectiveWallpaperOpacity(), 3);
+        Assert.Equal(0.0, ui.GetEffectiveWallpaperBlur(), 3);
+
+        ui.WallpaperOpacity = 0.61;
+        ui.WallpaperBlur = 14.5;
+        Assert.Equal("custom", ui.MatchingWallpaperPreset());
+
+        ui.WallpaperOpacity = 5.0;
+        ui.WallpaperBlur = -8.0;
+        Assert.Equal(0.95, ui.GetEffectiveWallpaperOpacity(), 3);
+        Assert.Equal(0.0, ui.GetEffectiveWallpaperBlur(), 3);
+
+        var lowOpacityVeil = UiKit.ComputeWallpaperVeilAlpha(0.10, dark: false);
+        var midOpacityVeil = UiKit.ComputeWallpaperVeilAlpha(0.50, dark: false);
+        var highOpacityVeil = UiKit.ComputeWallpaperVeilAlpha(0.90, dark: false);
+        Assert.True(lowOpacityVeil > midOpacityVeil);
+        Assert.True(midOpacityVeil > highOpacityVeil);
+    }
 }

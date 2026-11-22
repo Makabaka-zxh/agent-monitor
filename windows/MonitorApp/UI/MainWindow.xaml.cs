@@ -34,6 +34,7 @@ public partial class MainWindow : Window
     private BitmapSource? _customWallpaper;
     private BingWallpaperInfo? _bingInfo;
     private bool _bingFetching;
+    private double _accountScrollOffset;
 
     private bool _editingServer;
     private string _serverDraft = "";
@@ -132,7 +133,7 @@ public partial class MainWindow : Window
         };
     }
 
-    private void SyncTheme(bool applyDwm = true)
+    private void SyncTheme(bool applyDwm = true, bool rebuildBackdrop = true)
     {
         var ui = _controller.ReadUiSettings();
         var dark = ui.ThemeMode switch
@@ -154,7 +155,17 @@ public partial class MainWindow : Window
             activeWp = _bingInfo?.Image;
         }
 
-        UiKit.ApplyTheme(dark, ui.BackgroundMode, ui.WallpaperStyle, activeWp);
+        UiKit.ApplyTheme(
+            dark,
+            ui.BackgroundMode,
+            ui.WallpaperStyle,
+            activeWp,
+            ui.GetEffectiveWallpaperOpacity(),
+            ui.GetEffectiveWallpaperBlur());
+
+        if (rebuildBackdrop && BackdropHost is not null)
+            UiKit.PopulateBackdrop(BackdropHost, compact: _compactMode);
+
         if (applyDwm)
             _dwmBackdropActive = DwmInterop.ApplyWindowStyling(this, dark, transientAcrylic: _compactMode);
         Background = _dwmBackdropActive ? UiKit.MicaCanvasBrush : UiKit.CanvasBrush;
@@ -233,8 +244,7 @@ public partial class MainWindow : Window
     private void RebuildTitleBar()
     {
         TitleBarHost.Background = UiKit.GlassHeaderBrush;
-        TitleBarHost.BorderBrush = UiKit.GlassSubtleRimBrush;
-        TitleBarHost.BorderThickness = new Thickness(0, 0, 0, 1);
+        TitleBarHost.BorderThickness = new Thickness(0);
 
         var dock = new DockPanel { LastChildFill = true };
 
@@ -243,7 +253,7 @@ public partial class MainWindow : Window
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(_compactMode ? 12 : 16, 0, 0, 0)
+            Margin = new Thickness(_compactMode ? 12 : 18, 0, 0, 0)
         };
         left.Children.Add(UiKit.BrandImage("app", _compactMode ? 18 : 19));
         left.Children.Add(new TextBlock
@@ -254,42 +264,49 @@ public partial class MainWindow : Window
             FontWeight = FontWeights.SemiBold,
             Foreground = UiKit.TextBrush,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(7, 0, 0, 0)
+            Margin = new Thickness(7.5, 0, 0, 0)
         });
 
         if (_compactMode && _controller.Connected)
         {
             var online = _controller.IsFresh && _controller.OnlineDeviceCount > 0;
-            var badge = new StackPanel
+            var badge = new Border
             {
-                Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 0)
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(7, 2, 7, 2),
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
             };
-            badge.Children.Add(new Border
+            var badgeRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            badgeRow.Children.Add(new Border
             {
-                Width = 6,
-                Height = 6,
+                Width = 5.5,
+                Height = 5.5,
                 CornerRadius = new CornerRadius(3),
                 Background = online ? UiKit.GreenBrush : UiKit.MutedBrush,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 4, 0)
+                Margin = new Thickness(0, 0, 4.5, 0)
             });
-            badge.Children.Add(new TextBlock
+            badgeRow.Children.Add(new TextBlock
             {
                 Text = _controller.IsFresh ? $"{_controller.OnlineDeviceCount} 在线" : "待同步",
                 FontFamily = UiKit.AppFont,
-                FontSize = 11,
+                FontSize = 10.5,
+                FontWeight = FontWeights.Medium,
                 Foreground = UiKit.MutedBrush,
                 VerticalAlignment = VerticalAlignment.Center
             });
+            badge.Child = badgeRow;
             left.Children.Add(badge);
         }
 
         DockPanel.SetDock(left, Dock.Left);
         dock.Children.Add(left);
 
-        // Right: Sleek Micro Controls + Native Caption Buttons
+        // Right: Cohesive Glass Pill Action Cluster + Native Caption Buttons
         var right = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -303,8 +320,7 @@ public partial class MainWindow : Window
             var quickRow = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, _compactMode ? 2 : 6, 0)
+                VerticalAlignment = VerticalAlignment.Center
             };
 
             if (_compactMode)
@@ -313,12 +329,12 @@ public partial class MainWindow : Window
                 {
                     Topmost = !Topmost;
                     RebuildTitleBar();
-                }, selected: Topmost, boxSize: 27, iconSize: 14.5);
+                }, selected: Topmost, boxSize: 26, iconSize: 14);
                 pinBtn.Margin = new Thickness(0, 0, 1.5, 0);
                 quickRow.Children.Add(pinBtn);
 
                 var cfgBtn = UiKit.IconButton("settings", "调整小窗尺寸与显示内容", () =>
-                    Dialogs.ShowCompactWindowSettings(this, _controller, ApplyCompactSettingsLive), boxSize: 27, iconSize: 14.5);
+                    Dialogs.ShowCompactWindowSettings(this, _controller, ApplyCompactSettingsLive), boxSize: 26, iconSize: 14);
                 cfgBtn.Margin = new Thickness(0, 0, 1.5, 0);
                 quickRow.Children.Add(cfgBtn);
 
@@ -326,31 +342,44 @@ public partial class MainWindow : Window
                 {
                     await _controller.RefreshWorkbenchAsync();
                     await _controller.RefreshUsageAsync();
-                }, boxSize: 27, iconSize: 14.5);
+                }, boxSize: 26, iconSize: 14);
                 refBtn.Margin = new Thickness(0, 0, 1.5, 0);
                 quickRow.Children.Add(refBtn);
 
-                var expandBtn = UiKit.IconButton("mini", "展开完整工作台", ToggleCompactMode, boxSize: 27, iconSize: 14.5);
+                var expandBtn = UiKit.IconButton("mini", "展开完整工作台", ToggleCompactMode, boxSize: 26, iconSize: 14);
                 quickRow.Children.Add(expandBtn);
             }
             else
             {
-                var miniBtn = UiKit.IconButton("mini", "切换桌面精简小窗", ToggleCompactMode, boxSize: 30, iconSize: 15.5);
-                miniBtn.Margin = new Thickness(0, 0, 3, 0);
+                var miniBtn = UiKit.IconButton("mini", "切换桌面精简小窗", ToggleCompactMode, boxSize: 27, iconSize: 14.5);
+                miniBtn.Margin = new Thickness(0, 0, 2, 0);
                 quickRow.Children.Add(miniBtn);
 
-                var refBtn = UiKit.IconButton("refresh", "立即同步刷新", async () =>
+                var refBtn = UiKit.IconButton("refresh", "立即同步刷新 (F5)", async () =>
                 {
                     await _controller.RefreshWorkbenchAsync();
                     if (_page == NavPage.Usage) await _controller.RefreshUsageAsync();
                     if (_page == NavPage.Account) await _controller.RefreshAccountAsync();
-                }, boxSize: 30, iconSize: 15.5);
-                refBtn.Margin = new Thickness(0, 0, 3, 0);
+                }, boxSize: 27, iconSize: 14.5);
+                refBtn.Margin = new Thickness(0, 0, 2, 0);
                 quickRow.Children.Add(refBtn);
 
-                quickRow.Children.Add(UiKit.IconButton("help", "查看当前页面说明", ShowCurrentPageHelp, boxSize: 30, iconSize: 15.5));
+                quickRow.Children.Add(UiKit.IconButton("help", "查看当前页面说明", ShowCurrentPageHelp, boxSize: 27, iconSize: 14.5));
             }
-            right.Children.Add(quickRow);
+
+            var quickCapsule = new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9.5),
+                Padding = new Thickness(2.5, 2, 2.5, 2),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, _compactMode ? 4 : 8, 0),
+                SnapsToDevicePixels = true,
+                Child = quickRow
+            };
+            right.Children.Add(quickCapsule);
         }
 
         var capWidth = _compactMode ? 34.0 : 44.0;
@@ -804,7 +833,7 @@ public partial class MainWindow : Window
 
         cardStack.Children.Add(UiKit.ElevatedGlass(inner, 32, 24));
         outer.Children.Add(cardStack);
-        return UiKit.AmbientStage(outer);
+        return outer;
     }
 
     // ==================== LIQUID GLASS DESKTOP HUD (COMPACT MINI-WINDOW) ====================
@@ -1351,7 +1380,7 @@ public partial class MainWindow : Window
 
         scroll.Content = bodyStack;
         hudDock.Children.Add(scroll);
-        return UiKit.AmbientStage(hudDock, compact: true);
+        return hudDock;
     }
 
     private (string Tool, string Brand, UsageQuotaDto Quota)? FindLowestQuota(DateTimeOffset now)
@@ -1396,7 +1425,7 @@ public partial class MainWindow : Window
         sidebarDock.Children.Add(_sidebarNavHost);
 
         var floatingRail = UiKit.ElevatedGlass(sidebarDock, padding: 10, radius: 18, fill: UiKit.GlassRailBrush);
-        floatingRail.Margin = new Thickness(12, 10, 6, 12);
+        floatingRail.Margin = new Thickness(12, 6, 6, 12);
         Grid.SetColumn(floatingRail, 0);
         grid.Children.Add(floatingRail);
 
@@ -1413,7 +1442,7 @@ public partial class MainWindow : Window
             grid.Children.Add(_pageBodyHost);
         }
 
-        return UiKit.AmbientStage(grid);
+        return grid;
     }
 
     private void UpdateSidebarState()
@@ -1421,6 +1450,13 @@ public partial class MainWindow : Window
         if (_sidebarNavHost is not null)
         {
             _sidebarNavHost.Children.Clear();
+            var activeTaskCount = _controller.IsFresh
+                ? _controller.Tasks.Count(t => !t.Archived && t.Stale != true && t.EffectiveStatus is "running" or "waiting" or "error")
+                : 0;
+            var hasWaitingTask = _controller.IsFresh
+                && _controller.Tasks.Any(t => !t.Archived && t.Stale != true && t.EffectiveStatus == "waiting");
+            var onlineDevCount = _controller.IsFresh ? _controller.OnlineDeviceCount : 0;
+
             foreach (var (nav, glyph, label) in new[]
                      {
                          (NavPage.Tasks, "tasks", "任务"),
@@ -1431,6 +1467,34 @@ public partial class MainWindow : Window
             {
                 var active = _page == nav;
                 var ink = active ? UiKit.AccentBrush : UiKit.TextBrush;
+                var itemDock = new DockPanel { LastChildFill = true };
+
+                var badgeCount = nav == NavPage.Tasks ? activeTaskCount : nav == NavPage.Devices ? onlineDevCount : 0;
+                if (badgeCount > 0)
+                {
+                    var isAttention = nav == NavPage.Tasks && hasWaitingTask;
+                    var badgePill = new Border
+                    {
+                        Background = isAttention ? UiKit.WarningBrush : UiKit.GlassTrackBrush,
+                        BorderBrush = isAttention ? Brushes.Transparent : UiKit.GlassSubtleRimBrush,
+                        BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(8),
+                        Padding = new Thickness(6.5, 1.5, 6.5, 1.5),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(6, 0, 0, 0),
+                        Child = new TextBlock
+                        {
+                            Text = badgeCount.ToString(),
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 11,
+                            FontWeight = FontWeights.SemiBold,
+                            Foreground = isAttention ? UiKit.OnAccentBrush : (active ? UiKit.AccentBrush : UiKit.MutedBrush)
+                        }
+                    };
+                    DockPanel.SetDock(badgePill, Dock.Right);
+                    itemDock.Children.Add(badgePill);
+                }
+
                 var itemGrid = new Grid();
                 if (active)
                 {
@@ -1458,6 +1522,7 @@ public partial class MainWindow : Window
                     VerticalAlignment = VerticalAlignment.Center
                 });
                 itemGrid.Children.Add(row);
+                itemDock.Children.Add(itemGrid);
 
                 var bg = active ? UiKit.GlassTrayBrush : Brushes.Transparent;
                 var rim = active ? UiKit.GlassTrayRimBrush : Brushes.Transparent;
@@ -1470,7 +1535,7 @@ public partial class MainWindow : Window
                     Padding = new Thickness(12, 9.5, 12, 9.5),
                     Margin = new Thickness(0, 0, 0, 4),
                     SnapsToDevicePixels = true,
-                    Child = itemGrid
+                    Child = itemDock
                 };
                 var target = nav;
                 var btn = UiKit.BareButton(box, () => SwitchPage(target));
@@ -1484,9 +1549,15 @@ public partial class MainWindow : Window
         }
         if (_sidebarOnlineText is not null)
         {
-            _sidebarOnlineText.Text = _controller.IsFresh
+            var userLabel = _controller.Account?.User?.DisplayOrUsername;
+            var onlinePart = _controller.IsFresh
                 ? $"● {_controller.OnlineDeviceCount} 台在线"
                 : "○ 连接待更新";
+            _sidebarOnlineText.Text = string.IsNullOrWhiteSpace(userLabel)
+                ? onlinePart
+                : $"{onlinePart} · {userLabel}";
+            _sidebarOnlineText.TextTrimming = TextTrimming.CharacterEllipsis;
+            _sidebarOnlineText.TextWrapping = TextWrapping.NoWrap;
             _sidebarOnlineText.Foreground = _controller.IsFresh ? UiKit.GreenBrush : UiKit.MutedBrush;
         }
     }
@@ -1598,7 +1669,7 @@ public partial class MainWindow : Window
         Grid.SetColumn(leftPane, 0);
         split.Children.Add(leftPane);
 
-        var divider = new Border { Background = UiKit.GlassSubtleRimBrush, Margin = new Thickness(0, 14, 0, 14), Opacity = 0.7 };
+        var divider = new Border { Background = UiKit.SplitDividerBrush, Margin = new Thickness(0, 12, 0, 14) };
         Grid.SetColumn(divider, 1);
         split.Children.Add(divider);
 
@@ -1721,13 +1792,31 @@ public partial class MainWindow : Window
                 foreach (var task in visible)
                 {
                     var isSelected = task.Id == _selectedTaskId;
+                    var isWaiting = _controller.IsFresh && task.Stale != true && task.EffectiveStatus == "waiting";
                     var col = new StackPanel();
                     col.Children.Add(UiKit.TaskIdentityBadge(task.Tool, task.DeviceName ?? "电脑", 15));
 
                     var titleBlock = UiKit.Heading(task.Title, 14.5);
                     titleBlock.Margin = new Thickness(0, 6, 0, 6);
                     col.Children.Add(titleBlock);
-                    col.Children.Add(BuildStatusDotRow(task));
+
+                    var statusRow = BuildStatusDotRow(task);
+                    if (!string.IsNullOrWhiteSpace(task.Project))
+                    {
+                        var proj = Path.GetFileName(task.Project!.TrimEnd('/', '\\'));
+                        if (string.IsNullOrWhiteSpace(proj)) proj = task.Project.Trim();
+                        statusRow.Children.Add(new TextBlock
+                        {
+                            Text = $" · {proj}",
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 11.5,
+                            Foreground = UiKit.MutedBrush,
+                            TextTrimming = TextTrimming.CharacterEllipsis,
+                            MaxWidth = 145,
+                            VerticalAlignment = VerticalAlignment.Center
+                        });
+                    }
+                    col.Children.Add(statusRow);
 
                     var cardContent = new Grid();
                     if (isSelected)
@@ -1743,10 +1832,11 @@ public partial class MainWindow : Window
                     }
                     cardContent.Children.Add(col);
 
+                    var defaultBorder = isSelected ? UiKit.AccentBrush : isWaiting ? UiKit.WarningBrush : UiKit.GlassRimBrush;
                     var box = new Border
                     {
                         Background = isSelected ? UiKit.GlassSelectedCardBrush : UiKit.GlassCardBrush,
-                        BorderBrush = isSelected ? UiKit.AccentBrush : UiKit.GlassRimBrush,
+                        BorderBrush = defaultBorder,
                         BorderThickness = new Thickness(1),
                         CornerRadius = new CornerRadius(15),
                         Padding = new Thickness(15, 12.5, 15, 12.5),
@@ -1775,8 +1865,16 @@ public partial class MainWindow : Window
                     var btn = UiKit.BareButton(box, () => SelectTask(captured));
                     if (!isSelected)
                     {
-                        btn.MouseEnter += (_, _) => box.Background = UiKit.GlassCardHoverBrush;
-                        btn.MouseLeave += (_, _) => box.Background = UiKit.GlassCardBrush;
+                        btn.MouseEnter += (_, _) =>
+                        {
+                            box.Background = UiKit.GlassCardHoverBrush;
+                            box.BorderBrush = isWaiting ? UiKit.WarningBrush : UiKit.AccentBrush;
+                        };
+                        btn.MouseLeave += (_, _) =>
+                        {
+                            box.Background = UiKit.GlassCardBrush;
+                            box.BorderBrush = defaultBorder;
+                        };
                     }
                     _taskListHost.Children.Add(btn);
                 }
@@ -1793,15 +1891,61 @@ public partial class MainWindow : Window
             _replySendBtn = null;
             if (_taskDetailRightHost is not null)
             {
-                var emptyRight = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-                emptyRight.Children.Add(new MonitorIcon("tasks", UiKit.MutedBrush, 36) { Margin = new Thickness(0, 0, 0, 12) });
-                var t1 = UiKit.Heading("选择一个任务", 18);
+                var emptyCardInner = new StackPanel
+                {
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    MaxWidth = 360
+                };
+                var iconRing = new Border
+                {
+                    Width = 54,
+                    Height = 54,
+                    CornerRadius = new CornerRadius(16),
+                    Background = UiKit.GlassTrackBrush,
+                    BorderBrush = UiKit.GlassSubtleRimBrush,
+                    BorderThickness = new Thickness(1),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 0, 0, 14),
+                    Child = new MonitorIcon("tasks", UiKit.AccentBrush, 24)
+                };
+                emptyCardInner.Children.Add(iconRing);
+
+                var t1 = UiKit.Heading("选择一个任务", 19);
                 t1.HorizontalAlignment = HorizontalAlignment.Center;
-                emptyRight.Children.Add(t1);
-                var t2 = UiKit.Body("查看最终结果、下载交付文件，或继续发送回复", 13.5, UiKit.MutedBrush);
-                t2.Margin = new Thickness(0, 6, 0, 0);
-                emptyRight.Children.Add(t2);
-                _taskDetailRightHost.Content = emptyRight;
+                emptyCardInner.Children.Add(t1);
+
+                var t2 = UiKit.Body("在左侧点选任意电脑会话，即可查看最终结果、下载交付附件、回答选择题或继续发送指令。", 13, UiKit.MutedBrush);
+                t2.TextAlignment = TextAlignment.Center;
+                t2.Margin = new Thickness(0, 7, 0, 16);
+                emptyCardInner.Children.Add(t2);
+
+                var kbdRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+                foreach (var hint in new[] { "Ctrl + F 搜索任务", "F5 立即刷新" })
+                {
+                    kbdRow.Children.Add(new Border
+                    {
+                        Background = UiKit.GlassTrackBrush,
+                        BorderBrush = UiKit.GlassSubtleRimBrush,
+                        BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(7),
+                        Padding = new Thickness(9, 4, 9, 4),
+                        Margin = new Thickness(4, 0, 4, 0),
+                        Child = new TextBlock
+                        {
+                            Text = hint,
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 11.5,
+                            Foreground = UiKit.MutedBrush
+                        }
+                    });
+                }
+                emptyCardInner.Children.Add(kbdRow);
+
+                var emptyGlass = UiKit.ElevatedGlass(emptyCardInner, 28, 22);
+                emptyGlass.HorizontalAlignment = HorizontalAlignment.Center;
+                emptyGlass.VerticalAlignment = VerticalAlignment.Center;
+                emptyGlass.Margin = new Thickness(32);
+                _taskDetailRightHost.Content = emptyGlass;
             }
             return;
         }
@@ -2118,11 +2262,26 @@ public partial class MainWindow : Window
         // Final Result Card
         var resStack = new StackPanel();
         var resHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
-        resHeader.Children.Add(UiKit.Heading("最终结果", 18));
         var reloadResBtn = UiKit.IconButton("refresh", "刷新最终结果", async () => await _taskDetail.LoadResultAsync(true), enabled: !_taskDetail.ResultLoading);
         DockPanel.SetDock(reloadResBtn, Dock.Right);
         reloadResBtn.HorizontalAlignment = HorizontalAlignment.Right;
         resHeader.Children.Add(reloadResBtn);
+
+        var resLeftTitle = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        resLeftTitle.Children.Add(UiKit.Heading("最终结果", 18));
+        if (!string.IsNullOrEmpty(_taskDetail.Result?.CompletedAt))
+        {
+            resLeftTitle.Children.Add(new TextBlock
+            {
+                Text = " · " + UsageFormatting.RelativeTime(_taskDetail.Result.CompletedAt),
+                FontFamily = UiKit.AppFont,
+                FontSize = 12,
+                Foreground = UiKit.MutedBrush,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 2, 0, 0)
+            });
+        }
+        resHeader.Children.Add(resLeftTitle);
         resStack.Children.Add(resHeader);
 
         if (_controller.SyncOutput && _taskDetail.Result is { Available: true, Text: { } resultText } resDto)
@@ -2160,7 +2319,18 @@ public partial class MainWindow : Window
             }
 
             var actionRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
-            actionRow.Children.Add(UiKit.SecondaryButton("复制", () => Clipboard.SetText(resultText), glyph: "copy"));
+            Button? copyBtn = null;
+            copyBtn = UiKit.SecondaryButton("复制", async () =>
+            {
+                try { Clipboard.SetText(resultText); } catch { return; }
+                if (copyBtn is not null)
+                {
+                    UiKit.SetButtonState(copyBtn, "已复制", true, primary: false);
+                    await Task.Delay(1400);
+                    UiKit.SetButtonState(copyBtn, "复制", true, primary: false);
+                }
+            }, glyph: "copy");
+            actionRow.Children.Add(copyBtn);
             var saveTxtBtn = UiKit.SecondaryButton("保存 TXT", async () =>
             {
                 var bytes = await _taskDetail.DownloadTxtBytesAsync();
@@ -2852,7 +3022,8 @@ public partial class MainWindow : Window
             {
                 var p = providers.FirstOrDefault(x => x.Tool == tool);
                 var card = BuildOfficialQuotaCard(tool, p, checks, now);
-                card.Width = 340;
+                card.Width = 342;
+                card.VerticalAlignment = VerticalAlignment.Top;
                 card.Margin = new Thickness(0, 0, 16, 16);
                 qWrap.Children.Add(card);
             }
@@ -2869,7 +3040,8 @@ public partial class MainWindow : Window
         {
             var p = providers.FirstOrDefault(x => x.Tool == tool);
             var card = BuildLocalTokenProviderCard(tool, p, _controller.Usage?.Day);
-            card.Width = 340;
+            card.Width = 342;
+            card.VerticalAlignment = VerticalAlignment.Top;
             card.Margin = new Thickness(0, 0, 16, 16);
             lWrap.Children.Add(card);
         }
@@ -3129,37 +3301,57 @@ public partial class MainWindow : Window
         navRow.Children.Add(weekBtn);
         col.Children.Add(navRow);
 
-        // Mon-Sun 7-day interactive bar chart
+        // Mon-Sun 7-day interactive bar chart with subtle slot tracks & hover highlight
         var weekDates = Enumerable.Range(0, 7).Select(i => weekMonday.AddDays(i)).ToList();
         var weekMax = Math.Max(1L, weekDates.Select(TokensOn).Where(v => v.HasValue).Select(v => v!.Value).DefaultIfEmpty(0L).Max());
         var weekdays = new[] { "一", "二", "三", "四", "五", "六", "日" };
+        var barAccent = tool == "claude" ? UiKit.ClaudeInkBrush : UiKit.AccentBrush;
 
-        var chartGrid = new UniformGrid { Columns = 7, Height = 108, Margin = new Thickness(0, 2, 0, 10) };
+        var chartGrid = new UniformGrid { Columns = 7, Height = 112, Margin = new Thickness(0, 2, 0, 10) };
         for (var i = 0; i < 7; i++)
         {
             var d = weekDates[i];
             var avail = d >= firstDay && d <= today;
             var isSel = d == activeDate;
             var tok = TokensOn(d);
-            var barH = tok is > 0 ? Math.Max(6.0, (tok.Value / (double)weekMax) * 68.0) : 4.0;
+            var barH = tok is > 0 ? Math.Max(7.0, (tok.Value / (double)weekMax) * 72.0) : 4.0;
 
-            var barCol = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(2.5, 0, 2.5, 0) };
-            barCol.Children.Add(new Border
+            var slotGrid = new Grid { Height = 72, Margin = new Thickness(3, 0, 3, 0) };
+            slotGrid.Children.Add(new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                CornerRadius = new CornerRadius(5),
+                Opacity = avail ? 0.55 : 0.22
+            });
+
+            var baseFill = !avail
+                ? Brushes.Transparent
+                : isSel
+                ? barAccent
+                : (tok is > 0 ? UiKit.MutedBrush : UiKit.LineBrush);
+            var baseOpacity = !avail ? 0.2 : isSel ? 1.0 : (tok is > 0 ? 0.42 : 0.55);
+
+            var fillBar = new Border
             {
                 Height = barH,
-                Background = !avail ? Brushes.Transparent : isSel ? UiKit.AccentBrush : (tok is > 0 ? UiKit.SoftBrush : UiKit.LineBrush),
-                CornerRadius = new CornerRadius(4),
-                Opacity = avail ? 1.0 : 0.25
-            });
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Background = baseFill,
+                CornerRadius = new CornerRadius(5),
+                Opacity = baseOpacity
+            };
+            slotGrid.Children.Add(fillBar);
+
+            var barCol = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom };
+            barCol.Children.Add(slotGrid);
             var wLbl = new TextBlock
             {
                 Text = weekdays[i],
                 FontFamily = UiKit.AppFont,
                 FontSize = 11,
                 FontWeight = isSel ? FontWeights.SemiBold : FontWeights.Normal,
-                Foreground = isSel ? UiKit.AccentBrush : UiKit.MutedBrush,
+                Foreground = isSel ? barAccent : UiKit.MutedBrush,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 5, 0, 0)
+                Margin = new Thickness(0, 6, 0, 0)
             };
             barCol.Children.Add(wLbl);
 
@@ -3169,12 +3361,27 @@ public partial class MainWindow : Window
                 _selectedUsageDay[capturedTool] = capturedDate;
                 RenderAll(false);
             }, enabled: avail);
+            if (avail && !isSel)
+            {
+                cellBtn.MouseEnter += (_, _) =>
+                {
+                    fillBar.Background = barAccent;
+                    fillBar.Opacity = 0.78;
+                    wLbl.Foreground = UiKit.TextBrush;
+                };
+                cellBtn.MouseLeave += (_, _) =>
+                {
+                    fillBar.Background = baseFill;
+                    fillBar.Opacity = baseOpacity;
+                    wLbl.Foreground = UiKit.MutedBrush;
+                };
+            }
             cellBtn.ToolTip = avail ? $"{UsageCalendar.FormatDay(d)}：{UsageFormatting.ExactTokens(tok)} Token" : "";
             chartGrid.Children.Add(cellBtn);
         }
         col.Children.Add(chartGrid);
 
-        // Per-Model Token Breakdown
+        // Per-Model Token Breakdown with Proportional Progress Micro-Bars
         if (dayMap.TryGetValue(activeDate, out var selectedDayDto))
         {
             var shares = UsageFormatting.ComputeModelShares(selectedDayDto);
@@ -3185,9 +3392,10 @@ public partial class MainWindow : Window
                 mHead.Margin = new Thickness(0, 0, 0, 10);
                 col.Children.Add(mHead);
 
-                foreach (var s in shares)
+                for (var idx = 0; idx < shares.Count; idx++)
                 {
-                    var itemCol = new StackPanel { Margin = new Thickness(0, 0, 0, 9) };
+                    var s = shares[idx];
+                    var itemCol = new StackPanel { Margin = new Thickness(0, 0, 0, 11) };
                     var top = new DockPanel();
                     top.Children.Add(UiKit.Body(s.DisplayName, 13));
                     var pct = new TextBlock
@@ -3195,13 +3403,31 @@ public partial class MainWindow : Window
                         Text = UsageFormatting.Percentage(s.Percent),
                         FontFamily = UiKit.AppFont,
                         FontSize = 13,
-                        FontWeight = FontWeights.Medium,
+                        FontWeight = FontWeights.SemiBold,
                         Foreground = UiKit.TextBrush
                     };
                     DockPanel.SetDock(pct, Dock.Right);
                     pct.HorizontalAlignment = HorizontalAlignment.Right;
                     top.Children.Add(pct);
                     itemCol.Children.Add(top);
+
+                    var ratio = Math.Clamp(s.Percent / 100.0, 0.02, 1.0);
+                    var shareTrack = new Grid { Height = 4.5, Margin = new Thickness(0, 4.5, 0, 4) };
+                    shareTrack.Children.Add(new Border { Background = UiKit.GlassTrackBrush, CornerRadius = new CornerRadius(2.25) });
+                    var shareGrid = new Grid();
+                    shareGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
+                    shareGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, 1.0 - ratio), GridUnitType.Star) });
+                    var shareFill = new Border
+                    {
+                        Background = barAccent,
+                        CornerRadius = new CornerRadius(2.25),
+                        Opacity = Math.Max(0.45, 1.0 - idx * 0.14)
+                    };
+                    Grid.SetColumn(shareFill, 0);
+                    shareGrid.Children.Add(shareFill);
+                    shareTrack.Children.Add(shareGrid);
+                    itemCol.Children.Add(shareTrack);
+
                     itemCol.Children.Add(UiKit.Body($"{UsageFormatting.ExactTokens(s.Tokens)} Token", 11.5, UiKit.MutedBrush));
                     col.Children.Add(itemCol);
                 }
@@ -3216,6 +3442,18 @@ public partial class MainWindow : Window
     private UIElement BuildAccountContent()
     {
         var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(28, 24, 28, 32) };
+        var savedOffset = _accountScrollOffset;
+        scroll.Loaded += (_, _) =>
+        {
+            if (savedOffset > 0)
+                scroll.ScrollToVerticalOffset(savedOffset);
+        };
+        scroll.ScrollChanged += (_, _) =>
+        {
+            if (scroll.IsLoaded)
+                _accountScrollOffset = scroll.VerticalOffset;
+        };
+
         var stack = new StackPanel { MaxWidth = 780 };
         stack.Children.Add(UiKit.Heading("我的", 24));
 
@@ -3336,14 +3574,63 @@ public partial class MainWindow : Window
 
         if (uiSettings.BackgroundMode is "bing" or "custom")
         {
-            var wpRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 2, 0, 10) };
+            var previewImageSource = uiSettings.BackgroundMode == "custom"
+                ? (_customWallpaper ??= WallpaperService.LoadCustomWallpaper())
+                : (_bingInfo ??= WallpaperService.TryReadCachedBing())?.Image;
+
+            var previewDock = new DockPanel { Margin = new Thickness(0, 2, 0, 0) };
+            if (previewImageSource is not null)
+            {
+                var thumbImg = new Image
+                {
+                    Source = previewImageSource,
+                    Stretch = Stretch.UniformToFill,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                RenderOptions.SetBitmapScalingMode(thumbImg, BitmapScalingMode.HighQuality);
+
+                var thumbFrame = new Border
+                {
+                    Width = 96,
+                    Height = 58,
+                    CornerRadius = new CornerRadius(10),
+                    BorderBrush = UiKit.GlassRimBrush,
+                    BorderThickness = new Thickness(1),
+                    Margin = new Thickness(0, 0, 14, 0),
+                    ClipToBounds = true,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = new Border
+                    {
+                        CornerRadius = new CornerRadius(9),
+                        Clip = new RectangleGeometry(new Rect(0, 0, 94, 56), 9, 9),
+                        Child = thumbImg
+                    }
+                };
+                DockPanel.SetDock(thumbFrame, Dock.Left);
+                previewDock.Children.Add(thumbFrame);
+            }
+
+            var previewInfo = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             if (uiSettings.BackgroundMode == "custom")
             {
-                wpRow.Children.Add(UiKit.SecondaryButton("更换本地图片…", PickCustomWallpaperFile, glyph: "plus"));
+                var dimText = previewImageSource is not null
+                    ? $"已启用本地自定义壁纸（{previewImageSource.PixelWidth} × {previewImageSource.PixelHeight}）"
+                    : "尚未选择本地壁纸图片";
+                previewInfo.Children.Add(UiKit.Body(dimText, 12.5));
+                var actRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+                actRow.Children.Add(UiKit.SecondaryButton("更换本地图片…", PickCustomWallpaperFile, glyph: "plus"));
+                previewInfo.Children.Add(actRow);
             }
             else
             {
-                wpRow.Children.Add(UiKit.SecondaryButton(_bingFetching ? "正在获取…" : "刷新今日壁纸",
+                var bingStatus = _bingInfo is { Image: not null } bi
+                    ? (string.IsNullOrEmpty(bi.Copyright) ? bi.Title : $"{bi.Title} — {bi.Copyright}")
+                    : (_bingFetching ? "正在拉取今日必应高清壁纸…" : "暂未读取到壁纸，检查网络后可点击刷新");
+                previewInfo.Children.Add(UiKit.Body(bingStatus, 12, UiKit.MutedBrush));
+
+                var actRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+                actRow.Children.Add(UiKit.SecondaryButton(_bingFetching ? "正在获取…" : "刷新今日壁纸",
                     async () => await RefreshBingWallpaperIfNeededAsync(force: true),
                     enabled: !_bingFetching, glyph: "refresh"));
                 if (_bingInfo is { Link.Length: > 0 } bInfo)
@@ -3351,65 +3638,152 @@ public partial class MainWindow : Window
                     var linkBtn = UiKit.LinkButton("查看 Bing 图片详情", () => MonitorController.OpenBrowserUrl(bInfo.Link));
                     linkBtn.VerticalAlignment = VerticalAlignment.Center;
                     linkBtn.Margin = new Thickness(12, 0, 0, 0);
-                    wpRow.Children.Add(linkBtn);
+                    actRow.Children.Add(linkBtn);
                 }
+                previewInfo.Children.Add(actRow);
             }
-            appStack.Children.Add(wpRow);
+            previewDock.Children.Add(previewInfo);
 
-            if (uiSettings.BackgroundMode == "bing")
+            appStack.Children.Add(new Border
             {
-                var bingStatus = _bingInfo is { Image: not null } bi
-                    ? (string.IsNullOrEmpty(bi.Copyright) ? $"当前壁纸：{bi.Title}" : $"{bi.Title} — {bi.Copyright}")
-                    : (_bingFetching ? "正在拉取今日必应高清壁纸…" : "暂未读取到壁纸，检查网络后可点击刷新");
-                var creditTxt = UiKit.Body(bingStatus, 12, UiKit.MutedBrush);
-                creditTxt.Margin = new Thickness(0, 0, 0, 10);
-                appStack.Children.Add(creditTxt);
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 2, 0, 12),
+                SnapsToDevicePixels = true,
+                Child = previewDock
+            });
+
+            var presetLbl = UiKit.Body("快速预设（点选预设或下方无极微调）", 12.5, UiKit.MutedBrush);
+            presetLbl.Margin = new Thickness(0, 0, 0, 6);
+            appStack.Children.Add(presetLbl);
+
+            var liveOp = uiSettings.GetEffectiveWallpaperOpacity();
+            var liveBl = uiSettings.GetEffectiveWallpaperBlur();
+
+            Action<double>? setOpSlider = null;
+            Action<double>? setBlSlider = null;
+            var opBadge = new TextBlock
+            {
+                Text = $"{Math.Round(liveOp * 100):0}%",
+                FontFamily = UiKit.AppFont,
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.AccentBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var blBadge = new TextBlock
+            {
+                Text = liveBl < 0.5 ? "无虚化" : $"{liveBl:0} px",
+                FontFamily = UiKit.AppFont,
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.AccentBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var presetHost = new ContentControl { Margin = new Thickness(0, 0, 0, 12) };
+            void RebuildPresetControl(string matchedKey)
+            {
+                var seg = UiKit.SegmentedControl(
+                    new[]
+                    {
+                        ("frosted", "轻雾隐约"),
+                        ("balanced", "均衡沉浸"),
+                        ("clear", "晶莹通透"),
+                        ("vivid", "原画直显")
+                    }.Select(opt =>
+                    {
+                        var k = opt.Item1;
+                        return (opt.Item2, matchedKey == k, (Action)(() =>
+                        {
+                            var next = _controller.ReadUiSettings();
+                            next.ApplyWallpaperPreset(k);
+                            _controller.SaveUiSettings(next);
+                            liveOp = next.GetEffectiveWallpaperOpacity();
+                            liveBl = next.GetEffectiveWallpaperBlur();
+                            opBadge.Text = $"{Math.Round(liveOp * 100):0}%";
+                            blBadge.Text = liveBl < 0.5 ? "无虚化" : $"{liveBl:0} px";
+                            setOpSlider?.Invoke(liveOp);
+                            setBlSlider?.Invoke(liveBl);
+                            UiKit.SetWallpaperVisualLive(liveOp, liveBl);
+                            SyncTheme(applyDwm: false, rebuildBackdrop: false);
+                            RenderAll(forceShell: true);
+                        }));
+                    }).ToList(),
+                    equalColumns: false);
+                seg.MaxWidth = 480;
+                seg.HorizontalAlignment = HorizontalAlignment.Left;
+                presetHost.Content = seg;
+            }
+            RebuildPresetControl(uiSettings.MatchingWallpaperPreset());
+            appStack.Children.Add(presetHost);
+
+            void CommitSteplessWallpaper()
+            {
+                var next = _controller.ReadUiSettings();
+                next.WallpaperOpacity = liveOp;
+                next.WallpaperBlur = liveBl;
+                next.WallpaperStyle = next.MatchingWallpaperPreset();
+                _controller.SaveUiSettings(next);
+                RebuildPresetControl(next.WallpaperStyle);
+                SyncTheme(applyDwm: false, rebuildBackdrop: false);
+                RebuildTitleBar();
             }
 
-            var veilLbl = UiKit.Body("壁纸通透与液态毛玻璃磨砂度", 12.5, UiKit.MutedBrush);
-            veilLbl.Margin = new Thickness(0, 2, 0, 6);
-            appStack.Children.Add(veilLbl);
+            // Stepless Opacity Slider (5% - 95%)
+            var opHead = new DockPanel { Margin = new Thickness(0, 0, 0, 2) };
+            DockPanel.SetDock(opBadge, Dock.Right);
+            opHead.Children.Add(opBadge);
+            opHead.Children.Add(UiKit.Body("壁纸透明度（透出比例无极调节）", 12.5, UiKit.MutedBrush));
+            appStack.Children.Add(opHead);
 
-            var veilSeg = UiKit.SegmentedControl(
-                new[]
+            var (opControl, opSetter) = UiKit.SteplessSlider(0.05, 0.95, liveOp,
+                onLiveChange: val =>
                 {
-                    ("clear", "清晰通透"),
-                    ("balanced", "均衡护眼"),
-                    ("frosted", "深度磨砂")
-                }.Select(opt =>
+                    liveOp = val;
+                    opBadge.Text = $"{Math.Round(val * 100):0}%";
+                    UiKit.SetWallpaperVisualLive(liveOp, liveBl);
+                },
+                onCommit: _ => CommitSteplessWallpaper());
+            setOpSlider = opSetter;
+            opControl.Margin = new Thickness(0, 0, 0, 10);
+            appStack.Children.Add(opControl);
+
+            // Stepless Blur Slider (0 - 32 px)
+            var blHead = new DockPanel { Margin = new Thickness(0, 0, 0, 2) };
+            DockPanel.SetDock(blBadge, Dock.Right);
+            blHead.Children.Add(blBadge);
+            blHead.Children.Add(UiKit.Body("背景柔焦磨砂度（无极调节）", 12.5, UiKit.MutedBrush));
+            appStack.Children.Add(blHead);
+
+            var (blControl, blSetter) = UiKit.SteplessSlider(0.0, 32.0, liveBl,
+                onLiveChange: val =>
                 {
-                    var k = opt.Item1;
-                    return (opt.Item2, uiSettings.WallpaperStyle == k, (Action)(() =>
-                    {
-                        var next = _controller.ReadUiSettings();
-                        next.WallpaperStyle = k;
-                        _controller.SaveUiSettings(next);
-                        SyncTheme(applyDwm: false);
-                        RenderAll(forceShell: true);
-                    }));
-                }).ToList(),
-                equalColumns: false);
-            veilSeg.MaxWidth = 420;
-            veilSeg.HorizontalAlignment = HorizontalAlignment.Left;
-            veilSeg.Margin = new Thickness(0, 0, 0, 12);
-            appStack.Children.Add(veilSeg);
+                    liveBl = val;
+                    blBadge.Text = val < 0.5 ? "无虚化" : $"{val:0} px";
+                    UiKit.SetWallpaperVisualLive(liveOp, liveBl);
+                },
+                onCommit: _ => CommitSteplessWallpaper());
+            setBlSlider = blSetter;
+            blControl.Margin = new Thickness(0, 0, 0, 12);
+            appStack.Children.Add(blControl);
         }
 
-        var trayCheck = new CheckBox
-        {
-            Content = "点击右上角关闭按钮时最小化到系统托盘（保持后台额度提醒在线）",
-            Foreground = UiKit.TextBrush,
-            IsChecked = uiSettings.CloseToTray,
-            FontSize = 13.5,
-            Margin = new Thickness(0, 4, 0, 12)
-        };
-        trayCheck.Click += (_, _) =>
-        {
-            var next = _controller.ReadUiSettings();
-            next.CloseToTray = trayCheck.IsChecked == true;
-            _controller.SaveUiSettings(next);
-        };
-        appStack.Children.Add(trayCheck);
+        var trayToggle = UiKit.SettingToggleRow(
+            "关闭窗口时最小化到系统托盘",
+            "在后台静默保持连接与官方额度低余量提醒，双击托盘图标随时唤起",
+            uiSettings.CloseToTray,
+            v =>
+            {
+                var next = _controller.ReadUiSettings();
+                next.CloseToTray = v;
+                _controller.SaveUiSettings(next);
+            });
+        trayToggle.Margin = new Thickness(0, 4, 0, 14);
+        appStack.Children.Add(trayToggle);
 
         var quickBtns = new StackPanel { Orientation = Orientation.Horizontal };
         quickBtns.Children.Add(UiKit.SecondaryButton("官方额度提醒设置", () => Dialogs.ShowAlertSettings(this, _controller, OnQuotaAlertTriggered), glyph: "bell"));
@@ -3486,31 +3860,21 @@ public partial class MainWindow : Window
         miniModeSeg.Margin = new Thickness(0, 6, 0, 12);
         miniStack.Children.Add(miniModeSeg);
 
-        miniStack.Children.Add(UiKit.Body("小窗显示模块", 12.5, UiKit.MutedBrush));
+        var miniModLbl = UiKit.Body("小窗显示模块", 12.5, UiKit.MutedBrush);
+        miniModLbl.Margin = new Thickness(0, 0, 0, 8);
+        miniStack.Children.Add(miniModLbl);
 
-        CheckBox MakeMiniCheck(string label, bool val, Action<LocalUiSettings, bool> mutator)
+        void SaveMiniToggle(Action<LocalUiSettings, bool> mutator, bool v)
         {
-            var cb = new CheckBox
-            {
-                Content = label,
-                Foreground = UiKit.TextBrush,
-                IsChecked = val,
-                FontSize = 13,
-                Margin = new Thickness(0, 7, 0, 0)
-            };
-            cb.Click += (_, _) =>
-            {
-                var next = _controller.ReadUiSettings();
-                mutator(next, cb.IsChecked == true);
-                _controller.SaveUiSettings(next);
-            };
-            return cb;
+            var next = _controller.ReadUiSettings();
+            mutator(next, v);
+            _controller.SaveUiSettings(next);
         }
 
-        miniStack.Children.Add(MakeMiniCheck("显示最低官方额度进度条与重置倒计时", uiSettings.CompactShowLowestQuota, (s, v) => s.CompactShowLowestQuota = v));
-        miniStack.Children.Add(MakeMiniCheck("显示 Codex / Claude / AGY 多工具微缩速览条", uiSettings.CompactShowToolStrip, (s, v) => s.CompactShowToolStrip = v));
-        miniStack.Children.Add(MakeMiniCheck("显示今日本地已记录 Token 总量", uiSettings.CompactShowTodayTokens, (s, v) => s.CompactShowTodayTokens = v));
-        miniStack.Children.Add(MakeMiniCheck("任务行显示来源电脑、目录与会话 Token", uiSettings.CompactShowTaskMeta, (s, v) => s.CompactShowTaskMeta = v));
+        miniStack.Children.Add(UiKit.SettingToggleRow("最低官方额度与重置倒计时", "在小窗顶部优先展示剩余比例最低的官方额度进度条", uiSettings.CompactShowLowestQuota, v => SaveMiniToggle((s, val) => s.CompactShowLowestQuota = val, v)));
+        miniStack.Children.Add(UiKit.SettingToggleRow("Codex / Claude / AGY 多工具微缩速览条", "横向并排展示各工具实时剩余比例或当日用量", uiSettings.CompactShowToolStrip, v => SaveMiniToggle((s, val) => s.CompactShowToolStrip = val, v)));
+        miniStack.Children.Add(UiKit.SettingToggleRow("今日本地已记录 Token 总量", "汇总各在线电脑今日采集到的本地 Token", uiSettings.CompactShowTodayTokens, v => SaveMiniToggle((s, val) => s.CompactShowTodayTokens = val, v)));
+        miniStack.Children.Add(UiKit.SettingToggleRow("任务行显示来源电脑、目录与会话 Token", "在标准与宽展小窗中显示完整上下文", uiSettings.CompactShowTaskMeta, v => SaveMiniToggle((s, val) => s.CompactShowTaskMeta = val, v)));
 
         var miniCard = UiKit.Card(miniStack, 22);
         miniCard.Margin = new Thickness(0, 0, 0, 18);

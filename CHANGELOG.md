@@ -3,7 +3,7 @@
 ## 1.1.3 — 2026-11-22
 
 - 新增结构化选项回答与跨端待处理感知：支持电脑端 Claude Code 桌面交互会话通过 `AskUserQuestion` 钩子把单选／多选题目转发到绑定的已配对设备作答并回写 `updatedInput`；支持 Codex 运行轮次内的异步多题选择题、MCP 枚举表单及计划模式提问，以及 Antigravity 枚举显示标签映射。工作台接口按当前读取设备标记 `pending_interaction_kind`，使 Android（含桌面小组件）、Windows 与 macOS 客户端在任务运行或待命期间也能即时置顶展示「等待回答」或「等待批准」，并在选项与自定义文字之间保持互斥校验。
-- Windows 原生客户端界面质感、个性化与精简小窗升级：补齐 GPT-6.x（Astra / Sol）与未来模型的规范大写展示；全局采用 4px 窄无框自动淡出滚动条与 Windows 11 DWM Mica / Acrylic 液态玻璃双层高光边框；重构顶部筛选分段条（`EqualPaddingRowPanel`），保证各项两侧留白完全相等且永不截断文字；支持自选本地壁纸与 Bing 每日壁纸（含「通透／均衡／雾面」三档毛玻璃浓度）；精简小窗新增「胶囊微窗 / 紧凑小窗 / 标准小窗 / 宽展看板」4 档尺寸预设与显示内容自由开关。
+- Windows 原生客户端界面质感、个性化与精简小窗升级：全窗口贯通无断层液态玻璃背景与顶部高光折射边（Top Specular Sheen），壁纸支持「轻雾隐约 / 均衡沉浸 / 晶莹通透 / 原画直显」4 档预设及**壁纸透出透明度（5%–95%）与柔焦磨砂度（0–32 px）双滑块无极实时调节**，卡片随壁纸透出度自适应晶透比例；全局重绘动画胶囊开关、圆角复选／单选框、圆角悬浮提示与无边框毛玻璃模态弹窗；补齐 GPT-6.x（Astra / Sol）模型大写展示、模型占比进度条、等距分段条（`EqualPaddingRowPanel`）及 4 档精简小窗预设与内容开关。
 - 连接速度与扫码入口优化：Android「我的」页面右上角补齐与「我的电脑」一致的「扫码连接电脑」快捷入口；Android 原生客户端、Windows 桌面端与 Python 远端采集器统一复用持久 HTTPS/TLS 连接池（HTTP/2 复用与 Keep-Alive）并启用 GZip/Brotli 压缩，并行化启动首屏请求。
 
 [1.1.3 正式发行说明](https://github.com/Makabaka-zxh/agent-monitor/releases/tag/v1.1.3)

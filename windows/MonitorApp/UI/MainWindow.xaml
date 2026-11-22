@@ -18,6 +18,7 @@
     </shell:WindowChrome.WindowChrome>
     <Border x:Name="OuterFrame" BorderThickness="0">
         <Grid x:Name="WindowStageGrid">
+            <Grid x:Name="BackdropHost" IsHitTestVisible="False" ClipToBounds="True" />
             <DockPanel LastChildFill="True">
                 <Border x:Name="TitleBarHost" DockPanel.Dock="Top" Height="40" />
                 <ContentControl x:Name="RootHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />

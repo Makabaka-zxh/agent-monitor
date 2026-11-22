@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Shell;
 using Microsoft.Win32;
 using MonitorApp.Core;
 
@@ -22,14 +23,30 @@ public static class Dialogs
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize,
+            ShowInTaskbar = false,
             Background = UiKit.CanvasBrush,
             Foreground = UiKit.TextBrush,
             FontFamily = UiKit.AppFont
         };
+        WindowChrome.SetWindowChrome(win, new WindowChrome
+        {
+            CaptionHeight = 0,
+            ResizeBorderThickness = new Thickness(0),
+            GlassFrameThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            UseAeroCaptionButtons = false
+        });
         win.SourceInitialized += (_, _) =>
         {
             if (DwmInterop.ApplyWindowStyling(win, UiKit.IsDark, transientAcrylic: true))
                 win.Background = UiKit.MicaCanvasBrush;
+        };
+        win.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ButtonState == MouseButtonState.Pressed)
+            {
+                try { win.DragMove(); } catch { }
+            }
         };
         win.PreviewKeyDown += (_, e) =>
         {
@@ -42,11 +59,32 @@ public static class Dialogs
         return win;
     }
 
+    private static void PresentModal(Window win, UIElement body)
+    {
+        var shell = new Grid();
+        shell.Children.Add(body);
+        var closeBtn = UiKit.IconButton("close", "关闭 (Esc)", win.Close, boxSize: 28, iconSize: 13.5);
+        closeBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        closeBtn.VerticalAlignment = VerticalAlignment.Top;
+        closeBtn.Margin = new Thickness(0, 14, 14, 0);
+        shell.Children.Add(closeBtn);
+
+        win.Content = new Border
+        {
+            BorderBrush = UiKit.GlassRimBrush,
+            BorderThickness = new Thickness(1),
+            Child = UiKit.AmbientStage(shell, compact: true)
+        };
+        win.ShowDialog();
+    }
+
     public static void ShowMessage(Window owner, string title, string message)
     {
-        var win = CreateModal(owner, title, 430);
-        var stack = new StackPanel { Margin = new Thickness(26) };
-        stack.Children.Add(UiKit.Heading(title, 20));
+        var win = CreateModal(owner, title, 436);
+        var stack = new StackPanel { Margin = new Thickness(26, 24, 26, 24) };
+        var head = UiKit.Heading(title, 19.5);
+        head.Margin = new Thickness(0, 0, 28, 0);
+        stack.Children.Add(head);
         var scroll = new ScrollViewer
         {
             MaxHeight = 360,
@@ -58,16 +96,17 @@ public static class Dialogs
         var btn = UiKit.PrimaryButton("知道了", () => win.Close());
         btn.HorizontalAlignment = HorizontalAlignment.Right;
         stack.Children.Add(btn);
-        win.Content = stack;
-        win.ShowDialog();
+        PresentModal(win, stack);
     }
 
     public static bool Confirm(Window owner, string title, string message, string confirmLabel, bool danger = false)
     {
         var accepted = false;
-        var win = CreateModal(owner, title, 420);
-        var stack = new StackPanel { Margin = new Thickness(26) };
-        stack.Children.Add(UiKit.Heading(title, 20));
+        var win = CreateModal(owner, title, 426);
+        var stack = new StackPanel { Margin = new Thickness(26, 24, 26, 24) };
+        var head = UiKit.Heading(title, 19.5);
+        head.Margin = new Thickness(0, 0, 28, 0);
+        stack.Children.Add(head);
         var body = UiKit.Body(message, 13.5, UiKit.MutedBrush);
         body.Margin = new Thickness(0, 12, 0, 22);
         stack.Children.Add(body);
@@ -82,8 +121,7 @@ public static class Dialogs
         actions.Children.Add(okBtn);
         stack.Children.Add(actions);
 
-        win.Content = stack;
-        win.ShowDialog();
+        PresentModal(win, stack);
         return accepted;
     }
 
@@ -225,8 +263,7 @@ public static class Dialogs
         actions.Children.Add(saveBtn);
         root.Children.Add(actions);
 
-        win.Content = root;
-        win.ShowDialog();
+        PresentModal(win, root);
     }
 
     public static void ShowCollectorSettings(Window owner, MonitorController controller)
@@ -274,8 +311,7 @@ public static class Dialogs
         actions.Children.Add(saveBtn);
         root.Children.Add(actions);
 
-        win.Content = root;
-        win.ShowDialog();
+        PresentModal(win, root);
     }
 
     public static void ShowAlertSettings(Window owner, MonitorController controller, Action<string, string>? onTestAlert = null)
@@ -332,8 +368,7 @@ public static class Dialogs
         actions.Children.Add(saveBtn);
         root.Children.Add(actions);
 
-        win.Content = root;
-        win.ShowDialog();
+        PresentModal(win, root);
     }
 
     public static void ShowProfileEditor(Window owner, MonitorController controller)
@@ -425,8 +460,7 @@ public static class Dialogs
         actions.Children.Add(saveBtn);
         root.Children.Add(actions);
 
-        win.Content = root;
-        win.ShowDialog();
+        PresentModal(win, root);
     }
 
     public static void ShowAddComputerDialog(Window owner, MonitorController controller)
@@ -480,20 +514,21 @@ public static class Dialogs
         actions.Children.Add(doneBtn);
         root.Children.Add(actions);
 
-        win.Content = root;
-        win.ShowDialog();
+        PresentModal(win, root);
     }
 
     public static void ShowCompactWindowSettings(Window owner, MonitorController controller, Action onSettingsChanged)
     {
-        var win = CreateModal(owner, "精简小窗设置", 430);
+        var win = CreateModal(owner, "精简小窗设置", 448);
         var host = new ContentControl();
 
         void RebuildDialog()
         {
             var current = controller.ReadUiSettings();
-            var root = new StackPanel { Margin = new Thickness(24) };
-            root.Children.Add(UiKit.Heading("精简小窗定制", 20));
+            var root = new StackPanel { Margin = new Thickness(24, 22, 24, 24) };
+            var head = UiKit.Heading("精简小窗定制", 20);
+            head.Margin = new Thickness(0, 0, 28, 0);
+            root.Children.Add(head);
             var desc = UiKit.Body("实时调整小窗尺寸预设与显示模块，改动立即生效。", 12.5, UiKit.MutedBrush);
             desc.Margin = new Thickness(0, 6, 0, 14);
             root.Children.Add(desc);
@@ -543,44 +578,33 @@ public static class Dialogs
             modeSeg.Margin = new Thickness(0, 6, 0, 14);
             root.Children.Add(modeSeg);
 
-            root.Children.Add(UiKit.Body("小窗显示内容", 12.5, UiKit.MutedBrush));
+            var modLbl = UiKit.Body("小窗显示内容", 12.5, UiKit.MutedBrush);
+            modLbl.Margin = new Thickness(0, 0, 0, 7);
+            root.Children.Add(modLbl);
 
-            CheckBox MakeToggle(string label, bool isChecked, Action<LocalUiSettings, bool> setter)
+            void SaveToggle(Action<LocalUiSettings, bool> setter, bool v)
             {
-                var cb = new CheckBox
-                {
-                    Content = label,
-                    Foreground = UiKit.TextBrush,
-                    IsChecked = isChecked,
-                    FontSize = 13,
-                    Margin = new Thickness(0, 7, 0, 0)
-                };
-                cb.Click += (_, _) =>
-                {
-                    var next = controller.ReadUiSettings();
-                    setter(next, cb.IsChecked == true);
-                    controller.SaveUiSettings(next);
-                    onSettingsChanged();
-                };
-                return cb;
+                var next = controller.ReadUiSettings();
+                setter(next, v);
+                controller.SaveUiSettings(next);
+                onSettingsChanged();
             }
 
-            root.Children.Add(MakeToggle("显示最低官方额度进度条与重置倒计时", current.CompactShowLowestQuota, (s, v) => s.CompactShowLowestQuota = v));
-            root.Children.Add(MakeToggle("显示 Codex / Claude / AGY 多工具速览条", current.CompactShowToolStrip, (s, v) => s.CompactShowToolStrip = v));
-            root.Children.Add(MakeToggle("显示今日本地已记录 Token 总量", current.CompactShowTodayTokens, (s, v) => s.CompactShowTodayTokens = v));
-            root.Children.Add(MakeToggle("任务卡片显示来源电脑、目录与会话 Token", current.CompactShowTaskMeta, (s, v) => s.CompactShowTaskMeta = v));
+            root.Children.Add(UiKit.SettingToggleRow("最低官方额度与重置倒计时", "顶部优先展示当前最紧迫的额度窗口", current.CompactShowLowestQuota, v => SaveToggle((s, val) => s.CompactShowLowestQuota = val, v)));
+            root.Children.Add(UiKit.SettingToggleRow("多工具微缩速览条", "同排对比 Codex / Claude / AGY 读数", current.CompactShowToolStrip, v => SaveToggle((s, val) => s.CompactShowToolStrip = val, v)));
+            root.Children.Add(UiKit.SettingToggleRow("今日本地 Token 总量", "显示今日各电脑累计本地记录", current.CompactShowTodayTokens, v => SaveToggle((s, val) => s.CompactShowTodayTokens = val, v)));
+            root.Children.Add(UiKit.SettingToggleRow("任务行来源电脑与目录", "展开显示会话所在电脑、文件夹与耗时", current.CompactShowTaskMeta, v => SaveToggle((s, val) => s.CompactShowTaskMeta = val, v)));
 
             var doneBtn = UiKit.PrimaryButton("完成", () => win.Close());
             doneBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            doneBtn.Margin = new Thickness(0, 18, 0, 0);
+            doneBtn.Margin = new Thickness(0, 14, 0, 0);
             root.Children.Add(doneBtn);
 
-            host.Content = UiKit.AmbientStage(root, compact: true);
+            host.Content = root;
         }
 
         RebuildDialog();
-        win.Content = host;
-        win.ShowDialog();
+        PresentModal(win, host);
     }
 
     public static void OpenBundledMiSansLicense()
