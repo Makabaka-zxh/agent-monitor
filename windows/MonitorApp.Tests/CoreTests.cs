@@ -269,7 +269,61 @@ public class CoreTests
         Assert.Equal((308, 196), new LocalUiSettings { CompactSizePreset = "nano" }.GetCompactDimensions());
         Assert.Equal((336, 356), new LocalUiSettings { CompactSizePreset = "small" }.GetCompactDimensions());
         Assert.Equal((384, 504), new LocalUiSettings { CompactSizePreset = "medium" }.GetCompactDimensions());
-        Assert.Equal((468, 640), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
+        Assert.Equal((560, 480), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
+    }
+
+    [Fact]
+    public void ResponsiveLayoutPolicy_AdaptsCompactAndMainLayoutsAcrossWindowSizes()
+    {
+        var micro = ResponsiveLayoutPolicy.PlanCompact(308, 196);
+        Assert.Equal(CompactLayoutKind.MicroCapsule, micro.Kind);
+        Assert.Equal(1, micro.Columns);
+        Assert.Equal(1, micro.TasksPerPage);
+        Assert.Equal(1, micro.QuotasPerPage);
+
+        var ribbon = ResponsiveLayoutPolicy.PlanCompact(520, 196);
+        Assert.Equal(CompactLayoutKind.WideRibbon, ribbon.Kind);
+        Assert.Equal(2, ribbon.Columns);
+        Assert.True(ribbon.TasksPerPage >= 2);
+
+        var tile = ResponsiveLayoutPolicy.PlanCompact(336, 356);
+        Assert.Equal(CompactLayoutKind.CompactTile, tile.Kind);
+        Assert.Equal(1, tile.Columns);
+        Assert.False(tile.ShowVisualToolTiles);
+
+        var standard = ResponsiveLayoutPolicy.PlanCompact(384, 504);
+        Assert.Equal(CompactLayoutKind.StandardStack, standard.Kind);
+        Assert.Equal(1, standard.Columns);
+        Assert.True(standard.ShowVisualToolTiles);
+        Assert.True(standard.ShowTaskPreview);
+
+        var bento = ResponsiveLayoutPolicy.PlanCompact(560, 480);
+        Assert.Equal(CompactLayoutKind.WideBento, bento.Kind);
+        Assert.Equal(2, bento.Columns);
+        Assert.True(bento.TasksPerPage >= 4);
+        Assert.True(bento.QuotasPerPage >= 4);
+
+        var narrowMain = ResponsiveLayoutPolicy.PlanMainShell(800);
+        Assert.True(narrowMain.CollapseSidebar);
+        Assert.Equal(72.0, narrowMain.SidebarWidth);
+        Assert.Equal(284.0, narrowMain.TaskListWidth);
+        Assert.False(narrowMain.AccountTwoColumnBento);
+
+        var ultraNarrowMain = ResponsiveLayoutPolicy.PlanMainShell(680);
+        Assert.True(ultraNarrowMain.CollapseSidebar);
+        Assert.Equal(1, ultraNarrowMain.UsageColumns);
+
+        var defaultMain = ResponsiveLayoutPolicy.PlanMainShell(1180);
+        Assert.False(defaultMain.CollapseSidebar);
+        Assert.Equal(208.0, defaultMain.SidebarWidth);
+        Assert.Equal(2, defaultMain.UsageColumns);
+        Assert.Equal(2, defaultMain.DevicesColumns);
+
+        var wideMain = ResponsiveLayoutPolicy.PlanMainShell(1440);
+        Assert.False(wideMain.CollapseSidebar);
+        Assert.Equal(3, wideMain.UsageColumns);
+        Assert.Equal(2, wideMain.DevicesColumns);
+        Assert.True(wideMain.AccountTwoColumnBento);
     }
 
     [Fact]

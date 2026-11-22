@@ -5,8 +5,8 @@
         Title="Monitor"
         Width="1180"
         Height="768"
-        MinWidth="280"
-        MinHeight="170"
+        MinWidth="660"
+        MinHeight="480"
         WindowStartupLocation="CenterScreen"
         Background="#EEF3F8">
     <shell:WindowChrome.WindowChrome>

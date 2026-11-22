@@ -554,9 +554,167 @@ public sealed class LocalUiSettings
     {
         "nano" => (308, 196),
         "small" => (336, 356),
-        "large" => (468, 640),
+        "large" => (560, 480),
         _ => (384, 504)
     };
+}
+
+public enum CompactLayoutKind
+{
+    MicroCapsule,   // Narrow & short (< 430w, < 245h): single focused metric or single task
+    WideRibbon,     // Wide & short (>= 430w, < 245h): 2-column horizontal split [Quota | Focus Task]
+    CompactTile,    // Single-column balanced tile (< 470w, 245..430h): Hero + strip + focus task
+    StandardStack,  // Single-column rich stack (< 470w, >= 430h): visual tool tiles + task live previews
+    WideBento       // 2-column Bento dashboard (>= 470w, >= 245h): [Quota + Stats] + [All Quotas | Active Tasks]
+}
+
+public readonly record struct CompactViewportPlan(
+    CompactLayoutKind Kind,
+    int Columns,
+    bool ShowTaskMeta,
+    bool ShowTaskPreview,
+    bool ShowVisualToolTiles,
+    int TasksPerPage,
+    int QuotasPerPage,
+    int OverviewTaskCount,
+    int OverviewQuotaCount);
+
+public readonly record struct MainShellPlan(
+    bool CollapseSidebar,
+    double SidebarWidth,
+    double TaskListWidth,
+    int UsageColumns,
+    int DevicesColumns,
+    bool AccountTwoColumnBento);
+
+public static class ResponsiveLayoutPolicy
+{
+    public static CompactViewportPlan PlanCompact(double width, double height, bool userWantsTaskMeta = true)
+    {
+        var w = Math.Max(260.0, width);
+        var h = Math.Max(165.0, height);
+        var isMicroH = h < 245.0;
+        var bottomBarH = isMicroH ? 25.0 : 28.0;
+        var cardPad = isMicroH ? 10.0 : 13.5;
+        var innerH = Math.Max(70.0, h - 40.0 - bottomBarH - (isMicroH ? 14.0 : 18.0) - cardPad * 2.0);
+
+        if (isMicroH)
+        {
+            if (w >= 430.0)
+            {
+                // Horizontal Ribbon: 2 columns side-by-side!
+                var canMeta = userWantsTaskMeta && innerH >= 96.0;
+                var rowsPerCol = Math.Clamp((int)Math.Floor((innerH - 22.0) / (canMeta ? 52.0 : 38.0)), 1, 2);
+                return new CompactViewportPlan(
+                    Kind: CompactLayoutKind.WideRibbon,
+                    Columns: 2,
+                    ShowTaskMeta: canMeta,
+                    ShowTaskPreview: false,
+                    ShowVisualToolTiles: false,
+                    TasksPerPage: rowsPerCol * 2,
+                    QuotasPerPage: 2,
+                    OverviewTaskCount: rowsPerCol,
+                    OverviewQuotaCount: 1);
+            }
+            else
+            {
+                // Micro Capsule: ultra-focused 1 metric or 1 task
+                var canMeta = userWantsTaskMeta && innerH >= 88.0;
+                return new CompactViewportPlan(
+                    Kind: CompactLayoutKind.MicroCapsule,
+                    Columns: 1,
+                    ShowTaskMeta: canMeta,
+                    ShowTaskPreview: false,
+                    ShowVisualToolTiles: false,
+                    TasksPerPage: 1,
+                    QuotasPerPage: 1,
+                    OverviewTaskCount: 0,
+                    OverviewQuotaCount: 1);
+            }
+        }
+
+        if (w >= 470.0)
+        {
+            // 2-Column Bento Dashboard!
+            var showPreview = w >= 520.0 && innerH >= 320.0;
+            var taskRowH = showPreview ? 74.0 : (userWantsTaskMeta ? 56.0 : 42.0);
+            var splitBodyH = Math.Max(90.0, innerH - 118.0);
+            var bentoOverviewTasks = Math.Clamp((int)Math.Floor((splitBodyH - 26.0) / taskRowH), 1, 5);
+            var bentoOverviewQuotas = Math.Clamp((int)Math.Floor((splitBodyH - 26.0) / 52.0), 1, 5);
+            var fullPageTaskRows = Math.Clamp((int)Math.Floor((innerH - 30.0) / taskRowH), 2, 5);
+            var fullPageQuotaRows = Math.Clamp((int)Math.Floor((innerH - 32.0) / 54.0), 2, 5);
+
+            return new CompactViewportPlan(
+                Kind: CompactLayoutKind.WideBento,
+                Columns: 2,
+                ShowTaskMeta: userWantsTaskMeta,
+                ShowTaskPreview: showPreview,
+                ShowVisualToolTiles: w >= 620.0,
+                TasksPerPage: fullPageTaskRows * 2,
+                QuotasPerPage: fullPageQuotaRows * 2,
+                OverviewTaskCount: bentoOverviewTasks,
+                OverviewQuotaCount: bentoOverviewQuotas);
+        }
+
+        if (h >= 430.0)
+        {
+            // Standard Rich Vertical Stack: unlocks visual tool progress tiles + 1-line live task preview!
+            var showPreview = innerH >= 330.0;
+            var taskRowH = showPreview ? 76.0 : (userWantsTaskMeta ? 60.0 : 44.0);
+            var overviewTasks = Math.Clamp((int)Math.Floor((innerH - 175.0) / (userWantsTaskMeta ? 58.0 : 44.0)), 1, 4);
+            var tasksPerPage = Math.Clamp((int)Math.Floor((innerH - 32.0) / taskRowH), 2, 6);
+            var quotasPerPage = Math.Clamp((int)Math.Floor((innerH - 36.0) / 58.0), 2, 6);
+
+            return new CompactViewportPlan(
+                Kind: CompactLayoutKind.StandardStack,
+                Columns: 1,
+                ShowTaskMeta: userWantsTaskMeta,
+                ShowTaskPreview: showPreview,
+                ShowVisualToolTiles: true,
+                TasksPerPage: tasksPerPage,
+                QuotasPerPage: quotasPerPage,
+                OverviewTaskCount: overviewTasks,
+                OverviewQuotaCount: 0);
+        }
+        else
+        {
+            // Compact Square/Tile (245 <= h < 430, w < 470)
+            var overviewTasks = innerH >= 190.0 ? Math.Clamp((int)Math.Floor((innerH - 135.0) / 58.0), 1, 2) : 0;
+            var tasksPerPage = Math.Clamp((int)Math.Floor((innerH - 32.0) / (userWantsTaskMeta ? 62.0 : 45.0)), 2, 4);
+            var quotasPerPage = Math.Clamp((int)Math.Floor((innerH - 36.0) / 58.0), 2, 4);
+
+            return new CompactViewportPlan(
+                Kind: CompactLayoutKind.CompactTile,
+                Columns: 1,
+                ShowTaskMeta: userWantsTaskMeta,
+                ShowTaskPreview: false,
+                ShowVisualToolTiles: false,
+                TasksPerPage: tasksPerPage,
+                QuotasPerPage: quotasPerPage,
+                OverviewTaskCount: overviewTasks,
+                OverviewQuotaCount: 0);
+        }
+    }
+
+    public static MainShellPlan PlanMainShell(double windowWidth)
+    {
+        var w = Math.Max(600.0, windowWidth);
+        var collapseRail = w < 940.0;
+        var railW = collapseRail ? 72.0 : 208.0;
+        var contentW = Math.Max(480.0, w - railW - 24.0);
+        var taskListW = w < 840.0 ? 284.0 : w < 1080.0 ? 342.0 : 396.0;
+        var usageCols = contentW >= 1040.0 ? 3 : contentW >= 660.0 ? 2 : 1;
+        var devCols = contentW >= 820.0 ? 2 : 1;
+        var accountBento = contentW >= 1020.0;
+
+        return new MainShellPlan(
+            CollapseSidebar: collapseRail,
+            SidebarWidth: railW,
+            TaskListWidth: taskListW,
+            UsageColumns: usageCols,
+            DevicesColumns: devCols,
+            AccountTwoColumnBento: accountBento);
+    }
 }
 
 public sealed class UsageAlertRecord
