@@ -44,7 +44,7 @@ public final class NativeSessionControls {
     private JSONObject response, selection, fastNext, planNext, records = new JSONObject();
     private boolean fetching, sending, replyLocked, disposed, selectionCorrupt, fastCorrupt, planCorrupt, recordsCorrupt, waiting, controlsReadFailed;
     private long nextFetch, observedAt, retryAt;
-    private String renderKey = "", settingsKey = "", feedback = "";
+    private String renderKey = "", settingsKey = "", feedback = "", pendingKind = "";
 
     public NativeSessionControls(NativeUi ui, String taskId, NativeTaskResults.Host host, Transport transport,
                                  SharedPreferences preferences, String key, Runnable changed) {
@@ -71,7 +71,12 @@ public final class NativeSessionControls {
     private long now() { return System.currentTimeMillis() / 1000; }
     private boolean active() { return !disposed && host.connected() && host.visible(); }
     private boolean fresh() { return response != null && observedAt > 0 && SystemClock.elapsedRealtime() - observedAt <= 15000; }
-    public void update(JSONObject task) { waiting = "waiting".equals(task.optString("status")); tick(); }
+    public void update(JSONObject task) {
+        String kind = NativeListPresentation.pendingKind(task);
+        if (!kind.equals(pendingKind)) { pendingKind = kind; nextFetch = 0; }
+        waiting = "waiting".equals(task.optString("status")) || !kind.isEmpty();
+        tick();
+    }
     public void tick() {
         if (!active()) return;
         if (!fetching && !sending && SystemClock.elapsedRealtime() >= nextFetch) refresh();
@@ -337,18 +342,19 @@ public final class NativeSessionControls {
         StringBuilder expiry = new StringBuilder();
         boolean needsAction = false;
         if (pending != null) for (int i = 0; i < Math.min(20, pending.length()); i++) { JSONObject request = pending.optJSONObject(i); expiry.append(NativeSessionControlPolicy.actionable(request, capabilities(), now())); needsAction |= NativeSessionControlPolicy.pending(request, now()); }
-        String signature = String.valueOf(pending) + capabilities().toString() + NativeSessionControlPolicy.nullableText(response, "reason") + fresh() + expiry + needsAction + sending + feedback + waiting + recordsCorrupt + records.toString();
+        String signature = String.valueOf(pending) + capabilities().toString() + NativeSessionControlPolicy.nullableText(response, "reason") + fresh() + expiry + needsAction + sending + feedback + waiting + pendingKind + recordsCorrupt + records.toString();
         if (signature.equals(renderKey)) return; renderKey = signature;
         view.removeAllViews();
         boolean hasPending = pending != null && pending.length() > 0;
         if (!hasPending && !waiting && feedback.isEmpty()) { view.setVisibility(View.GONE); return; }
         view.setVisibility(View.VISIBLE);
-        LinearLayout heading = ui.row(); heading.addView(ui.text(needsAction ? "待你处理" : "交互记录", 16, true), new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout heading = ui.row(); heading.addView(ui.text(needsAction || !pendingKind.isEmpty() && response == null ? "待你处理" : "交互记录", 16, true), new LinearLayout.LayoutParams(0, -2, 1));
         heading.addView(ui.iconButton("refresh", "刷新提问和批准状态", this::refresh)); view.addView(heading, wrap());
         if (!feedback.isEmpty()) view.addView(note(feedback), spaced(8));
         if (recordsCorrupt) view.addView(note("原发送记录无法确认，手机已停用操作；请到电脑核对"), spaced(8));
         if (!hasPending) {
-            String reason = response == null ? "正在确认任务的交互能力" : NativeSessionControlPolicy.nullableText(response, "reason");
+            String reason = response == null && "question".equals(pendingKind) ? "正在读取电脑提出的问题和选项"
+                    : response == null ? "正在确认任务的交互能力" : NativeSessionControlPolicy.nullableText(response, "reason");
             view.addView(note(reason.isEmpty() ? "尚未收到可在手机处理的请求\n可先到电脑查看" : reason), spaced(8));
         } else if (pending.length() > 20) view.addView(note("请求数量超出显示范围，请到电脑查看"), spaced(8));
         else {
@@ -387,12 +393,13 @@ public final class NativeSessionControls {
         }
         if (!enabled) {
             if ("pending".equals(request.optString("state"))) card.addView(note(fresh() ? "手机暂不能处理这个请求，请到电脑查看" : "状态尚未确认，请先刷新"), spaced(10));
+            if ("question".equals(request.optString("kind"))) addQuestions(card, request, fingerprint, false);
             return;
         }
         if ("approval".equals(request.optString("kind"))) {
             TextView allow = ui.button("仅允许这一次", () -> confirmApproval(request, fingerprint)); card.addView(allow, spaced(16));
             card.addView(ui.button("拒绝", false, () -> sendDecision(request, payload(request, "deny", new JSONArray()), fingerprint, false)), spaced(8));
-        } else addQuestions(card, request, fingerprint);
+        } else addQuestions(card, request, fingerprint, true);
     }
     private void confirmApproval(JSONObject request, String fingerprint) {
         if (!usable(request, fingerprint)) return;
@@ -402,7 +409,7 @@ public final class NativeSessionControls {
         new AlertDialog.Builder(ui.activity).setTitle("确认本次批准").setView(scroll).setNegativeButton("取消", null)
             .setPositiveButton("仅允许这一次", (dialog, which) -> sendDecision(request, payload(request, "allow_once", new JSONArray()), fingerprint, false)).show();
     }
-    private void addQuestions(LinearLayout card, JSONObject request, String fingerprint) {
+    private void addQuestions(LinearLayout card, JSONObject request, String fingerprint, boolean enabled) {
         QuestionDraft draft = drafts.get(fingerprint);
         if (draft == null) { draft = new QuestionDraft(); drafts.put(fingerprint, draft); }
         final QuestionDraft bound = draft;
@@ -414,11 +421,13 @@ public final class NativeSessionControls {
             final List<String> selected = choices; final List<CompoundButton> buttons = new ArrayList<>();
             final EditText[] custom = new EditText[1];
             JSONArray options = question.optJSONArray("options");
+            if (options.length() > 1) card.addView(note(question.optBoolean("multiple") ? "可多选" : "单选"), spaced(6));
             for (int j = 0; j < options.length(); j++) {
                 JSONObject option = options.optJSONObject(j); final String optionId = option.optString("id");
                 CompoundButton button = question.optBoolean("multiple") ? new CheckBox(ui.activity) : new RadioButton(ui.activity);
                 button.setTypeface(ui.regular); button.setTextSize(15); button.setTextColor(ui.text); button.setButtonTintList(ColorStateList.valueOf(ui.accent)); button.setMinHeight(ui.dp(48));
                 button.setText(option.optString("label")); button.setChecked(selected.contains(optionId)); button.setTag(optionId); buttons.add(button);
+                button.setEnabled(enabled);
                 button.setContentDescription(option.optString("label") + (option.optString("description").isEmpty() ? "" : "，" + option.optString("description")));
                 button.setOnClickListener(v -> {
                     bound.text.remove(questionId); if (custom[0] != null) custom[0].setText("");
@@ -427,12 +436,13 @@ public final class NativeSessionControls {
                 }); card.addView(button, spaced(6));
                 if (!option.optString("description").isEmpty()) { TextView description = note(option.optString("description")); description.setPadding(ui.dp(36), 0, 0, 0); card.addView(description, wrap()); }
             }
-            if (question.optBoolean("allows_text")) {
+            if (question.optBoolean("allows_text") && enabled) {
                 EditText input = new EditText(ui.activity); custom[0] = input; input.setTypeface(ui.regular); input.setTextSize(15); input.setTextColor(ui.text); input.setHintTextColor(ui.muted); input.setHint("自定义回答（代替选项）"); input.setContentDescription(question.optString("text") + "，自定义回答，代替上方选项");
                 input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE); input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(4000)}); input.setMinLines(2); input.setText(bound.text.get(questionId));
                 input.addTextChangedListener(new TextWatcher() { public void beforeTextChanged(CharSequence s, int start, int count, int after) { } public void afterTextChanged(Editable text) { bound.text.put(questionId, text.toString()); if (!text.toString().trim().isEmpty()) { selected.clear(); for (CompoundButton option : buttons) option.setChecked(false); } } public void onTextChanged(CharSequence s, int start, int before, int count) { } }); card.addView(input, spaced(8));
             }
         }
+        if (!enabled) return;
         card.addView(ui.button("发送回答", () -> {
             JSONArray answers = new JSONArray();
             try {

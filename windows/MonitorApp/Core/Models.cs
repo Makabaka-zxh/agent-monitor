@@ -124,6 +124,7 @@ public sealed class MonitorTask
     [JsonPropertyName("final_result_id")] public string? FinalResultId { get; set; }
     [JsonPropertyName("archived")] public bool Archived { get; set; }
     [JsonPropertyName("stale")] public bool? Stale { get; set; }
+    [JsonPropertyName("pending_interaction_kind")] public string? PendingInteractionKind { get; set; }
     [JsonPropertyName("failure_code")] public string? FailureCode { get; set; }
     [JsonPropertyName("error_analysis")] public ErrorAnalysisDto? ErrorAnalysis { get; set; }
     [JsonPropertyName("usage")] public TaskUsageSummary? Usage { get; set; }
@@ -140,14 +141,29 @@ public sealed class MonitorTask
     [JsonIgnore] public bool SupportsReply => Tool is "claude" or "codex" or "antigravity";
 
     [JsonIgnore]
-    public string StatusTitle => Status switch
+    public string EffectivePendingKind =>
+        Archived || Stale == true || !SupportsReply
+            ? ""
+            : PendingInteractionKind is "question" or "approval" ? PendingInteractionKind : "";
+
+    [JsonIgnore]
+    public string EffectiveStatus =>
+        !string.IsNullOrEmpty(EffectivePendingKind) ? "waiting" : Status;
+
+    [JsonIgnore]
+    public string StatusTitle => EffectivePendingKind switch
     {
-        "running" => "进行中",
-        "waiting" => "等待批准",
-        "completed" => "已完成",
-        "idle" => "待命",
-        "error" => "需要关注",
-        _ => "状态未知"
+        "question" => "等待回答",
+        "approval" => "等待批准",
+        _ => Status switch
+        {
+            "running" => "进行中",
+            "waiting" => "待处理",
+            "completed" => "已完成",
+            "idle" => "待命",
+            "error" => "需要关注",
+            _ => "状态未知"
+        }
     };
 
     public bool Matches(ToolFilter filter, TaskScope scope, bool fresh, string? query = null)
@@ -160,7 +176,7 @@ public sealed class MonitorTask
         else
         {
             if (Archived) return false;
-            if (scope == TaskScope.Active && !(fresh && Stale != true && Status is "running" or "waiting" or "error"))
+            if (scope == TaskScope.Active && !(fresh && Stale != true && EffectiveStatus is "running" or "waiting" or "error"))
                 return false;
         }
         if (!string.IsNullOrWhiteSpace(query))

@@ -53,6 +53,7 @@ public sealed class MonitorController : IDisposable
     }
 
     public bool IsFresh => LastSuccess is { } last && (DateTimeOffset.UtcNow - last).TotalSeconds < 25;
+    public bool RateLimited => DateTimeOffset.UtcNow < _cooldownUntil;
     public int OnlineDeviceCount => IsFresh ? Devices.Count(d => d.Online) : 0;
     public string TokenFingerprint => _credential is { } c ? MonitorSecurity.Sha256Hex(c.Token) : "";
     public string? ActiveToken => Connected ? _credential?.Token : null;
@@ -362,13 +363,14 @@ public sealed class MonitorController : IDisposable
         _qrLoopCts?.Cancel();
         var cts = new CancellationTokenSource();
         _qrLoopCts = cts;
+        var fastDelayMs = Math.Max(2150, intervalSeconds * 720); // ~2.15s stays safely below 30 req/60s limit
         _ = Task.Run(async () =>
         {
             while (!cts.IsCancellationRequested)
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), cts.Token);
+                    await Task.Delay(fastDelayMs, cts.Token);
                 }
                 catch (OperationCanceledException) { return; }
                 if (cts.IsCancellationRequested || _generation != epoch || QrLogin is null || Connected) return;
@@ -432,13 +434,28 @@ public sealed class MonitorController : IDisposable
             LoginCompleted?.Invoke();
             NotifyChanged();
 
+            var initialLoads = Task.WhenAll(
+                RefreshWorkbenchAsync(),
+                RefreshAccountAsync(),
+                RefreshUsageAsync());
+
             if (!string.IsNullOrEmpty(res.CollectorCode) && MonitorSecurity.Matches(res.CollectorCode, "[A-F0-9]{12}"))
             {
-                await Collector.PairAsync(Origin, res.CollectorCode);
+                var originSnapshot = Origin;
+                var codeSnapshot = res.CollectorCode;
+                _ = Task.Run(async () =>
+                {
+                    if (System.Windows.Application.Current?.Dispatcher is { HasShutdownStarted: false } disp)
+                    {
+                        await disp.InvokeAsync(async () =>
+                        {
+                            await Collector.PairAsync(originSnapshot, codeSnapshot);
+                            await RefreshWorkbenchAsync();
+                        }).Task.Unwrap();
+                    }
+                });
             }
-            await RefreshWorkbenchAsync();
-            await RefreshAccountAsync();
-            await RefreshUsageAsync();
+            await initialLoads;
         }
         catch (MonitorApiException apiEx)
         {
@@ -591,9 +608,10 @@ public sealed class MonitorController : IDisposable
             Connected = true;
             LoginCompleted?.Invoke();
             NotifyChanged();
-            await RefreshWorkbenchAsync();
-            await RefreshAccountAsync();
-            await RefreshUsageAsync();
+            await Task.WhenAll(
+                RefreshWorkbenchAsync(),
+                RefreshAccountAsync(),
+                RefreshUsageAsync());
         }
         catch (MonitorApiException apiEx)
         {
@@ -667,6 +685,10 @@ public sealed class MonitorController : IDisposable
                         {
                             if (lp.TodayTokens is not null) existing.TodayTokens = lp.TodayTokens;
                             if (lp.Quotas is not null) existing.Quotas = lp.Quotas;
+                        }
+                        else
+                        {
+                            Usage.Providers.Add(lp);
                         }
                     }
                 }

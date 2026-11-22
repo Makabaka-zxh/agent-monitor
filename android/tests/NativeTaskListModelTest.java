@@ -42,8 +42,24 @@ public final class NativeTaskListModelTest {
         check(result.uncertainSelectedTasks == uncertain, "uncertain selected-tool records retain their own source/status semantics");
     }
     public static void main(String[] args) {
-        emptyQueryCompatibility(); searchAndFilters(); antigravityTasks(); scopedComputerPage(); refreshAndInputOwnership(); malformedSnapshots(); allowedFieldsOnly();
+        emptyQueryCompatibility(); searchAndFilters(); antigravityTasks(); scopedComputerPage(); refreshAndInputOwnership(); malformedSnapshots(); allowedFieldsOnly(); pendingQuestions();
         System.out.println("NativeTaskListModelTest: " + checks + " checks passed");
+    }
+    private static void pendingQuestions() {
+        for (String tool : new String[]{"codex", "claude", "antigravity"}) {
+            JSONObject question = task("ask", "Choose", "", tool, "completed", false, "d1");
+            question.put("pending_interaction_kind", "question");
+            tasks = new JSONArray().put(question);
+            devices = new JSONArray().put(device("d1", "Laptop", true));
+            ids(select(tool, "active", "", false), "ask");
+            check("completed".equals(question.optString("status")), "pending interaction does not overwrite source status");
+            ids(select(tool, "active", "", true));
+            question.put("pending_interaction_kind", JSONObject.NULL); ids(select(tool, "active", "", false));
+            question.put("pending_interaction_kind", "other"); ids(select(tool, "active", "", false));
+            question.put("pending_interaction_kind", "approval"); ids(select(tool, "active", "", false), "ask");
+            devices = new JSONArray().put(device("d1", "Laptop", false));
+            ids(select(tool, "active", "", false));
+        }
     }
     private static void emptyQueryCompatibility() {
         fixture();

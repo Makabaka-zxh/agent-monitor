@@ -209,9 +209,9 @@ public final class NativePages {
                 String titleValue = value(task, "title", "未命名任务"), deviceName = value(computer, "name", "未知电脑");
                 String state = status(task, computer, stale); setText(title, titleValue);
                 ui.bindTaskIdentity(toolBadge, task.optString("tool"), deviceName);
-                bindStatus(ui, status, state);
+                bindStatus(ui, status, state, task);
                 setText(updated, relative(task.optString("updated_at")));
-                card.setContentDescription(titleValue + "，" + toolName(task.optString("tool")) + "，" + deviceName + "，" + statusLabel(state));
+                card.setContentDescription(titleValue + "，" + toolName(task.optString("tool")) + "，" + deviceName + "，" + status.getText());
             }
         }
     }
@@ -311,7 +311,7 @@ public final class NativePages {
         }
         public void update(JSONObject task, JSONObject device, boolean stale) { update(task, device, stale, true); }
         public void update(JSONObject task, JSONObject device, boolean stale, boolean syncOutput) {
-            String code = status(task, device, stale); bindStatus(ui, state, code);
+            String code = status(task, device, stale); bindStatus(ui, state, code, task);
             String noteText = "unknown".equals(code) ? "当前状态未知，显示最后收到的记录" : "waiting".equals(code) ? "任务正在等待回答或批准" : "";
             setText(note, noteText); noteSection.setVisibility(noteText.isEmpty() ? View.GONE : View.VISIBLE);
             String updated = absolute(value(task, "updated_at", ""));
@@ -332,17 +332,22 @@ public final class NativePages {
     }
     public static String status(JSONObject task, JSONObject device, boolean stale) {
         if (task == null || device == null || stale || !device.optBoolean("online", false)) return "unknown";
+        if (!NativeListPresentation.pendingKind(task).isEmpty()) return "waiting";
         String raw = task.optString("status");
         switch (raw) { case "running": case "waiting": case "completed": case "error": case "idle": return raw; default: return "unknown"; }
     }
     public static String statusLabel(String status) {
-        switch (status) { case "running": return "执行中"; case "waiting": return "等待批准"; case "completed": return "本轮结束"; case "error": return "执行出错"; case "idle": return "空闲"; case "online": return "在线"; case "offline": return "离线"; default: return "状态未知"; }
+        switch (status) { case "running": return "执行中"; case "waiting": return "待处理"; case "completed": return "本轮结束"; case "error": return "执行出错"; case "idle": return "空闲"; case "online": return "在线"; case "offline": return "离线"; default: return "状态未知"; }
     }
     public static String toolName(String tool) { return NativeListPresentation.toolLabel(tool); }
     private static int statusColor(NativeUi ui, String state) { return "waiting".equals(state) ? ui.warning : "error".equals(state) ? ui.danger : "running".equals(state) || "online".equals(state) ? ui.accent : ui.muted; }
     private static void bindStatus(NativeUi ui, TextView label, String state) {
+        bindStatus(ui, label, state, null);
+    }
+    private static void bindStatus(NativeUi ui, TextView label, String state, JSONObject task) {
         boolean attention = "waiting".equals(state) || "error".equals(state);
-        setText(label, statusLabel(state)); label.setTextColor(attention ? statusColor(ui, state) : ui.muted);
+        setText(label, "waiting".equals(state) ? NativeListPresentation.waitingLabel(NativeListPresentation.pendingKind(task)) : statusLabel(state));
+        label.setTextColor(attention ? statusColor(ui, state) : ui.muted);
         label.setTypeface(attention ? ui.medium : ui.regular);
         if (!state.equals(label.getTag())) {
             int fill = "waiting".equals(state) ? (ui.dark ? 0xFF423B2C : 0xFFF3EBDC) : (ui.dark ? 0xFF443237 : 0xFFF5E4E4);

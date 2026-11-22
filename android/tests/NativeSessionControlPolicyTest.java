@@ -212,6 +212,15 @@ public final class NativeSessionControlPolicyTest {
         check(!NativeSessionControlPolicy.actionable(approval().put("state", "submitted"), capabilities, NOW), "submitted not resubmitted as new decision");
         check(!NativeSessionControlPolicy.actionable(approval().put("state", "cancelled"), capabilities, NOW), "cancelled action disabled");
         check(NativeSessionControlPolicy.request(question()), "question schema separate from approval");
+        for (String provider : new String[]{"codex", "claude", "antigravity"}) {
+            JSONObject current = question().put("provider", provider);
+            JSONObject caps = new JSONObject().put("questions", true);
+            check(NativeSessionControlPolicy.actionable(current, caps, NOW), provider + " question can be answered without a model catalog or approval permission");
+            JSONArray chosen = new JSONArray().put(answer(new JSONArray().put("b"), null));
+            check(NativeSessionControlPolicy.decision(current, decision("answer", chosen), "synthetic-task", NOW), provider + " source option ID accepted");
+            JSONArray guessed = new JSONArray().put(answer(new JSONArray().put("B"), null));
+            check(!NativeSessionControlPolicy.decision(current, decision("answer", guessed), "synthetic-task", NOW), provider + " visible option label cannot replace wire identity");
+        }
         check(!NativeSessionControlPolicy.answers(question(), new JSONArray().put(answer(new JSONArray(), null))), "no default selected answer");
         check(NativeSessionControlPolicy.answers(question(), new JSONArray().put(answer(new JSONArray().put("a"), null))), "single source option accepted");
         check(NativeSessionControlPolicy.answers(question(), new JSONArray().put(answer(new JSONArray().put("a"), null).put("text", JSONObject.NULL))), "JSON null custom answer remains absent");

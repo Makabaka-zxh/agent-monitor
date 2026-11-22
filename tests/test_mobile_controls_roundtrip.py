@@ -13,9 +13,10 @@ from agent_monitor.provider_controls import normalize_request
 from test_task_replies import hub, send, SESSION
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude"])
-@pytest.mark.parametrize("kind,decision", [("approval", "allow_once"), ("approval", "deny"),
-                                           ("question", "answer"), ("question", "deny")])
+@pytest.mark.parametrize("provider,kind,decision", [
+    (provider, kind, decision) for provider in ("codex", "claude", "antigravity")
+    for kind, decision in (("approval", "allow_once"), ("approval", "deny"), ("question", "answer"), ("question", "deny"))
+] + [("codex", "mcp_form", decision) for decision in ("answer", "deny")])
 def test_original_request_roundtrip_and_durable_no_replay(hub, provider, kind, decision):
     app, client, headers, task_id, original_task, *_ = hub
     device = task_id.partition(":")[0]
@@ -28,19 +29,39 @@ def test_original_request_roundtrip_and_durable_no_replay(hub, provider, kind, d
     if provider == "codex":
         method = "item/commandExecution/requestApproval" if kind == "approval" else "item/tool/requestUserInput"
         params = {"threadId": SESSION, "turnId": "synthetic-turn", "itemId": "synthetic-item"}
-        if kind == "approval":
+        if kind == "mcp_form":
+            method = "mcpServer/elicitation/request"
+            params = {"threadId": SESSION, "turnId": "synthetic-turn", "mode": "form", "serverName": "test-service",
+                      "environmentId": None, "_meta": None, "message": "Choose sections", "requestedSchema": {
+                          "type": "object", "properties": {"include_other": {"type": "array", "title": "Sections",
+                              "items": {"anyOf": [{"const": "a", "title": "First"}, {"const": "b", "title": "Second"}]}}},
+                          "required": ["include_other"]}}
+        elif kind == "approval":
             params.update(command="echo synthetic", cwd="C:/synthetic/workspace", availableDecisions=["accept", "decline"])
         else:
             params["questions"] = [{"id": "question", "header": "Synthetic", "question": "Pick one", "isOther": True,
                                      "options": [{"label": "Choice A", "description": "Synthetic description"}]}]
         message = {"id": "synthetic-wire", "method": method, "params": params}
-    else:
+    elif provider == "claude":
         tool_input = {"command": "echo synthetic"} if kind == "approval" else {"questions": [
             {"header": "Synthetic", "question": "Pick one", "multiSelect": False,
              "options": [{"label": "Choice A", "description": "Synthetic description"}]}]}
         message = {"type": "control_request", "request_id": "synthetic-wire", "session_id": SESSION,
                    "request": {"subtype": "can_use_tool", "tool_name": "Bash" if kind == "approval" else "AskUserQuestion",
                                "tool_use_id": "synthetic-item", "input": tool_input}}
+    else:
+        params = {"sessionId": SESSION}
+        if kind == "approval":
+            params.update(toolCall={"toolCallId": "tc1", "name": "demo", "title": "Synthetic demo"},
+                          options=[{"kind": "allow_once", "optionId": "yes", "name": "Allow"},
+                                   {"kind": "reject_once", "optionId": "no", "name": "Reject"}])
+            method = "session/request_permission"
+        else:
+            params.update(mode="form", message="Pick one", requestedSchema={
+                "type": "object", "properties": {"theme": {"type": "string", "title": "Theme",
+                                                          "enum": ["light", "dark"]}}})
+            method = "elicitation/create"
+        message = {"jsonrpc": "2.0", "id": "synthetic-wire", "method": method, "params": params}
     request = normalize_request(provider, message, command_id=command["request_id"], source_id=source,
                                 session_id=SESSION, turn_id="synthetic-turn")
     service = app.state.task_replies.controls
@@ -60,6 +81,10 @@ def test_original_request_roundtrip_and_durable_no_replay(hub, provider, kind, d
         pending = value["pending"][0]
         assert pending["id"] == request.public["id"] and pending["revision"] == request.public["revision"]
         chosen = [{"question_id": pending["questions"][0]["id"], "choices": ["o0"], "text": None}] if decision == "answer" else []
+        if kind == "mcp_form" and decision == "answer":
+            options = pending["questions"][0]["options"]
+            assert [option["label"] for option in options] == ["First", "Second"]
+            chosen[0]["choices"] = [options[1]["id"], options[0]["id"]]
         payload = {"task_id": task_id, "request_id": pending["id"], "revision": pending["revision"],
                    "decision_id": str(uuid.uuid4()), "decision": decision, "answers": chosen}
         path = "/api/native/tasks/controls/decision"
@@ -69,13 +94,17 @@ def test_original_request_roundtrip_and_durable_no_replay(hub, provider, kind, d
         wire = request.response(answers[0])
         if provider == "codex":
             assert wire["id"] == message["id"]
-            if decision == "deny":
+            if kind == "mcp_form":
+                expected = {"action": "accept", "content": {"include_other": ["b", "a"]}} if decision == "answer" else {
+                    "action": "decline", "content": None}
+                assert wire["result"] == {**expected, "_meta": None}
+            elif decision == "deny":
                 assert wire["result"] == ({"decision": "decline"} if kind == "approval" else {"answers": {}})
             elif decision == "allow_once":
                 assert wire["result"] == {"decision": "accept"}
             else:
                 assert wire["result"] == {"answers": {"question": {"answers": ["Choice A"]}}}
-        else:
+        elif provider == "claude":
             assert wire["response"]["request_id"] == message["request_id"]
             result = wire["response"]["response"]
             if decision == "deny":
@@ -85,6 +114,15 @@ def test_original_request_roundtrip_and_durable_no_replay(hub, provider, kind, d
                 assert result["updatedInput"] == (message["request"]["input"] if kind == "approval" else {
                     **message["request"]["input"], "answers": {"Pick one": "Choice A"}})
             assert "updatedPermissions" not in result
+        else:
+            assert wire["id"] == message["id"]
+            if kind == "approval":
+                assert wire["result"] == {"outcome": {"outcome": "selected",
+                                                      "optionId": "yes" if decision == "allow_once" else "no"}}
+            elif decision == "deny":
+                assert wire["result"] == {"action": "decline"}
+            else:
+                assert wire["result"] == {"action": "accept", "content": {"theme": "light"}}
         service.local_handler.resolve(pending["id"], pending["revision"], "forwarded")
         assert client.post(path, headers=headers, json=payload).json()["state"] == "forwarded"
         assert service.poll_decision(device, pending["id"], pending["revision"])["decision"] is None

@@ -25,6 +25,7 @@ from typing import Callable
 import uuid
 
 from . import collector
+from .codex_async_questions import CodexAsyncQuestions
 from .task_results import resolve_local_session, _unlinked
 from .failure_reasons import (
     FAILURE_LABELS, failure_code_for_antigravity, failure_code_for_claude,
@@ -787,6 +788,9 @@ class _Transport:
     def send(self, message):
         self.send_bytes((json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n").encode())
 
+    def queued_count(self):
+        return self.events.qsize()
+
     def next(self, *, wait=True):
         while True:
             self.check()
@@ -1052,11 +1056,15 @@ class LocalReplyExecutor:
         started = _rpc_response(transport, 3, pending)
         turn_id = started.get("turn", {}).get("id")
         if not isinstance(turn_id, str) or not turn_id: raise ExecutionIssue("protocol", "uncertain")
+        with CodexAsyncQuestions(run.command_id, target.session_id, turn_id, self.interaction_handler) as questions:
+            return self._codex_turn(transport, target, run, turn_id, pending, environments, local_approval_environment, questions)
+
+    def _codex_turn(self, transport, target, run, turn_id, pending, environments, local_approval_environment, questions):
         seen, previews = {}, {}
         failure_code = ""
         stopped_by_phone = False
         while True:
-            message = pending.pop(0) if pending else transport.next()
+            message = questions.next(transport, pending)
             if "id" in message and isinstance(message.get("method"), str):
                 if not self.interaction_handler: _reject_request(transport, message)
                 control_params = message.get("params")

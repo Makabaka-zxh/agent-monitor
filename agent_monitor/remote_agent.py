@@ -10,6 +10,9 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
+import gzip
+import http.client
+import io
 import ipaddress
 import json
 import os
@@ -238,10 +241,92 @@ def load_config(state_dir: Path) -> AgentConfig:
 class HubClient:
     def __init__(self, server: str, allow_insecure_lan: bool = False):
         self.server = normalize_server(server, allow_insecure_lan)
+        self._ssl_context = ssl.create_default_context()
+        self._lock = threading.Lock()
+        self._conn: http.client.HTTPConnection | None = None
+        parsed = urllib.parse.urlsplit(self.server)
+        self._scheme = parsed.scheme
+        self._host = parsed.hostname or ""
+        self._port = parsed.port
         self.opener = urllib.request.build_opener(
             NoRedirectHandler(),
-            urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+            urllib.request.HTTPSHandler(context=self._ssl_context),
         )
+
+    @staticmethod
+    def _has_proxy_env() -> bool:
+        return any(
+            os.environ.get(k)
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+        )
+
+    def _open_keepalive_conn(self) -> http.client.HTTPConnection:
+        if self._scheme == "https":
+            return http.client.HTTPSConnection(
+                self._host, self._port, timeout=REQUEST_TIMEOUT, context=self._ssl_context
+            )
+        return http.client.HTTPConnection(self._host, self._port, timeout=REQUEST_TIMEOUT)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except OSError:
+                    pass
+                self._conn = None
+
+    def _post_keepalive(self, endpoint: str, body: bytes, headers: dict[str, str], qr_endpoint: bool) -> bytes:
+        req_headers = {**headers, "Connection": "keep-alive", "Accept-Encoding": "gzip"}
+        with self._lock:
+            for attempt in range(2):
+                conn = self._conn
+                reused = conn is not None
+                if conn is None:
+                    conn = self._open_keepalive_conn()
+                    self._conn = conn
+                try:
+                    conn.request("POST", endpoint, body=body, headers=req_headers)
+                    resp = conn.getresponse()
+                    status = resp.status
+                    encoding = (resp.getheader("Content-Encoding") or "").strip().lower()
+                    raw = resp.read(MAX_RESPONSE_BYTES + 1)
+                    if resp.will_close or len(raw) > MAX_RESPONSE_BYTES:
+                        conn.close()
+                        self._conn = None
+                    if 300 <= status < 400:
+                        raise RemoteAgentError("服务器返回了重定向，连接已拒绝；请使用服务的最终地址")
+                    if status < 200 or status >= 300:
+                        http_err = urllib.error.HTTPError(
+                            self.server + endpoint, status, resp.reason, resp.headers, None
+                        )
+                        if qr_endpoint and status in {400, 401, 403, 404, 409, 410, 422}:
+                            message = {
+                                401: "配对验证失败，请重新运行 pair-qr 生成二维码",
+                                403: "配对未获允许；手机可能已拒绝，请重新运行 pair-qr",
+                                404: "配对请求不存在或服务尚不支持扫码连接，请检查服务版本",
+                                410: "二维码已过期或凭据已领取，请重新运行 pair-qr",
+                            }.get(status, "配对请求无效，请检查电脑名称与服务设置后重新运行 pair-qr")
+                            raise PairingRequestError(message) from http_err
+                        if status == 401:
+                            raise UnauthorizedError("连接凭据已失效，请在工作台生成新配对码并重新运行 pair") from http_err
+                        raise RemoteAgentError(f"服务器暂时无法接收同步（HTTP {status}）") from http_err
+                    if encoding == "gzip" and raw:
+                        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                            raw = gz.read(MAX_RESPONSE_BYTES + 1)
+                    return raw
+                except (RemoteAgentError, PairingRequestError, UnauthorizedError):
+                    raise
+                except (http.client.HTTPException, TimeoutError, OSError) as exc:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    self._conn = None
+                    if reused and attempt == 0:
+                        continue
+                    raise RemoteAgentError("无法连接服务器，请检查地址、网络和证书") from exc
+        raise RemoteAgentError("无法连接服务器，请检查地址、网络和证书")
 
     def post(self, endpoint: str, payload: dict[str, Any], token: str | None = None) -> dict[str, Any]:
         qr_endpoint = endpoint == "/api/agent/pairing/start" or bool(
@@ -257,25 +342,28 @@ class HubClient:
             body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise RemoteAgentError("采集结果格式无效，本次未上传") from exc
-        request = urllib.request.Request(self.server + endpoint, body, headers, method="POST")
-        try:
-            with self.opener.open(request, timeout=REQUEST_TIMEOUT) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-        except urllib.error.HTTPError as exc:
-            exc.close()
-            if qr_endpoint and exc.code in {400, 401, 403, 404, 409, 410, 422}:
-                message = {
-                    401: "配对验证失败，请重新运行 pair-qr 生成二维码",
-                    403: "配对未获允许；手机可能已拒绝，请重新运行 pair-qr",
-                    404: "配对请求不存在或服务尚不支持扫码连接，请检查服务版本",
-                    410: "二维码已过期或凭据已领取，请重新运行 pair-qr",
-                }.get(exc.code, "配对请求无效，请检查电脑名称与服务设置后重新运行 pair-qr")
-                raise PairingRequestError(message) from exc
-            if exc.code == 401:
-                raise UnauthorizedError("连接凭据已失效，请在工作台生成新配对码并重新运行 pair") from exc
-            raise RemoteAgentError(f"服务器暂时无法接收同步（HTTP {exc.code}）") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RemoteAgentError("无法连接服务器，请检查地址、网络和证书") from exc
+        if not self._has_proxy_env():
+            raw = self._post_keepalive(endpoint, body, headers, qr_endpoint)
+        else:
+            request = urllib.request.Request(self.server + endpoint, body, headers, method="POST")
+            try:
+                with self.opener.open(request, timeout=REQUEST_TIMEOUT) as response:
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+            except urllib.error.HTTPError as exc:
+                exc.close()
+                if qr_endpoint and exc.code in {400, 401, 403, 404, 409, 410, 422}:
+                    message = {
+                        401: "配对验证失败，请重新运行 pair-qr 生成二维码",
+                        403: "配对未获允许；手机可能已拒绝，请重新运行 pair-qr",
+                        404: "配对请求不存在或服务尚不支持扫码连接，请检查服务版本",
+                        410: "二维码已过期或凭据已领取，请重新运行 pair-qr",
+                    }.get(exc.code, "配对请求无效，请检查电脑名称与服务设置后重新运行 pair-qr")
+                    raise PairingRequestError(message) from exc
+                if exc.code == 401:
+                    raise UnauthorizedError("连接凭据已失效，请在工作台生成新配对码并重新运行 pair") from exc
+                raise RemoteAgentError(f"服务器暂时无法接收同步（HTTP {exc.code}）") from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise RemoteAgentError("无法连接服务器，请检查地址、网络和证书") from exc
         if len(raw) > MAX_RESPONSE_BYTES:
             raise RemoteAgentError("服务器响应过大，连接已拒绝")
         try:

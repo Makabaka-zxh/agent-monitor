@@ -34,6 +34,7 @@ public final class NativeTaskListModel {
             if (!search.matches(task.optString("title"), task.optString("project"), device == null ? "" : device.optString("name"))) continue;
             String actualTool = task.optString("tool"), status = task.optString("status");
             boolean archived = task.optBoolean("archived"), unknown = stale || device == null || !device.optBoolean("online");
+            if (!unknown && !NativeListPresentation.pendingKind(task).isEmpty()) status = "waiting";
             if (NativeWorkbenchPolicy.uncertainTask(tool, actualTool, status, archived, unknown)) uncertain++;
             if (deviceId != null) {
                 if (deviceId.equals(task.optString("device_id")) && !archived) shown.put(task);

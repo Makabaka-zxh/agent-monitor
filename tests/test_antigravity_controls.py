@@ -286,6 +286,33 @@ def test_permission_and_elicitation_wire_contracts():
                           source_id="antigravity:" + SESSION, session_id=SESSION, turn_id="cmd-1", now=100)
 
 
+def test_untitled_enum_multiselect_returns_exact_values_and_ignores_defaults():
+    fields = {"color": {"type": "string", "enum": ["green", "blue"], "enumNames": ["Green", "Blue"]},
+              "tags": {"type": "array", "items": {"type": "string", "enum": ["frontend", "qa", "docs"]},
+                       "default": ["qa"]}}
+    message = {"id": "form1", "method": "elicitation/create", "params": {
+        "sessionId": SESSION, "mode": "form", "requestedSchema": {"type": "object", "properties": fields}}}
+
+    def parse():
+        return normalize_request("antigravity", message, command_id="cmd1", source_id="antigravity:" + SESSION,
+                                 session_id=SESSION, turn_id="cmd1")
+
+    request = parse()
+    color, tags = request.questions
+    assert color.text == "color" and [choice.label for choice in color.options] == ["Green", "Blue"]
+    assert tags.multiple and [choice.label for choice in tags.options] == ["frontend", "qa", "docs"]
+    wire = request.response({"decision": "answer", "answers": [
+        {"question_id": "color", "choices": ["o1"]}, {"question_id": "tags", "choices": ["o2", "o0"]}]})
+    assert wire["result"] == {"action": "accept", "content": {"color": "blue", "tags": ["docs", "frontend"]}}
+    fields["color"]["enumNames"] = ["one label missing"]
+    with pytest.raises(UnsupportedControl):
+        parse()
+    del fields["color"]["enumNames"]
+    fields["color"]["oneOf"] = [{"const": "green", "title": "Green"}]
+    with pytest.raises(UnsupportedControl):
+        parse()
+
+
 class FakePipe:
     def __init__(self, on_line=None):
         self.q: queue.Queue = queue.Queue()

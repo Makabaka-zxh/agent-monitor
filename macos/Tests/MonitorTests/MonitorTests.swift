@@ -113,4 +113,17 @@ final class MonitorTests: XCTestCase {
         XCTAssertNotNil(QRCodeRenderer.image(for: start.verificationUrl))
         XCTAssertNil(QRCodeRenderer.image(for: ""))
     }
+    func testPendingInteractionKindSurfacesQuestionAndApprovalAcrossRunningOrIdleTasks() throws {
+        let questionTask = try decode(MonitorTask.self, #"{"id":"device:claude:q1","title":"确认迁移策略","tool":"claude","status":"running","pending_interaction_kind":"question","device_id":"device","archived":false,"stale":false}"#)
+        XCTAssertEqual(questionTask.effectivePendingKind, "question")
+        XCTAssertEqual(questionTask.effectiveStatus, "waiting")
+        XCTAssertEqual(questionTask.statusTitle, "等待回答")
+        XCTAssertTrue(questionTask.matches(tool: .all, scope: .active, fresh: true))
+
+        let approvalTask = try decode(MonitorTask.self, #"{"id":"device:codex:a1","title":"执行脚本","tool":"codex","status":"idle","pending_interaction_kind":"approval","device_id":"device","archived":false,"stale":false}"#)
+        XCTAssertEqual(approvalTask.effectivePendingKind, "approval")
+        XCTAssertEqual(approvalTask.effectiveStatus, "waiting")
+        XCTAssertEqual(approvalTask.statusTitle, "等待批准")
+        XCTAssertTrue(approvalTask.matches(tool: .all, scope: .active, fresh: true))
+    }
 }

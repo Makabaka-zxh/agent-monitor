@@ -59,6 +59,7 @@ final class TaskDetailModel: ObservableObject {
     private var active = true
     private var resultGeneration = UUID()
     private var retryResultSoon = false
+    private var observedPendingKind: String
     private var subscriptions = Set<AnyCancellable>()
     @Published private var rateLimitUntil = Date.distantPast
 
@@ -66,6 +67,7 @@ final class TaskDetailModel: ObservableObject {
         let taskId = task.id
         self.taskId = taskId
         supportsReply = task.supportsReply
+        observedPendingKind = task.effectivePendingKind
         self.store = store
         token = store.credential?.token ?? ""
         let scopedHash = MonitorSecurity.hash(Data((store.tokenFingerprint + ":" + taskId).utf8))
@@ -211,10 +213,19 @@ final class TaskDetailModel: ObservableObject {
                 guard !Task.isCancelled && current else { return }
                 await refreshControls()
             }
-            let waitingTask = store.task(taskId)?.status == "waiting"
+            let waitingTask = store.task(taskId)?.effectiveStatus == "waiting"
             let catalogPending = controls?.catalogStatus == "pending"
             let interval = retryResultSoon ? 1 : catalogPending ? 2 : (unresolved || waitingTask || hasOpenInteraction) ? 3 : 8
             do { try await Task.sleep(for: .seconds(interval)) } catch { return }
+        }
+    }
+
+    func observePendingKind(_ nextKind: String) {
+        guard nextKind != observedPendingKind else { return }
+        observedPendingKind = nextKind
+        if !nextKind.isEmpty && supportsReply && current {
+            controlsNextAt = .distantPast
+            Task { await refreshControls(force: true) }
         }
     }
 
@@ -291,7 +302,7 @@ final class TaskDetailModel: ObservableObject {
             controlsObservedAt = Date()
             controlsFeedback = ""
             let catalogPending = value.catalogStatus == "pending"
-            let fastPoll = unresolved || store.task(taskId)?.status == "waiting" || hasOpenInteraction
+            let fastPoll = unresolved || store.task(taskId)?.effectiveStatus == "waiting" || hasOpenInteraction
             controlsNextAt = Date().addingTimeInterval(catalogPending ? 1.5 : fastPoll ? 3 : 5)
             pruneFinishedDecisions()
         } catch {

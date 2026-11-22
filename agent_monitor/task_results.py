@@ -618,20 +618,24 @@ class TaskResults:
         self._enabled()
 
     def _final(self, task_id: str):
-        device, source, task = self._task(task_id)
-        self._enabled()
-        if task["local"]:
-            return self.local.read(source), True
         with self.store.lock:
-            row = self.store.db.execute("SELECT payload FROM final_results WHERE device_id=? AND source_id=?", (device, source)).fetchone()
-            if not row:
-                return None, False
-            result = json.loads(row["payload"])
-            files = self.store.db.execute("SELECT file_id,ready FROM final_files WHERE device_id=? AND source_id=?", (device, source)).fetchall()
-        ready = {file["file_id"]: bool(file["ready"]) for file in files}
-        for file in result["files"]:
-            file["ready"] = ready.get(file["id"], False)
-        return result, False
+            device, source, task = self._task(task_id)
+            self._enabled()
+            if not task["local"]:
+                row = self.store.db.execute("SELECT result_id,payload FROM final_results WHERE device_id=? AND source_id=?",
+                                            (device, source)).fetchone()
+                # A heartbeat can announce the next final before its upload arrives.
+                expected = json.loads(task["payload"]).get("final_result_id")
+                if not row or (expected and row["result_id"] != expected):
+                    return None, False
+                result = json.loads(row["payload"])
+                files = self.store.db.execute("SELECT file_id,ready FROM final_files WHERE device_id=? AND source_id=?",
+                                              (device, source)).fetchall()
+                ready = {file["file_id"]: bool(file["ready"]) for file in files}
+                for file in result["files"]:
+                    file["ready"] = ready.get(file["id"], False)
+                return result, False
+        return self.local.read(source), True
 
     def result(self, task_id: str):
         final, local = self._final(task_id)

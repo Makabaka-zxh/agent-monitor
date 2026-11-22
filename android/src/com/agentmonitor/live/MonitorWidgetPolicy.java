@@ -164,13 +164,15 @@ public final class MonitorWidgetPolicy {
         final String title;
         final String tool;
         final String status;
+        final String pendingKind;
         final String computer;
 
-        TaskItem(String id, String title, String tool, String status, String computer) {
+        TaskItem(String id, String title, String tool, String status, String pendingKind, String computer) {
             this.id = id;
             this.title = title;
             this.tool = tool;
             this.status = status;
+            this.pendingKind = pendingKind;
             this.computer = computer;
         }
     }
@@ -559,7 +561,7 @@ public final class MonitorWidgetPolicy {
             boolean waiting = "waiting".equals(lead.status);
             boolean errored = "error".equals(lead.status);
             boolean needsAttention = waiting || errored;
-            String statusText = waiting ? "等待批准" : errored ? "需要关注" : "执行中";
+            String statusText = waiting ? NativeListPresentation.waitingLabel(lead.pendingKind) : errored ? "需要关注" : "执行中";
             String subtitle = statusText
                     + (lead.computer.isEmpty() ? "" : " · " + lead.computer)
                     + (tasks.totalActive() > 1 ? " · 共 " + tasks.totalActive() + " 项活跃" : "");
@@ -786,19 +788,18 @@ public final class MonitorWidgetPolicy {
                 JSONObject dev = devices.get(t.optString("device_id"));
                 boolean online = dev != null && dev.optBoolean("online");
                 if (!online) continue;
-                String status = t.optString("status");
+                String kind = NativeListPresentation.pendingKind(t);
+                String status = kind.isEmpty() ? t.optString("status") : "waiting";
                 if (!"running".equals(status) && !"waiting".equals(status) && !"error".equals(status)) continue;
                 if ("running".equals(status)) running++;
                 else if ("waiting".equals(status)) waiting++;
                 else errored++;
 
-                if (active.size() < 8) {
-                    String tool = t.optString("tool");
-                    String title = LivePresentation.clean(t.optString("title"), 64);
-                    if (title.isEmpty()) title = toolLabel(tool) + " 任务";
-                    String computer = dev == null ? "" : LivePresentation.clean(dev.optString("name"), 24);
-                    active.add(new TaskItem(t.optString("id"), title, tool, status, computer));
-                }
+                String tool = t.optString("tool");
+                String title = LivePresentation.clean(t.optString("title"), 64);
+                if (title.isEmpty()) title = toolLabel(tool) + " 任务";
+                String computer = LivePresentation.clean(dev.optString("name"), 24);
+                active.add(new TaskItem(t.optString("id"), title, tool, status, kind, computer));
             }
         }
         // Prioritize waiting approvals first, then errors needing attention, then running tasks.
@@ -813,7 +814,7 @@ public final class MonitorWidgetPolicy {
     }
 
     private static String formatTaskRow(TaskItem item) {
-        String state = "waiting".equals(item.status) ? "待批准" : "error".equals(item.status) ? "需关注" : "执行中";
+        String state = "waiting".equals(item.status) ? NativeListPresentation.waitingLabel(item.pendingKind) : "error".equals(item.status) ? "需关注" : "执行中";
         return "[" + state + "] " + toolShortLabel(item.tool) + " · " + item.title;
     }
 

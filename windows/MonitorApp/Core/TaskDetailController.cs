@@ -31,6 +31,38 @@ public sealed class StoredDecisionEntry
     public SessionDecisionPayloadDto Payload { get; set; } = new();
 }
 
+public sealed class TaskResultCache
+{
+    private (string? Marker, string? Status, string? UpdatedAt)? _revision;
+    public long Generation { get; private set; }
+    public TaskResultDto? Result { get; private set; }
+    public bool NeedsRefresh => _revision.HasValue &&
+        (Result?.Available != true || Result.Files?.Any(file => file.Ready == false) == true);
+
+    public bool Observe(MonitorTask? task, bool enabled)
+    {
+        (string? Marker, string? Status, string? UpdatedAt)? next = null;
+        if (enabled && task is not null)
+        {
+            // Older collectors do not advertise a result ID. Recheck on task changes.
+            next = string.IsNullOrEmpty(task.FinalResultId)
+                ? (null, task.Status, task.UpdatedAt) : (task.FinalResultId, null, null);
+        }
+        if (next == _revision) return false;
+        _revision = next;
+        Generation++;
+        Result = null;
+        return true;
+    }
+
+    public void Apply(long generation, TaskResultDto response)
+    {
+        if (generation != Generation || _revision is not { } current) return;
+        Result = response.Available && current.Marker is { } marker && response.ResultId != marker
+            ? new TaskResultDto { Reason = "等待电脑同步最新结果" } : response;
+    }
+}
+
 public sealed class TaskDetailController : IDisposable
 {
     public event Action? Changed;
@@ -44,7 +76,8 @@ public sealed class TaskDetailController : IDisposable
     private readonly string _decisionVaultKey;
     private readonly CancellationTokenSource _cts = new();
 
-    public TaskResultDto? Result { get; private set; }
+    private readonly TaskResultCache _resultCache = new();
+    public TaskResultDto? Result => _resultCache.Result;
     public bool ResultLoading { get; private set; }
     public bool Downloading { get; private set; }
     public string ResultError { get; private set; } = "";
@@ -52,7 +85,8 @@ public sealed class TaskDetailController : IDisposable
     public TaskControlsResponseDto? Controls { get; private set; }
     public bool ControlsLoading { get; private set; }
     public bool DecisionSending { get; private set; }
-    public string ControlsFeedback { get; private set; } = "";
+    public string ControlsFeedback { get; set; } = "";
+    private string _observedPendingKind = "";
 
     public PersistedPendingReply? PendingReply { get; private set; }
     public PersistedModelOverrides ModelOverrides { get; private set; } = new();
@@ -69,6 +103,7 @@ public sealed class TaskDetailController : IDisposable
         SupportsReply = task.SupportsReply;
         _hub = hub;
         _token = hub.ActiveToken ?? "";
+        ObserveWorkbench();
 
         var scopeHash = MonitorSecurity.Sha256Hex($"{hub.TokenFingerprint}:{TaskId}");
         _replyVaultKey = "reply:" + scopeHash;
@@ -114,39 +149,49 @@ public sealed class TaskDetailController : IDisposable
 
     private async Task PollLoopAsync()
     {
-        await LoadResultAsync();
-        if (SupportsReply)
+        try
         {
-            await RefreshReplyStateAsync();
-            await RefreshControlsAsync();
-        }
-        while (!_cts.IsCancellationRequested && IsActive)
-        {
-            var fastPoll = SupportsReply && (Controls?.CatalogStatus == "pending" || PendingReply?.Unresolved == true);
-            try
+            while (IsActive)
             {
+                await LoadResultAsync();
+                if (SupportsReply)
+                {
+                    await RefreshReplyStateAsync();
+                    await RefreshControlsAsync();
+                }
+                var hasOpenPending = Controls?.Pending?.Any(p => p.State is "pending" or "submitted") == true;
+                var fastPoll = SupportsReply && (Controls?.CatalogStatus == "pending"
+                                                 || PendingReply?.Unresolved == true
+                                                 || hasOpenPending
+                                                 || !string.IsNullOrEmpty(_observedPendingKind));
                 await Task.Delay(fastPoll ? 2000 : 5000, _cts.Token);
             }
-            catch (OperationCanceledException) { return; }
-            if (!IsActive) return;
-            if (SupportsReply)
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+    }
+
+    public void ObserveWorkbench()
+    {
+        var task = _hub.Tasks.FirstOrDefault(item => item.Id == TaskId);
+        if (_resultCache.Observe(task, IsActive && _hub.SyncOutput)) ResultError = "";
+        if (!_hub.SyncOutput) ResultError = "尚未开启账号结果同步（可在「电脑 -> 同步设置」中开启）";
+
+        var nextKind = task?.EffectivePendingKind ?? "";
+        if (nextKind != _observedPendingKind)
+        {
+            _observedPendingKind = nextKind;
+            if (!string.IsNullOrEmpty(nextKind) && IsActive)
             {
-                await RefreshReplyStateAsync();
-                await RefreshControlsAsync();
+                _ = RefreshControlsAsync();
             }
         }
     }
 
     public async Task LoadResultAsync(bool force = false)
     {
-        if (!IsActive || ResultLoading) return;
-        if (!_hub.SyncOutput)
-        {
-            Result = null;
-            ResultError = "尚未开启账号结果同步（可在「电脑 -> 同步设置」中开启）";
-            Notify();
-            return;
-        }
+        ObserveWorkbench();
+        if (!IsActive || !_hub.SyncOutput || _hub.RateLimited || ResultLoading || (!force && !_resultCache.NeedsRefresh)) return;
+        var generation = _resultCache.Generation;
         ResultLoading = true;
         Notify();
         try
@@ -155,12 +200,17 @@ public sealed class TaskDetailController : IDisposable
                 _hub.Origin, "/api/native/tasks/result", HttpMethod.Get,
                 token: _token, query: [("task_id", TaskId)], ct: _cts.Token);
             if (!IsActive) return;
-            Result = res;
+            ObserveWorkbench();
+            if (generation != _resultCache.Generation) return;
+            _resultCache.Apply(generation, res);
             ResultError = "";
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception ex)
         {
             if (!IsActive) return;
+            ObserveWorkbench();
+            if (generation != _resultCache.Generation) return;
             ResultError = ex is MonitorApiException apiEx ? apiEx.Message : "暂时无法读取最终结果";
             _hub.HandleApiError(ex, _token, showAlert: false);
         }
@@ -173,17 +223,22 @@ public sealed class TaskDetailController : IDisposable
 
     public async Task<byte[]?> DownloadTxtBytesAsync()
     {
-        if (!CanSaveTxt || Downloading || Result is null) return null;
+        ObserveWorkbench();
+        if (!CanSaveTxt || Downloading || Result is not { } result) return null;
+        var generation = _resultCache.Generation;
         Downloading = true;
         Notify();
         try
         {
-            return await _hub.Api.DownloadVerifiedAsync(
+            var bytes = await _hub.Api.DownloadVerifiedAsync(
                 _hub.Origin, "/api/native/tasks/result.txt", _token,
-                Result.TxtSize!.Value, Result.TxtSha256!,
-                [("task_id", TaskId), ("result_id", Result.ResultId!)], _cts.Token);
+                result.TxtSize!.Value, result.TxtSha256!,
+                [("task_id", TaskId), ("result_id", result.ResultId!)], _cts.Token);
+            ObserveWorkbench();
+            return IsActive && generation == _resultCache.Generation ? bytes : null;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { return null; }
+        catch (Exception ex)
         {
             _hub.Notice = ex is MonitorApiException apiEx ? apiEx.Message : "下载 TXT 校验未通过，请刷新后重试";
             return null;
@@ -197,17 +252,23 @@ public sealed class TaskDetailController : IDisposable
 
     public async Task<byte[]?> DownloadDeliverableAsync(ResultFileDto file)
     {
-        if (!IsActive || Downloading || Result?.ResultId is not { } resultId || file.Ready == false) return null;
+        ObserveWorkbench();
+        if (!IsActive || !_hub.SyncOutput || Downloading || Result?.ResultId is not { } resultId ||
+            Result.Files?.Any(item => item.Id == file.Id && item.Sha256 == file.Sha256 && item.Ready != false) != true) return null;
+        var generation = _resultCache.Generation;
         Downloading = true;
         Notify();
         try
         {
-            return await _hub.Api.DownloadVerifiedAsync(
+            var bytes = await _hub.Api.DownloadVerifiedAsync(
                 _hub.Origin, "/api/native/tasks/result/file", _token,
                 file.Size, file.Sha256,
                 [("task_id", TaskId), ("result_id", resultId), ("file_id", file.Id)], _cts.Token);
+            ObserveWorkbench();
+            return IsActive && generation == _resultCache.Generation ? bytes : null;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { return null; }
+        catch (Exception ex)
         {
             _hub.Notice = ex is MonitorApiException apiEx ? apiEx.Message : "文件下载或 SHA-256 校验失败";
             return null;
@@ -231,7 +292,8 @@ public sealed class TaskDetailController : IDisposable
             if (!IsActive) return;
             Controls = res;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception ex)
         {
             if (IsActive) _hub.HandleApiError(ex, _token, showAlert: false);
         }
@@ -300,6 +362,10 @@ public sealed class TaskDetailController : IDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            if (ex is MonitorApiException { Status: 400 or 404 or 409 or 410 or 422 } && Decisions.Remove(request.Id) && !string.IsNullOrEmpty(_hub.Origin))
+            {
+                DpapiVault.Write(_hub.Origin, _decisionVaultKey, Decisions);
+            }
             ControlsFeedback = ex is MonitorApiException apiEx ? apiEx.Message : "发送尚未确认，再次点击将使用同一决定幂等重试";
             _hub.HandleApiError(ex, _token, showAlert: false);
         }
@@ -345,7 +411,8 @@ public sealed class TaskDetailController : IDisposable
                 ReplyMessage = state.Reason ?? "";
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception ex)
         {
             if (IsActive)
             {

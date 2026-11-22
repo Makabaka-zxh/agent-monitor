@@ -96,6 +96,7 @@ public final class NativeWorkbenchOverview {
             String status = nonemptyString(task.opt("status"));
             String deviceId = nonemptyString(task.opt("device_id"));
             boolean sourceUnavailable = deviceId == null || !Boolean.TRUE.equals(onlineById.get(deviceId));
+            if (!sourceUnavailable && !NativeListPresentation.pendingKind(task).isEmpty()) status = "waiting";
             if (NativeWorkbenchPolicy.uncertainTask("all", tool, status, false, sourceUnavailable)
                     || tool == null) {
                 uncertain = true;

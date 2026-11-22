@@ -276,7 +276,8 @@ public final class NativeApi {
             // A failed preparation still has a duration; untouched later phases stay -1.
             // Capture before cleanup so transport cleanup is not called preparation.
             if (prepareMs < 0) prepareMs = elapsed(started);
-            closeErrorBody(connection, httpStatus); disconnectQuietly(connection);
+            closeErrorBody(connection, httpStatus);
+            if (!completed) disconnectQuietly(connection);
             if (deadline != null) deadline.close();
             timing(method, path, httpStatus, headersMs, elapsed(started), byteCount, completed, stage, failureKind, traceId);
             phaseTiming(method, path, traceId, prepareMs, headersWaitMs, bodyMs, decodeMs);

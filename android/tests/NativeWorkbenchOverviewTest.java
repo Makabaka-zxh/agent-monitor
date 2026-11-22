@@ -56,6 +56,7 @@ public final class NativeWorkbenchOverviewTest {
         expect("执行中 2 · 待处理 1 · 出错 1", snapshot(entries, online()), false);
         expect("执行中 1", one(task("running", "source", false)), false);
         expect("待处理 1", one(task("waiting", "source", false)), false);
+        expect("待处理 1", one(task("completed", "source", false).put("pending_interaction_kind", "question")), false);
         expect("出错 1", one(task("error", "source", false)), false);
         expect("暂无进行中的任务", one(task("idle", "source", false)), false);
         expect("暂无进行中的任务", one(task("completed", "source", false)), false);

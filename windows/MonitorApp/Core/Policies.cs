@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace MonitorApp.Core;
 
@@ -178,6 +179,55 @@ public static class UsageFormatting
         return order.Select(k => map[k]).Where(g => g.Quotas.Count > 0).ToList();
     }
 
+    private static readonly Regex ClaudeModelRegex = new(
+        @"^(?:anthropic/)?claude-(opus|sonnet|haiku|fable|mythos)(?:-([0-9]{1,2}(?:[.-][0-9]{1,2})?))?(?:-(low|medium|high|xhigh|thinking))?(?:-(?:[0-9]{8}|latest))?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex EarlyClaudeModelRegex = new(
+        @"^(?:anthropic/)?claude-([0-9]{1,2}(?:[.-][0-9]{1,2})?)-(opus|sonnet|haiku|fable|mythos)(?:-(?:[0-9]{8}|latest))?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex GeminiModelRegex = new(
+        @"^(?:google/)?gemini(?:-([0-9]+(?:[.-][0-9]+)?))?((?:-(?:pro|flash|lite|ultra|nano|neon|carbon|hydrogen|argon|orchestrator|tiered|worker|thinking|exp))+)(?:-(low|medium|high|xhigh))?(?:-(?:agy|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest))?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex GptOssModelRegex = new(
+        @"^(?:openai/)?gpt-oss-([0-9]+b)(?:-(low|medium|high|xhigh))?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex GptModelRegex = new(
+        @"^(?:openai/)?(gpt-[0-9]+(?:\.[0-9]+)?o?|o[1-9][0-9]*)((?:-(?:codex|spark|pro|mini|nano|max|turbo|astra|sol|luna|terra))*)(?:-(low|medium|high|xhigh))?(?:-(?:[0-9]{4}-?[0-9]{2}-?[0-9]{2}|latest))?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex DatedIdRegex = new(
+        @"^.*-([0-9]{4})-?([0-9]{2})-?([0-9]{2})$",
+        RegexOptions.Compiled);
+
+    private static readonly Regex SizeTokenRegex = new(
+        @"^[0-9]+(?:\.[0-9]+)?[bmk]$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static string TitleWord(string token) =>
+        string.IsNullOrEmpty(token)
+            ? ""
+            : char.ToUpperInvariant(token[0]) + (token.Length > 1 ? token[1..].ToLowerInvariant() : "");
+
+    private static string EffortLabel(string effort) =>
+        string.Equals(effort, "xhigh", StringComparison.OrdinalIgnoreCase) ? "XHigh" : TitleWord(effort);
+
+    public static string ModelVariant(string id)
+    {
+        var trimmed = id.Trim();
+        var m = DatedIdRegex.Match(trimmed);
+        var version = m.Success
+            ? $"{m.Groups[1].Value}-{m.Groups[2].Value}-{m.Groups[3].Value}"
+            : trimmed.EndsWith("-latest", StringComparison.OrdinalIgnoreCase) ? "最新版" : "未指定快照";
+        if (trimmed.StartsWith("openai/", StringComparison.OrdinalIgnoreCase)) return "OpenAI · " + version;
+        if (trimmed.StartsWith("anthropic/", StringComparison.OrdinalIgnoreCase)) return "Anthropic · " + version;
+        if (trimmed.StartsWith("google/", StringComparison.OrdinalIgnoreCase)) return "Google · " + version;
+        return version;
+    }
+
     public static string FormatModelName(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return OtherModelLabel;
@@ -187,21 +237,106 @@ public static class UsageFormatting
             return OtherModelLabel;
         if (trimmed.Contains(" · ") || trimmed.Contains(" / "))
             return trimmed;
-        if (lower.StartsWith("claude-opus-4-7")) return "Claude Opus 4.7";
-        if (lower.StartsWith("claude-opus-4-6")) return "Claude Opus 4.6";
-        if (lower.StartsWith("claude-sonnet-4-6")) return "Claude Sonnet 4.6";
-        if (lower.StartsWith("claude-sonnet-4-5")) return "Claude Sonnet 4.5";
-        if (lower.StartsWith("claude-haiku-4-5")) return "Claude Haiku 4.5";
-        if (lower.StartsWith("gemini-3.1-pro")) return "Gemini 3.1 Pro";
-        if (lower.StartsWith("gemini-3-flash")) return "Gemini 3 Flash";
-        if (lower.StartsWith("gemini-2.5-pro")) return "Gemini 2.5 Pro";
-        if (lower.StartsWith("gemini-2.5-flash")) return "Gemini 2.5 Flash";
-        if (lower.StartsWith("gpt-5.4")) return "GPT-5.4";
-        if (lower.StartsWith("gpt-5.3-codex")) return "GPT-5.3 Codex";
-        if (lower.StartsWith("gpt-5.2-codex")) return "GPT-5.2 Codex";
-        if (lower.StartsWith("gpt-5")) return trimmed.ToUpperInvariant().Replace("CODEX", "Codex");
+
+        if (ClaudeModelRegex.Match(trimmed) is { Success: true } claude)
+        {
+            var version = claude.Groups[2].Success ? " " + claude.Groups[2].Value.Replace('-', '.') : "";
+            var baseName = "Claude " + TitleWord(claude.Groups[1].Value) + version;
+            return claude.Groups[3].Success ? $"{baseName} ({EffortLabel(claude.Groups[3].Value)})" : baseName;
+        }
+
+        if (EarlyClaudeModelRegex.Match(trimmed) is { Success: true } early)
+        {
+            return $"Claude {early.Groups[1].Value.Replace('-', '.')} {TitleWord(early.Groups[2].Value)}";
+        }
+
+        if (GeminiModelRegex.Match(trimmed) is { Success: true } gemini)
+        {
+            var sb = new StringBuilder("Gemini");
+            if (gemini.Groups[1].Success)
+                sb.Append(' ').Append(gemini.Groups[1].Value.Replace('-', '.'));
+            foreach (var word in gemini.Groups[2].Value.TrimStart('-').Split('-', StringSplitOptions.RemoveEmptyEntries))
+                sb.Append(' ').Append(TitleWord(word));
+            if (gemini.Groups[3].Success)
+                sb.Append(" (").Append(EffortLabel(gemini.Groups[3].Value)).Append(')');
+            return sb.ToString();
+        }
+
+        if (GptOssModelRegex.Match(trimmed) is { Success: true } gptOss)
+        {
+            var baseName = "GPT-OSS " + gptOss.Groups[1].Value.ToUpperInvariant();
+            return gptOss.Groups[2].Success ? $"{baseName} ({EffortLabel(gptOss.Groups[2].Value)})" : baseName;
+        }
+
+        if (GptModelRegex.Match(trimmed) is { Success: true } gpt)
+        {
+            var basePart = gpt.Groups[1].Value.ToLowerInvariant();
+            var sb = new StringBuilder(
+                basePart.StartsWith("gpt-", StringComparison.Ordinal)
+                    ? "GPT-" + basePart[4..]
+                    : basePart.ToUpperInvariant());
+            var modifiers = gpt.Groups[2].Value.ToLowerInvariant();
+            if (!string.IsNullOrEmpty(modifiers))
+            {
+                foreach (var word in modifiers.TrimStart('-').Split('-', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (modifiers.StartsWith("-codex", StringComparison.Ordinal) || word == "spark")
+                        sb.Append('-').Append(TitleWord(word));
+                    else
+                        sb.Append(' ').Append(TitleWord(word));
+                }
+            }
+            if (gpt.Groups[3].Success)
+                sb.Append(" (").Append(EffortLabel(gpt.Groups[3].Value)).Append(')');
+            return sb.ToString();
+        }
+
+        // Future-proof fallback for any lowercase slug ID (e.g. gpt-6.3-nova, deepseek-r1, qwen-2.5-coder-32b)
+        if (trimmed == lower && lower.Any(c => c is >= 'a' and <= 'z'))
+        {
+            var clean = Regex.Replace(lower, @"^(?:openai|anthropic|google|deepseek|meta|qwen|mistral)/", "");
+            clean = Regex.Replace(clean, @"-(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8}|latest|agy)$", "");
+            if (clean.StartsWith("gpt-", StringComparison.Ordinal))
+            {
+                var rest = clean[4..].Split('-', StringSplitOptions.RemoveEmptyEntries);
+                if (rest.Length > 0)
+                {
+                    var head = "GPT-" + (rest[0] == "oss" ? "OSS" : rest[0]);
+                    var tail = rest.Skip(1).Select(FormatSlugToken).ToList();
+                    return tail.Count == 0 ? head : head + " " + string.Join(" ", tail);
+                }
+            }
+            var parts = clean.Split('-', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > 0)
+            {
+                string? trailingEffort = null;
+                if (parts.Length > 1 && parts[^1] is "low" or "medium" or "high" or "xhigh")
+                {
+                    trailingEffort = EffortLabel(parts[^1]);
+                    parts = parts[..^1];
+                }
+                var formatted = string.Join(" ", parts.Select(FormatSlugToken));
+                return trailingEffort is null ? formatted : $"{formatted} ({trailingEffort})";
+            }
+        }
+
         return trimmed;
     }
+
+    private static string FormatSlugToken(string token) => token switch
+    {
+        "gpt" => "GPT",
+        "oss" => "OSS",
+        "glm" => "GLM",
+        "vl" => "VL",
+        "r1" => "R1",
+        "v2" or "v3" or "v4" => token.ToUpperInvariant(),
+        "deepseek" => "DeepSeek",
+        "minimax" => "MiniMax",
+        _ when SizeTokenRegex.IsMatch(token) => token.ToUpperInvariant(),
+        _ when Regex.IsMatch(token, @"^o[1-9][0-9]*$") => token.ToUpperInvariant(),
+        _ => TitleWord(token)
+    };
 
     public sealed record ModelShareItem(string Key, string DisplayName, long Tokens, double Percent);
 
@@ -232,7 +367,7 @@ public static class UsageFormatting
         var result = new List<ModelShareItem>(sorted.Count + 1);
         foreach (var row in sorted)
         {
-            var display = nameCounts[row.Name] > 1 ? $"{row.Name} ({row.Raw})" : row.Name;
+            var display = nameCounts[row.Name] > 1 ? $"{row.Name} ({ModelVariant(row.Raw)})" : row.Name;
             result.Add(new ModelShareItem(row.Raw, display, row.Tokens, row.Tokens * 100.0 / total));
         }
         if (unknown > 0)
@@ -290,6 +425,68 @@ public static class SessionControlPolicy
         if (catalog.ValidUntil is { } until && until <= now.ToUnixTimeSeconds()) return false;
         return true;
     }
+
+    public static string StateLabel(string? state) => state switch
+    {
+        "pending" => "待你处理",
+        "submitted" => "已发送，等待电脑确认",
+        "forwarded" => "已交给电脑，等待任务结果",
+        "acknowledged" => "电脑已收到",
+        "cancelled" => "已在电脑处理或取消",
+        "expired" => "请求已过期",
+        _ => "状态确认中"
+    };
+
+    public static bool ValidAnswers(SessionPendingRequestDto req, IReadOnlyList<SessionAnswerPayloadDto>? answers)
+    {
+        if (req.Kind != "question" || req.Questions is not { Count: > 0 } questions || answers is null)
+            return false;
+        if (answers.Count != questions.Count)
+            return false;
+
+        var byId = new Dictionary<string, SessionAnswerPayloadDto>(StringComparer.Ordinal);
+        foreach (var ans in answers)
+        {
+            if (string.IsNullOrEmpty(ans.QuestionId) || !byId.TryAdd(ans.QuestionId, ans))
+                return false;
+        }
+
+        foreach (var q in questions)
+        {
+            if (!byId.TryGetValue(q.Id, out var ans))
+                return false;
+
+            var choices = ans.Choices ?? [];
+            var hasChoices = choices.Count > 0;
+            var trimmedText = ans.Text?.Trim() ?? "";
+            var hasText = trimmedText.Length > 0;
+
+            if (hasChoices == hasText)
+                return false;
+
+            if (hasChoices)
+            {
+                if (q.Options is not { Count: > 0 } opts)
+                    return false;
+                if (q.Multiple != true && choices.Count != 1)
+                    return false;
+                var allowed = opts.Select(o => o.Id).ToHashSet(StringComparer.Ordinal);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var c in choices)
+                {
+                    if (!allowed.Contains(c) || !seen.Add(c))
+                        return false;
+                }
+            }
+            else
+            {
+                var allowsFreeText = q.AllowsText == true || q.Options is null or { Count: 0 };
+                if (!allowsFreeText || trimmedText.Length > 4000)
+                    return false;
+            }
+        }
+        return true;
+    }
 }
 
 public sealed class UsageAlertSettings
@@ -303,6 +500,26 @@ public sealed class LocalUiSettings
 {
     public string ThemeMode { get; set; } = "system"; // "system" | "light" | "dark"
     public bool CloseToTray { get; set; } = true;
+
+    // Personalizable Background ("cloud" | "blue" | "sand" | "mist" | "bing" | "custom")
+    public string BackgroundMode { get; set; } = "cloud";
+    public string WallpaperStyle { get; set; } = "balanced"; // "clear" | "balanced" | "frosted"
+
+    // Compact Mini-Window Size & Content Customization
+    public string CompactSizePreset { get; set; } = "medium"; // "nano" | "small" | "medium" | "large"
+    public string CompactContentMode { get; set; } = "overview"; // "overview" | "tasks" | "quotas"
+    public bool CompactShowLowestQuota { get; set; } = true;
+    public bool CompactShowToolStrip { get; set; } = true;
+    public bool CompactShowTodayTokens { get; set; } = true;
+    public bool CompactShowTaskMeta { get; set; } = true;
+
+    public (double Width, double Height) GetCompactDimensions() => CompactSizePreset switch
+    {
+        "nano" => (308, 196),
+        "small" => (336, 356),
+        "large" => (468, 640),
+        _ => (384, 504)
+    };
 }
 
 public sealed class UsageAlertRecord

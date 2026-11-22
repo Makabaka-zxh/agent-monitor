@@ -156,13 +156,13 @@ public final class NativeApiTransportTest {
         NativeApi.Reply result = NativeApi.callReply("GET", "/api/native/workbench", null, TOKEN, 250, source -> { decoded[0] = source; return null; });
         FakeHttps connection = only();
         check(result != null && "{\"ok\":true}".equals(decoded[0]), "complete response reaches the injected decoder exactly once");
-        check(connection.body.closed && connection.disconnects.get() == 1, "success closes its stream and connection");
+        check(connection.body.closed && connection.disconnects.get() == 0, "success closes its stream without tearing down keep-alive connection");
         check(connection.getConnectTimeout() == NativeApi.TIMEOUT_MS && connection.getReadTimeout() == NativeApi.TIMEOUT_MS, "per-operation I/O limits remain configured");
         check(!connection.getInstanceFollowRedirects() && !connection.getUseCaches(), "redirect and cache policy retained");
         check(("Bearer " + TOKEN).equals(connection.getRequestProperty("Authorization")), "credential sent only in the request header");
         check(result.cookies.size() == 1, "response cookie handling remains intact");
         Thread.sleep(330);
-        check(connection.disconnects.get() == 1, "cancelled success deadline never disconnects again later");
+        check(connection.disconnects.get() == 0, "cancelled success deadline never disconnects later");
         check(android.util.Log.recorded().contains("complete=true stage=decode failure=none"), "success has final safe timing");
     }
     private static void emptyResponse() throws Exception {
@@ -171,7 +171,7 @@ public final class NativeApiTransportTest {
         NativeApi.callReply("GET", "/api/native/workbench", null, TOKEN, 150, source -> { decoded[0] = source; return null; });
         FakeHttps connection = only();
         check("{}".equals(decoded[0]) && connection.inputOpens == 0, "204 decodes an empty object without reading a body");
-        Thread.sleep(210); check(connection.disconnects.get() == 1, "204 also cancels its deadline");
+        Thread.sleep(210); check(connection.disconnects.get() == 0, "204 also cancels its deadline and preserves keep-alive");
     }
     private static void httpErrorsCloseWithoutRetry() throws Exception {
         for (int code : new int[]{401, 403, 429, 500, 503}) {

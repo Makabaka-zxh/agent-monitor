@@ -22,11 +22,15 @@ public static class Dialogs
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize,
-            Background = UiKit.SurfaceBrush,
+            Background = UiKit.CanvasBrush,
             Foreground = UiKit.TextBrush,
             FontFamily = UiKit.AppFont
         };
-        win.SourceInitialized += (_, _) => DwmInterop.ApplyWindowStyling(win, UiKit.IsDark);
+        win.SourceInitialized += (_, _) =>
+        {
+            if (DwmInterop.ApplyWindowStyling(win, UiKit.IsDark, transientAcrylic: true))
+                win.Background = UiKit.MicaCanvasBrush;
+        };
         win.PreviewKeyDown += (_, e) =>
         {
             if (e.Key == Key.Escape)
@@ -113,7 +117,10 @@ public static class Dialogs
         UiKit.AddComboItem(modelCombo, "继承电脑当前设置", "");
         foreach (var opt in models)
         {
-            UiKit.AddComboItem(modelCombo, string.IsNullOrWhiteSpace(opt.Label) ? opt.Id : opt.Label, opt.Id);
+            var displayLabel = string.IsNullOrWhiteSpace(opt.Label) || string.Equals(opt.Label, opt.Id, StringComparison.Ordinal)
+                ? UsageFormatting.FormatModelName(opt.Id)
+                : opt.Label;
+            UiKit.AddComboItem(modelCombo, displayLabel, opt.Id);
         }
 
         var currentSelectedModel = detail.ModelOverrides.Selection?.Model ?? "";
@@ -474,6 +481,105 @@ public static class Dialogs
         root.Children.Add(actions);
 
         win.Content = root;
+        win.ShowDialog();
+    }
+
+    public static void ShowCompactWindowSettings(Window owner, MonitorController controller, Action onSettingsChanged)
+    {
+        var win = CreateModal(owner, "精简小窗设置", 430);
+        var host = new ContentControl();
+
+        void RebuildDialog()
+        {
+            var current = controller.ReadUiSettings();
+            var root = new StackPanel { Margin = new Thickness(24) };
+            root.Children.Add(UiKit.Heading("精简小窗定制", 20));
+            var desc = UiKit.Body("实时调整小窗尺寸预设与显示模块，改动立即生效。", 12.5, UiKit.MutedBrush);
+            desc.Margin = new Thickness(0, 6, 0, 14);
+            root.Children.Add(desc);
+
+            root.Children.Add(UiKit.Body("窗口尺寸", 12.5, UiKit.MutedBrush));
+            var sizeSeg = UiKit.SegmentedControl(
+                new[]
+                {
+                    ("nano", "胶囊微窗"),
+                    ("small", "紧凑小窗"),
+                    ("medium", "标准小窗"),
+                    ("large", "宽展看板")
+                }.Select(opt =>
+                {
+                    var key = opt.Item1;
+                    return (opt.Item2, current.CompactSizePreset == key, (Action)(() =>
+                    {
+                        var next = controller.ReadUiSettings();
+                        next.CompactSizePreset = key;
+                        controller.SaveUiSettings(next);
+                        onSettingsChanged();
+                        RebuildDialog();
+                    }));
+                }).ToList());
+            sizeSeg.Margin = new Thickness(0, 6, 0, 14);
+            root.Children.Add(sizeSeg);
+
+            root.Children.Add(UiKit.Body("显示模式", 12.5, UiKit.MutedBrush));
+            var modeSeg = UiKit.SegmentedControl(
+                new[]
+                {
+                    ("overview", "智能总览"),
+                    ("tasks", "仅活跃任务"),
+                    ("quotas", "仅官方额度")
+                }.Select(opt =>
+                {
+                    var key = opt.Item1;
+                    return (opt.Item2, current.CompactContentMode == key, (Action)(() =>
+                    {
+                        var next = controller.ReadUiSettings();
+                        next.CompactContentMode = key;
+                        controller.SaveUiSettings(next);
+                        onSettingsChanged();
+                        RebuildDialog();
+                    }));
+                }).ToList());
+            modeSeg.Margin = new Thickness(0, 6, 0, 14);
+            root.Children.Add(modeSeg);
+
+            root.Children.Add(UiKit.Body("小窗显示内容", 12.5, UiKit.MutedBrush));
+
+            CheckBox MakeToggle(string label, bool isChecked, Action<LocalUiSettings, bool> setter)
+            {
+                var cb = new CheckBox
+                {
+                    Content = label,
+                    Foreground = UiKit.TextBrush,
+                    IsChecked = isChecked,
+                    FontSize = 13,
+                    Margin = new Thickness(0, 7, 0, 0)
+                };
+                cb.Click += (_, _) =>
+                {
+                    var next = controller.ReadUiSettings();
+                    setter(next, cb.IsChecked == true);
+                    controller.SaveUiSettings(next);
+                    onSettingsChanged();
+                };
+                return cb;
+            }
+
+            root.Children.Add(MakeToggle("显示最低官方额度进度条与重置倒计时", current.CompactShowLowestQuota, (s, v) => s.CompactShowLowestQuota = v));
+            root.Children.Add(MakeToggle("显示 Codex / Claude / AGY 多工具速览条", current.CompactShowToolStrip, (s, v) => s.CompactShowToolStrip = v));
+            root.Children.Add(MakeToggle("显示今日本地已记录 Token 总量", current.CompactShowTodayTokens, (s, v) => s.CompactShowTodayTokens = v));
+            root.Children.Add(MakeToggle("任务卡片显示来源电脑、目录与会话 Token", current.CompactShowTaskMeta, (s, v) => s.CompactShowTaskMeta = v));
+
+            var doneBtn = UiKit.PrimaryButton("完成", () => win.Close());
+            doneBtn.HorizontalAlignment = HorizontalAlignment.Right;
+            doneBtn.Margin = new Thickness(0, 18, 0, 0);
+            root.Children.Add(doneBtn);
+
+            host.Content = UiKit.AmbientStage(root, compact: true);
+        }
+
+        RebuildDialog();
+        win.Content = host;
         win.ShowDialog();
     }
 

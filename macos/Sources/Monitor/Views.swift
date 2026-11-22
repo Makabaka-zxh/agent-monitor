@@ -34,7 +34,7 @@ private struct StatusBadge: View {
     let fresh: Bool
     var tint: Color {
         guard fresh && task.stale != true else { return .secondary }
-        switch task.status { case "running": return .green; case "waiting", "error": return .orange; default: return .secondary }
+        switch task.effectiveStatus { case "running": return .green; case "waiting", "error": return .orange; default: return .secondary }
     }
     var body: some View {
         HStack(spacing: 6) { Circle().fill(tint).frame(width: 6, height: 6); Text(fresh && task.stale != true ? task.statusTitle : "状态待更新") }
@@ -408,14 +408,17 @@ private struct TaskDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .top, spacing: 15) {
-                    BrandIcon(tool: task.tool, size: 42)
+                    BrandIcon(tool: liveTask.tool, size: 42)
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(task.title).font(.custom("MiSans-Regular", size: 25)).fontWeight(.semibold).textSelection(.enabled)
-                        HStack { Text(task.deviceName ?? "电脑"); Text("·"); StatusBadge(task: task, fresh: store.fresh) }.foregroundStyle(.secondary)
+                        Text(liveTask.title).font(.custom("MiSans-Regular", size: 25)).fontWeight(.semibold).textSelection(.enabled)
+                        HStack { Text(liveTask.deviceName ?? "电脑"); Text("·"); StatusBadge(task: liveTask, fresh: store.fresh) }.foregroundStyle(.secondary)
                     }
                     Spacer()
                 }
-                if let preview = task.preview, !preview.isEmpty { Text(preview).foregroundStyle(.secondary).lineLimit(3) }
+                if let preview = liveTask.preview, !preview.isEmpty { Text(preview).foregroundStyle(.secondary).lineLimit(3) }
+                if liveTask.supportsReply {
+                    TaskAttentionSection(model: model, waiting: liveTask.effectiveStatus == "waiting")
+                }
                 if let usage = liveTask.usage, let total = usage.totalTokens {
                     GlassCard {
                         HStack(spacing: 14) {
@@ -433,9 +436,6 @@ private struct TaskDetailView: View {
                                 .controlSize(.regular)
                         }
                     }
-                }
-                if task.supportsReply {
-                    TaskAttentionSection(model: model, waiting: task.status == "waiting")
                 }
                 GlassCard {
                     VStack(alignment: .leading, spacing: 18) {
@@ -498,6 +498,9 @@ private struct TaskDetailView: View {
         .toolbar { ToolbarItem { Button(task.archived ? "取消归档" : "归档", systemImage: "archivebox") { Task { await store.archive(task) } }.disabled(store.mutating) } }
         .sheet(isPresented: $showingModelSettings) { SessionModelSettingsSheet(model: model) }
         .sheet(isPresented: $showingTaskUsage) { UsageHelpSheet(title: "对话用量", text: taskUsageHelp(liveTask.usage)) }
+        .onChange(of: liveTask.effectivePendingKind) { _, nextKind in
+            model.observePendingKind(nextKind)
+        }
         .task { await model.run() }
     }
 }

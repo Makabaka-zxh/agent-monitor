@@ -132,11 +132,37 @@ public final class MonitorWidgetPolicyTest {
                 nowMillis);
         check("审批数据库迁移脚本".equals(fixedTasksIdle.primaryValue),
                 "fixed_tasks highlights waiting-approval task first: " + fixedTasksIdle.primaryValue);
-        check(fixedTasksIdle.title.contains("等待批准") && fixedTasksIdle.title.contains("Mac Studio"),
+        check(fixedTasksIdle.title.contains("待处理") && fixedTasksIdle.title.contains("Mac Studio"),
                 "fixed_tasks shows waiting status and computer: " + fixedTasksIdle.title);
         check(MonitorWidgetPolicy.TARGET_TASK.equals(fixedTasksIdle.clickTarget)
                 && "claude:task-wait-02".equals(fixedTasksIdle.clickTaskId),
                 "fixed_tasks deep-links to lead active task");
+
+        // Workbench order is most recently updated first. A long-running approval
+        // may follow a full page of newer tasks which need no intervention.
+        JSONArray backlog = new JSONArray();
+        JSONObject desktopQuestion = new JSONObject().put("id", "antigravity:ask").put("tool", "antigravity")
+                .put("title", "Choose a layout").put("device_id", "dev-win").put("status", "idle")
+                .put("pending_interaction_kind", "question");
+        MonitorWidgetPolicy.Model questionCard = MonitorWidgetPolicy.evaluate(MonitorWidgetPolicy.MODE_FIXED_TASKS, true,
+                new JSONObject().put("devices", workbench.optJSONArray("devices")).put("tasks", new JSONArray().put(desktopQuestion)),
+                null, MonitorWidgetBridge.TrackingSnapshot.idle(), nowMillis);
+        check(questionCard.title.contains("等待回答") && "antigravity:ask".equals(questionCard.clickTaskId),
+                "a source-backed question opens the correct task even if its collector says idle");
+        for (int i = 0; i < 8; i++) {
+            backlog.put(new JSONObject().put("id", "codex:run-" + i).put("title", "Running " + i)
+                    .put("tool", "codex").put("device_id", "dev-win").put("status", "running"));
+        }
+        backlog.put(new JSONObject().put("id", "codex:err").put("title", "Build failure")
+                .put("tool", "codex").put("device_id", "dev-win").put("status", "error"));
+        backlog.put(new JSONObject().put("id", "claude:wait").put("title", "Review requested")
+                .put("tool", "claude").put("device_id", "dev-mac").put("status", "waiting"));
+        JSONObject busyWorkbench = new JSONObject().put("devices", workbench.optJSONArray("devices")).put("tasks", backlog);
+        MonitorWidgetPolicy.Model busyTasks = MonitorWidgetPolicy.evaluate(MonitorWidgetPolicy.MODE_FIXED_TASKS,
+                true, busyWorkbench, null, MonitorWidgetBridge.TrackingSnapshot.idle(), nowMillis);
+        check("claude:wait".equals(busyTasks.clickTaskId) && "Review requested".equals(busyTasks.primaryValue),
+                "an older pending approval should be the widget's primary action");
+        check(busyTasks.row1.contains("Build failure"), "an older error should come before newer running tasks");
 
         // 7. Fresh standalone usage from UsageAlertJobService wins over older workbench.usage
         JSONArray newerQuotas = new JSONArray()

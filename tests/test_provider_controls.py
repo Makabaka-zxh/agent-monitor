@@ -63,15 +63,35 @@ def test_codex_question_choices_exact_and_private_question_rejected():
     with pytest.raises(UnsupportedControl): normalize(value)
 
 
+@pytest.mark.parametrize('changes', [
+    {'threadId': 'foreign'}, {'turnId': None}, {'turnId': 'previous'},
+    {'mode': 'url', 'url': 'https://example.test/'}, {'mode': 'openai/form'},
+    {'requestedSchema': {'type': 'object', 'properties': {'password': {'type': 'string'}}}},
+])
+def test_codex_mcp_does_not_expose_unbound_or_non_choice_forms(changes):
+    value = {'id': 123, 'method': 'mcpServer/elicitation/request', 'params': {
+        'threadId': SESSION, 'turnId': 'turn1', 'mode': 'form', 'serverName': 'test', 'message': 'Choose',
+        'requestedSchema': {'type': 'object', 'properties': {'theme': {'type': 'string', 'enum': ['blue']}}},
+        **changes}}
+    with pytest.raises(UnsupportedControl):
+        normalize(value)
+
+
 def test_claude_question_restores_original_input_not_permission_updates():
     value = request('claude', tool_name='AskUserQuestion', input={'questions': [
         {'header': 'Choice', 'question': 'Synthetic choice?', 'multiSelect': True,
-         'options': [{'label': 'First', 'description': ''}, {'label': 'Second', 'description': ''}]}]})
+         'options': [{'label': 'First', 'description': '', 'preview': '<div>layout preview</div>'},
+                     {'label': 'Second', 'description': ''}]}], 'metadata': {'source': 'synthetic-source'}})
     item = normalize(value, 'claude')
+    assert [o.label for o in item.questions[0].options] == ['First', 'Second']
+    assert 'synthetic-source' not in json.dumps(item.public)
     result = item.response({'decision': 'answer', 'answers': [{'question_id': 'q0', 'choices': ['o0', 'o1']}]})
     payload = result['response']['response']
     assert payload['updatedInput']['questions'] == value['request']['input']['questions']
-    assert payload['updatedInput']['answers'] == {'Synthetic choice?': ['First', 'Second']}
+    assert payload['updatedInput']['metadata'] == value['request']['input']['metadata']
+    assert payload['updatedInput']['answers'] == {'Synthetic choice?': 'First, Second'}
+    custom = item.response({'decision': 'answer', 'answers': [{'question_id': 'q0', 'text': 'My choice'}]})
+    assert custom['response']['response']['updatedInput']['answers'] == {'Synthetic choice?': 'My choice'}
     assert 'updatedPermissions' not in payload
 
 

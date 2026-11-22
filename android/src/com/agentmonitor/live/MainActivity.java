@@ -545,7 +545,7 @@ public final class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, -2, 1);
         headingParams.gravity = Gravity.CENTER_VERTICAL; titleBar.addView(titleHeading, headingParams);
-        if (page.equals("tasks") || page.equals("devices")) {
+        if (page.equals("tasks") || page.equals("devices") || page.equals("account")) {
             titleActions = ui.headerActions();
             LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(-2, -2);
             actionParams.gravity = Gravity.CENTER_VERTICAL; actionParams.leftMargin = ui.dp(12); titleBar.addView(titleActions, actionParams);

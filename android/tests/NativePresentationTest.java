@@ -21,6 +21,15 @@ public final class NativePresentationTest {
         task.put("output", "synthetic nonvisual body").put("error_analysis", new JSONObject().put("summary", "synthetic detail"));
         device.put("usage", new JSONObject().put("synthetic", 100));
         check(before.equals(key(task, device)), "unshown output, error detail and usage do not rebind task rows");
+        check("待处理".equals(NativeListPresentation.waitingLabel(NativeListPresentation.pendingKind(task))), "old snapshots do not guess why the agent is waiting");
+        task.put("pending_interaction_kind", "question");
+        String questionKey = key(task, device);
+        check(!before.equals(questionKey), "when the agent asks a question the card updates even if the raw status did not change");
+        check("等待回答".equals(NativeListPresentation.waitingLabel(NativeListPresentation.pendingKind(task))), "agent questions are labeled as questions");
+        task.put("pending_interaction_kind", "approval");
+        check(!questionKey.equals(key(task, device)), "switching from question to approval refreshes the card");
+        check("等待批准".equals(NativeListPresentation.waitingLabel(NativeListPresentation.pendingKind(task))), "an explicit approval is labeled as approval");
+        task.put("pending_interaction_kind", JSONObject.NULL);
         for (String field : new String[]{"id", "title", "device_id", "tool", "status", "updated_at"}) {
             JSONObject changed = task("synthetic-task"); changed.put(field, "changed");
             check(!before.equals(key(changed, device)), "visible task field invalidates: " + field);

@@ -8,6 +8,57 @@ namespace MonitorApp.Tests;
 public class CoreTests
 {
     [Fact]
+    public void OpenResult_TracksNewRoundsAndPendingFilesUntilReady()
+    {
+        var cache = new TaskResultCache();
+        var task = new MonitorTask { FinalResultId = "first" };
+        cache.Observe(task, true);
+        var firstRequest = cache.Generation;
+        cache.Apply(firstRequest, new TaskResultDto { Available = true, ResultId = "first" });
+        Assert.False(cache.NeedsRefresh);
+
+        task.FinalResultId = "second";
+        cache.Observe(task, true);
+        Assert.Null(cache.Result);
+        cache.Apply(firstRequest, new TaskResultDto { Available = true, ResultId = "first" });
+        Assert.Null(cache.Result);
+        cache.Apply(cache.Generation, new TaskResultDto { Available = true, ResultId = "first" });
+        Assert.False(cache.Result!.Available);
+        Assert.True(cache.NeedsRefresh);
+
+        var pending = new TaskResultDto { Available = true, ResultId = "second", Files = [new() { Ready = false }] };
+        cache.Apply(cache.Generation, pending);
+        Assert.True(cache.NeedsRefresh);
+        cache.Apply(cache.Generation, new TaskResultDto { Available = true, ResultId = "second", Files = [new() { Ready = true }] });
+        task.UpdatedAt = "later heartbeat";
+        cache.Observe(task, true);
+        Assert.False(cache.NeedsRefresh);
+        Assert.Equal("second", cache.Result!.ResultId);
+    }
+
+    [Fact]
+    public void OpenResult_HandlesUnversionedTasksAndRevokedSync()
+    {
+        var cache = new TaskResultCache();
+        var task = new MonitorTask { Status = "running" };
+        cache.Observe(task, true);
+        var response = new TaskResultDto { Available = true, ResultId = "legacy" };
+        cache.Apply(cache.Generation, response);
+        Assert.Same(response, cache.Result);
+
+        task.Status = "completed";
+        cache.Observe(task, true);
+        Assert.True(cache.NeedsRefresh);
+        var beforeRevocation = cache.Generation;
+        cache.Observe(task, false);
+        Assert.False(cache.NeedsRefresh);
+        cache.Observe(task, true);
+        cache.Apply(beforeRevocation, response);
+        Assert.Null(cache.Result);
+        Assert.True(cache.NeedsRefresh);
+    }
+
+    [Fact]
     public void ServerOrigin_NormalizesValidHttpsAndRejectsUnsafeUrls()
     {
         Assert.Equal("https://monitor.example.com", ServerOrigin.Normalize("https://Monitor.Example.com/"));
@@ -50,10 +101,26 @@ public class CoreTests
 
         var shares = UsageFormatting.ComputeModelShares(day);
         Assert.Equal(3, shares.Count);
-        Assert.Equal("Gemini 3.1 Pro", shares[0].DisplayName);
-        Assert.Equal("Claude Opus 4.6", shares[1].DisplayName);
+        Assert.Equal("Gemini 3.1 Pro (High)", shares[0].DisplayName);
+        Assert.Equal("Claude Opus 4.6 (Thinking)", shares[1].DisplayName);
         Assert.Equal("其他模型", shares[2].DisplayName);
         Assert.DoesNotContain(shares, s => s.DisplayName.Contains("未识别"));
+    }
+
+    [Theory]
+    [InlineData("gpt-6.2-astra", "GPT-6.2 Astra")]
+    [InlineData("gpt-6.1-sol", "GPT-6.1 Sol")]
+    [InlineData("gpt-6-astra", "GPT-6 Astra")]
+    [InlineData("gpt-6.2-sol", "GPT-6.2 Sol")]
+    [InlineData("gpt-5.3-codex", "GPT-5.3-Codex")]
+    [InlineData("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark")]
+    [InlineData("gpt-oss-120b-high", "GPT-OSS 120B (High)")]
+    [InlineData("claude-opus-4-7-high", "Claude Opus 4.7 (High)")]
+    [InlineData("gemini-3.1-pro-high-agy", "Gemini 3.1 Pro (High)")]
+    [InlineData("gpt-6.4-nova", "GPT-6.4 Nova")]
+    public void FormatModelName_FormatsFamilyAndFutureSlugsWithoutRawLowercase(string raw, string expected)
+    {
+        Assert.Equal(expected, UsageFormatting.FormatModelName(raw));
     }
 
     [Fact]
@@ -179,5 +246,133 @@ public class CoreTests
         Assert.Equal("_LPT1.log", MonitorSecurity.SafeFileName("LPT1.log"));
         Assert.Equal("report_2026_final_.md", MonitorSecurity.SafeFileName("report/2026:final?.md"));
         Assert.Equal("附件", MonitorSecurity.SafeFileName("...   "));
+    }
+
+    [Fact]
+    public void WallpaperService_ValidatesBingImageUrlsAndRejectsUntrustedHosts()
+    {
+        Assert.Equal(
+            "https://www.bing.com/th?id=OHR.NordicFjord_ZH-CN1234567890_1920x1080.jpg",
+            WallpaperService.NormalizeBingImageUrl("/th?id=OHR.NordicFjord_ZH-CN1234567890_1920x1080.jpg&rf=LaDigue_1920x1080.jpg&pid=hp"));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            WallpaperService.NormalizeBingImageUrl("https://evil.example.com/th?id=OHR.Test_1920x1080.jpg"));
+        Assert.Throws<InvalidOperationException>(() =>
+            WallpaperService.NormalizeBingImageUrl("http://www.bing.com/th?id=OHR.Test_1920x1080.jpg"));
+
+        Assert.Equal("https://www.bing.com/", WallpaperService.SafeBingLink("https://evil.example.com/phish"));
+    }
+
+    [Fact]
+    public void CompactSizePresets_ReturnDistinctDimensions()
+    {
+        Assert.Equal((308, 196), new LocalUiSettings { CompactSizePreset = "nano" }.GetCompactDimensions());
+        Assert.Equal((336, 356), new LocalUiSettings { CompactSizePreset = "small" }.GetCompactDimensions());
+        Assert.Equal((384, 504), new LocalUiSettings { CompactSizePreset = "medium" }.GetCompactDimensions());
+        Assert.Equal((468, 640), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
+    }
+
+    [Fact]
+    public void PendingInteractionKind_SurfacesQuestionAndApprovalAcrossRunningOrIdleTasks()
+    {
+        var json = """
+        {
+          "id": "dev:claude:q1",
+          "title": "确认数据库迁移方案",
+          "tool": "claude",
+          "status": "running",
+          "pending_interaction_kind": "question",
+          "archived": false,
+          "stale": false
+        }
+        """;
+        var questionTask = JsonSerializer.Deserialize<MonitorTask>(json)!;
+        Assert.Equal("question", questionTask.EffectivePendingKind);
+        Assert.Equal("waiting", questionTask.EffectiveStatus);
+        Assert.Equal("等待回答", questionTask.StatusTitle);
+        Assert.True(questionTask.Matches(ToolFilter.All, TaskScope.Active, fresh: true));
+
+        var approvalTask = new MonitorTask { Status = "idle", PendingInteractionKind = "approval", Tool = "codex" };
+        Assert.Equal("approval", approvalTask.EffectivePendingKind);
+        Assert.Equal("waiting", approvalTask.EffectiveStatus);
+        Assert.Equal("等待批准", approvalTask.StatusTitle);
+        Assert.True(approvalTask.Matches(ToolFilter.All, TaskScope.Active, fresh: true));
+
+        var legacyWaiting = new MonitorTask { Status = "waiting", Tool = "codex" };
+        Assert.Equal("", legacyWaiting.EffectivePendingKind);
+        Assert.Equal("waiting", legacyWaiting.EffectiveStatus);
+        Assert.Equal("待处理", legacyWaiting.StatusTitle);
+    }
+
+    [Fact]
+    public void SessionControlPolicy_ValidatesOptionChoicesAndCustomTextExclusivity()
+    {
+        var req = new SessionPendingRequestDto
+        {
+            Id = "req-1",
+            Kind = "question",
+            Questions =
+            [
+                new SessionQuestionDto
+                {
+                    Id = "q1",
+                    Text = "选择部署环境",
+                    Multiple = false,
+                    AllowsText = true,
+                    Options =
+                    [
+                        new SessionChoiceDto { Id = "staging", Label = "预发布环境" },
+                        new SessionChoiceDto { Id = "prod", Label = "生产环境" }
+                    ]
+                },
+                new SessionQuestionDto
+                {
+                    Id = "q2",
+                    Text = "选择通知渠道",
+                    Multiple = true,
+                    AllowsText = false,
+                    Options =
+                    [
+                        new SessionChoiceDto { Id = "slack", Label = "Slack" },
+                        new SessionChoiceDto { Id = "email", Label = "Email" }
+                    ]
+                }
+            ]
+        };
+
+        // Valid: single option for q1 + multi options for q2
+        Assert.True(SessionControlPolicy.ValidAnswers(req,
+        [
+            new SessionAnswerPayloadDto { QuestionId = "q1", Choices = ["staging"], Text = null },
+            new SessionAnswerPayloadDto { QuestionId = "q2", Choices = ["slack", "email"], Text = null }
+        ]));
+
+        // Valid: custom text for q1 (allows_text=true, choices empty) + single option for q2
+        Assert.True(SessionControlPolicy.ValidAnswers(req,
+        [
+            new SessionAnswerPayloadDto { QuestionId = "q1", Choices = [], Text = "canary-eu" },
+            new SessionAnswerPayloadDto { QuestionId = "q2", Choices = ["slack"], Text = null }
+        ]));
+
+        // Invalid: both choice and custom text on q1
+        Assert.False(SessionControlPolicy.ValidAnswers(req,
+        [
+            new SessionAnswerPayloadDto { QuestionId = "q1", Choices = ["staging"], Text = "canary-eu" },
+            new SessionAnswerPayloadDto { QuestionId = "q2", Choices = ["slack"], Text = null }
+        ]));
+
+        // Invalid: multiple choices on single-select q1
+        Assert.False(SessionControlPolicy.ValidAnswers(req,
+        [
+            new SessionAnswerPayloadDto { QuestionId = "q1", Choices = ["staging", "prod"], Text = null },
+            new SessionAnswerPayloadDto { QuestionId = "q2", Choices = ["slack"], Text = null }
+        ]));
+
+        // Invalid: custom text on q2 where allows_text=false
+        Assert.False(SessionControlPolicy.ValidAnswers(req,
+        [
+            new SessionAnswerPayloadDto { QuestionId = "q1", Choices = ["staging"], Text = null },
+            new SessionAnswerPayloadDto { QuestionId = "q2", Choices = [], Text = "webhook" }
+        ]));
     }
 }

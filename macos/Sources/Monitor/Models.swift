@@ -51,27 +51,40 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
     var archived: Bool
     let stale: Bool?
     var usage: TaskUsageSummary? = nil
+    var pendingInteractionKind: String? = nil
     static func brand(for tool: String) -> String {
         guard let source = ToolFilter(rawValue: tool), source != .all else { return "任务" }
         return source.title
     }
     var brand: String { Self.brand(for: tool) }
     var supportsReply: Bool { tool == "claude" || tool == "codex" || tool == "antigravity" }
+    var effectivePendingKind: String {
+        switch pendingInteractionKind {
+        case "question": return "question"
+        case "approval": return "approval"
+        default: return ""
+        }
+    }
+    var effectiveStatus: String {
+        !effectivePendingKind.isEmpty ? "waiting" : status
+    }
     var statusTitle: String {
+        if effectivePendingKind == "question" { return "等待回答" }
+        if effectivePendingKind == "approval" { return "等待批准" }
         switch status {
-        case "running": "进行中"
-        case "waiting": "等待批准"
-        case "completed": "已完成"
-        case "idle": "待命"
-        case "error": "需要关注"
-        default: "状态未知"
+        case "running": return "进行中"
+        case "waiting": return "待处理"
+        case "completed": return "已完成"
+        case "idle": return "待命"
+        case "error": return "需要关注"
+        default: return "状态未知"
         }
     }
     func matches(tool filter: ToolFilter, scope: TaskScope, fresh: Bool) -> Bool {
         guard filter == .all || tool == filter.rawValue else { return false }
         if scope == .archived { return archived }
         guard !archived else { return false }
-        return scope == .all || (fresh && stale != true && ["running", "waiting", "error"].contains(status))
+        return scope == .all || (fresh && stale != true && ["running", "waiting", "error"].contains(effectiveStatus))
     }
 }
 

@@ -44,14 +44,16 @@ class ProviderRequest:
     codex_denial: str = "decline"
     antigravity_allow_id: str = ""
     antigravity_deny_id: str = ""
-    antigravity_choice_values: dict[tuple[str, str], str] = field(default_factory=dict)
+    form_choice_values: dict[tuple[str, str], str] = field(default_factory=dict)
 
     def response(self, decision):
         if not isinstance(decision, dict):
             raise UnsupportedControl("missing explicit decision")
         action = decision.get("decision")
         if action == "deny":
-            if self.provider == "antigravity":
+            if self.provider == "codex" and self.form_choice_values:
+                result = {"action": "decline", "content": None, "_meta": None}
+            elif self.provider == "antigravity":
                 result = ({"outcome": {"outcome": "selected", "optionId": self.antigravity_deny_id}}
                           if self.public["kind"] == "approval" else {"action": "decline"})
             elif self.provider == "claude":
@@ -75,27 +77,30 @@ class ProviderRequest:
                 if any(a.text is not None and a.choices for a in answers): raise ValueError()
             except (ValueError, TypeError, AttributeError) as exc:
                 raise UnsupportedControl("invalid answers") from exc
+            if self.provider == "claude":
+                result = {"behavior": "allow", "updatedInput": claude_answered_input(self.original["input"], self.questions, answers)}
+                return {"type": "control_response", "response": {
+                    "subtype": "success", "request_id": self.wire_id, "response": result}}
             indexed = {q.id: q for q in self.questions}
             mapped = {}
             for answer in answers:
                 question = indexed[answer.question_id]
-                if self.provider == "antigravity":
+                if self.form_choice_values:
                     if answer.text is not None:
                         mapped[f"{question.id}_other"] = answer.text
                     else:
-                        consts = [self.antigravity_choice_values[(question.id, c)] for c in answer.choices]
+                        consts = [self.form_choice_values[(question.id, c)] for c in answer.choices]
                         mapped[question.id] = consts if question.multiple else consts[0]
                     continue
                 labels = {o.id: o.label for o in question.options}
                 values = [answer.text] if answer.text is not None else [labels[c] for c in answer.choices]
-                if self.provider == "codex": mapped[question.id] = {"answers": values}
-                else: mapped[question.text] = values if question.multiple else values[0]
-            if self.provider == "antigravity":
+                mapped[question.id] = {"answers": values}
+            if self.form_choice_values:
                 result = {"action": "accept", "content": mapped}
-            elif self.provider == "codex":
-                result = {"answers": mapped}
+                if self.provider == "codex":
+                    result["_meta"] = None
             else:
-                result = {"behavior": "allow", "updatedInput": {**self.original["input"], "answers": mapped}}
+                result = {"answers": mapped}
         else:
             raise UnsupportedControl("unsupported decision")
         if self.provider == "antigravity": return {"jsonrpc": "2.0", "id": self.wire_id, "result": result}
@@ -108,6 +113,7 @@ def _questions(rows, provider):
     if not isinstance(rows, list) or not 1 <= len(rows) <= (3 if provider == "codex" else 4):
         raise UnsupportedControl("unsupported questions")
     result = []
+    option_fields = {"label", "description", "preview"} if provider == "claude" else {"label", "description"}
     for i, row in enumerate(rows):
         if not isinstance(row, dict): raise UnsupportedControl("unsupported question")
         allowed = ({"id", "header", "question", "isOther", "isSecret", "options"} if provider == "codex"
@@ -121,8 +127,10 @@ def _questions(rows, provider):
         if not isinstance(options, list) or len(options) > 32: raise UnsupportedControl("unsupported options")
         choices = []
         for j, option in enumerate(options):
-            if not isinstance(option, dict) or set(option) - {"label", "description"}:
+            if not isinstance(option, dict) or set(option) - option_fields:
                 raise UnsupportedControl("unsupported option")
+            if "preview" in option and not isinstance(option["preview"], str):
+                raise UnsupportedControl("unsupported option preview")
             choices.append(Choice(id="o" + str(j), label=_text(option.get("label"), 240),
                                   description=_text(option.get("description"), 1000, optional=True)))
         if len({c.label for c in choices}) != len(choices): raise UnsupportedControl("ambiguous labels")
@@ -132,6 +140,32 @@ def _questions(rows, provider):
     if len({q.id for q in result}) != len(result) or len({q.text for q in result}) != len(result):
         raise UnsupportedControl("ambiguous questions")
     return tuple(result)
+
+
+def claude_question(data):
+    if not isinstance(data, dict) or set(data) - {"questions", "metadata", "answers", "annotations"}:
+        raise UnsupportedControl("unsupported question input")
+    if any(key in data and data[key] != {} for key in ("answers", "annotations")):
+        raise UnsupportedControl("question already contains answers or annotations")
+    metadata = data.get("metadata", {})
+    if not isinstance(metadata, dict) or set(metadata) - {"source"}:
+        raise UnsupportedControl("unsupported question metadata")
+    if "source" in metadata:
+        _text(metadata["source"], 1000, optional=True)
+    questions = _questions(data.get("questions"), "claude")
+    has_preview = any(option.get("preview") for row in data["questions"] for option in row.get("options") or [])
+    return questions, "部分选项附有电脑端预览" if has_preview else ""
+
+
+def claude_answered_input(data, questions, answers):
+    validate_answers(questions, answers)
+    indexed = {question.id: question for question in questions}
+    mapped = {}
+    for answer in answers:
+        question = indexed[answer.question_id]
+        labels = {choice.id: choice.label for choice in question.options}
+        mapped[question.text] = answer.text if answer.text is not None else ", ".join(labels[c] for c in answer.choices)
+    return {**data, "answers": mapped}
 
 
 def _codex_approval_denial(choices, proposal):
@@ -184,23 +218,30 @@ def _antigravity_permission_options(options):
     return by_kind["allow_once"], by_kind["reject_once"]
 
 
-def _antigravity_questions(schema):
-    """Parse ACP form elicitation JSON Schema without accepting URL/secret fields."""
+def _form_questions(schema, *, antigravity=False):
+    """Translate enumerated form fields, preserving native property and option values."""
     if not isinstance(schema, dict) or schema.get("type") != "object" or set(schema) - {
-            "type", "properties", "required", "additionalProperties"}:
+            "$schema", "type", "properties", "required", "additionalProperties"}:
         raise UnsupportedControl("unsupported elicitation schema")
+    if "$schema" in schema:
+        _text(schema["$schema"], 300)
     props = schema.get("properties")
     if not isinstance(props, dict) or not props:
         raise UnsupportedControl("unsupported elicitation properties")
-    primary = [k for k in props if isinstance(k, str) and not k.endswith("_other")]
-    other = [k for k in props if isinstance(k, str) and k.endswith("_other")]
-    if len(primary) + len(other) != len(props) or not 1 <= len(primary) <= 16:
+    if not all(isinstance(k, str) for k in props):
+        raise UnsupportedControl("unsupported elicitation keys")
+    required = schema.get("required", [])
+    if not isinstance(required, list) or any(not isinstance(k, str) or k not in props for k in required):
+        raise UnsupportedControl("invalid required fields")
+    other = {k for k in props if antigravity and k.endswith("_other")}
+    primary = [k for k in props if k not in other]
+    if not 1 <= len(primary) <= 16:
         raise UnsupportedControl("unsupported elicitation questions")
     primary_set = set(primary)
     for key in other:
         base = key[:-6]
         spec = props[key]
-        if (base not in primary_set or not isinstance(spec, dict) or spec.get("type") != "string"
+        if (key in required or base not in primary_set or not isinstance(spec, dict) or spec.get("type") != "string"
                 or set(spec) - {"type", "title", "description"}):
             raise UnsupportedControl("unsupported elicitation free-text field")
     questions = []
@@ -210,20 +251,31 @@ def _antigravity_questions(schema):
         if any(ch.isspace() for ch in qid):
             raise UnsupportedControl("invalid question id")
         spec = props[qid]
-        if not isinstance(spec, dict) or set(spec) - {"type", "title", "description", "oneOf", "items"}:
+        if not isinstance(spec, dict) or set(spec) - {
+                "type", "title", "description", "oneOf", "enum", "enumNames", "items", "default"}:
             raise UnsupportedControl("unsupported question schema")
-        qtext = _text(spec.get("title"), 2000)
+        qtext = _text(spec.get("title") or spec.get("description") or qid, 2000)
         if spec.get("type") == "string" and "items" not in spec:
             multiple = False
-            raw_options = spec.get("oneOf")
-        elif (spec.get("type") == "array" and "oneOf" not in spec and isinstance(spec.get("items"), dict)
-              and set(spec["items"]) <= {"type", "anyOf", "oneOf"}):
+            option_schema = spec
+        elif (spec.get("type") == "array" and not {"oneOf", "enum", "enumNames"}.intersection(spec)
+              and isinstance(spec.get("items"), dict) and spec["items"].get("type", "string") == "string"
+              and set(spec["items"]) <= {"type", "anyOf", "oneOf", "enum"}):
             multiple = True
-            raw_options = spec["items"].get("anyOf") if "anyOf" in spec["items"] else spec["items"].get("oneOf")
+            option_schema = spec["items"]
         else:
             raise UnsupportedControl("unsupported question type")
+        encodings = {"oneOf", "anyOf", "enum"}.intersection(option_schema)
+        if len(encodings) != 1 or ("enumNames" in option_schema and "enum" not in option_schema):
+            raise UnsupportedControl("ambiguous option schema")
+        raw_options = option_schema[encodings.pop()]
         if not isinstance(raw_options, list) or not 1 <= len(raw_options) <= 32:
             raise UnsupportedControl("unsupported options")
+        if "enum" in option_schema:
+            labels = option_schema.get("enumNames", raw_options)
+            if not isinstance(labels, list) or len(labels) != len(raw_options):
+                raise UnsupportedControl("invalid option labels")
+            raw_options = [{"const": value, "title": label} for value, label in zip(raw_options, labels)]
         choices = []
         seen_consts = set()
         for idx, opt in enumerate(raw_options):
@@ -240,7 +292,7 @@ def _antigravity_questions(schema):
         if len({c.label for c in choices}) != len(choices):
             raise UnsupportedControl("ambiguous labels")
         questions.append(Question(id=qid, text=qtext, options=tuple(choices),
-                                  multiple=multiple, allows_text=(f"{qid}_other" in props)))
+                                  multiple=multiple, allows_text=(f"{qid}_other" in other and qid not in required)))
     if len({q.id for q in questions}) != len(questions) or len({q.text for q in questions}) != len(questions):
         raise UnsupportedControl("ambiguous questions")
     return tuple(questions), choice_values
@@ -255,7 +307,7 @@ def normalize_request(provider, message, *, command_id, source_id, session_id, t
     questions = ()
     codex_denial = "decline"
     antigravity_allow_id = antigravity_deny_id = ""
-    antigravity_choice_values = {}
+    form_choice_values = {}
     if provider == "codex":
         params, wire_id, method = message.get("params"), message.get("id"), message.get("method")
         if not isinstance(params, dict) or type(wire_id) not in {str, int} or isinstance(wire_id, bool):
@@ -269,6 +321,14 @@ def normalize_request(provider, message, *, command_id, source_id, session_id, t
                 raise UnsupportedControl("unsupported blocking flag")
             questions = _questions(params.get("questions"), provider)
             kind, title, detail, operation = "question", "Codex 需要你的选择", "", ""
+        elif method == "mcpServer/elicitation/request":
+            if (params.get("mode") != "form" or set(params) - {
+                    "threadId", "turnId", "serverName", "environmentId", "mode", "_meta", "message", "requestedSchema"}):
+                raise UnsupportedControl("unsupported MCP elicitation")
+            server = _text(params.get("serverName"), 240)
+            questions, form_choice_values = _form_questions(params.get("requestedSchema"))
+            kind, title, operation = "question", "Codex 工具需要你的选择", ""
+            detail = _text(server + "\n" + _text(params.get("message"), 4000), 4000)
         elif method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
             known = {"threadId", "turnId", "itemId", "reason", "command", "cwd", "commandActions",
                      "proposedExecpolicyAmendment", "networkApprovalContext", "availableDecisions", "additionalPermissions", "grantRoot",
@@ -324,9 +384,8 @@ def normalize_request(provider, message, *, command_id, source_id, session_id, t
         if name in {"ExitPlanMode", "EnterPlanMode"}:
             raise UnsupportedControl("permission mode changes require desktop")
         if name == "AskUserQuestion":
-            if set(original["input"]) - {"questions"}: raise UnsupportedControl("unsupported question input")
-            questions = _questions(original["input"].get("questions"), provider)
-            kind, title, detail, operation = "question", "Claude 需要你的选择", "", ""
+            questions, detail = claude_question(original["input"])
+            kind, title, operation = "question", "Claude 需要你的选择", ""
         else:
             # Never accept permission updates or change the proposed operation.
             kind, title = "approval", "Claude 请求单次批准"
@@ -377,7 +436,7 @@ def normalize_request(provider, message, *, command_id, source_id, session_id, t
                 raise UnsupportedControl("non-form elicitation requires desktop")
             if "toolCallId" in params and params["toolCallId"] is not None:
                 _text(params.get("toolCallId"), 128)
-            questions, antigravity_choice_values = _antigravity_questions(params.get("requestedSchema"))
+            questions, form_choice_values = _form_questions(params.get("requestedSchema"), antigravity=True)
             kind, title = "question", "Antigravity 需要你的选择"
             detail = _text(params.get("message"), 4000, optional=True)
             operation = ""
@@ -396,4 +455,4 @@ def normalize_request(provider, message, *, command_id, source_id, session_id, t
         if type(timeout) is not int or timeout <= 0: raise UnsupportedControl("unsupported timeout")
         public["expires_at"] = min(public["expires_at"], now + timeout / 1000)
     return ProviderRequest(public, provider, wire_id, original, questions, codex_denial,
-                           antigravity_allow_id, antigravity_deny_id, antigravity_choice_values)
+                           antigravity_allow_id, antigravity_deny_id, form_choice_values)

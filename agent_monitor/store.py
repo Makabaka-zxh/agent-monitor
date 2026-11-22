@@ -44,9 +44,13 @@ class PairingRequestError(ValueError):
 
 
 class Store:
-    def __init__(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path, *, existing_only=False):
         self.lock = threading.RLock()
+        if existing_only:
+            self.db = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=1)
+            self.db.row_factory = sqlite3.Row
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path), check_same_thread=False, timeout=10)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -199,6 +203,12 @@ class Store:
                     return None
                 session_id = reader["parent_session_id"]
         return None
+
+    def valid_full_reader(self, reader_id: str) -> bool:
+        now = time.time()
+        row = self.db.execute("SELECT mode,expires_at,parent_session_id FROM native_readers WHERE id=?", (reader_id,)).fetchone()
+        return bool(row and row["mode"] == "full_app" and row["expires_at"] > now
+                    and self.valid_session_id(row["parent_session_id"], now))
 
     def sessions(self, current: str):
         with self.lock:

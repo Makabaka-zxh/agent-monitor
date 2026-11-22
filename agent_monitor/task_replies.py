@@ -119,10 +119,7 @@ class TaskReplies:
         return device_id, source_id, row, json.loads(row["payload"])
 
     def _valid_reader(self, reader_id):
-        now = time.time()
-        row = self.store.db.execute("SELECT * FROM native_readers WHERE id=?", (reader_id,)).fetchone()
-        return bool(row and row["mode"] == "full_app" and row["expires_at"] > now
-                    and self.store.valid_session_id(row["parent_session_id"], now))
+        return self.store.valid_full_reader(reader_id)
 
     @staticmethod
     def _public(row):

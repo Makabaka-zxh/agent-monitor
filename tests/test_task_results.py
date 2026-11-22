@@ -334,6 +334,36 @@ def test_remote_final_and_files_upload_without_paths_then_download(hub):
     assert hub["native"].post("/api/agent/results", headers=auth, json=payload).json()["needed_files"] == []
 
 
+def test_new_remote_result_marker_hides_previous_text_and_files_until_upload(hub):
+    remote, auth = register_remote(hub)
+    client = hub["native"]
+    first = upload_payload()
+    assert client.post("/api/agent/results", headers=auth, json=first).status_code == 200
+    source = first["source_id"]
+    params = {"task_id": remote["device_id"] + ":" + source}
+    first_file = {"result_id": first["result_id"], "file_id": first["files"][0]["id"]}
+    chunk = {**first_file, "source_id": source, "offset": 0, "data": base64.b64encode(b"Remote document").decode()}
+    assert client.post("/api/agent/results/file", headers=auth, json=chunk).json()["ready"]
+
+    def native_get(suffix="", **other):
+        return client.get("/api/native/tasks/result" + suffix, headers=hub["auth"], params={**params, **other})
+
+    assert native_get().json()["text"] == first["text"]  # Older connectors omit result markers.
+    assert native_get("/file", **first_file).content == b"Remote document"
+    second = {**first, "completed_at": "2026-09-14T08:01:00.000Z", "text": "Next final answer", "files": []}
+    second["result_id"] = sha256(("codex\n" + second["completed_at"] + "\n" + second["text"]).encode())
+    task = {"id": source, "tool": "codex", "title": "Synthetic remote", "status": "completed",
+            "updated_at": second["completed_at"], "final_result_id": second["result_id"]}
+    assert client.post("/api/agent/heartbeat", headers=auth, json={"tasks": [task], "sources": []}).status_code == 200
+    waiting = native_get().json()
+    assert not waiting["available"] and waiting["text"] == "" and waiting["files"] == []
+    assert native_get(".txt", result_id=first["result_id"]).status_code == 409
+    assert native_get("/file", **first_file).status_code == 409
+
+    assert client.post("/api/agent/results", headers=auth, json=second).status_code == 200
+    assert native_get().json()["text"] == second["text"]
+
+
 def test_remote_cannot_impersonate_other_computer_or_native_user(hub):
     remote, auth = register_remote(hub)
     payload = upload_payload(source="codex:test-session")

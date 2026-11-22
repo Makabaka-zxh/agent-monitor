@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -21,6 +22,7 @@ public sealed class MonitorApiException : Exception
 public sealed class MonitorApi : IDisposable
 {
     private readonly HttpClient _http;
+    private readonly HttpClient _rawHttp;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = false
@@ -28,18 +30,31 @@ public sealed class MonitorApi : IDisposable
 
     public MonitorApi()
     {
-        var handler = new SocketsHttpHandler
+        _http = new HttpClient(CreateHandler(enableCompression: true))
         {
-            AllowAutoRedirect = false,
-            UseCookies = false,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(3),
-            ConnectTimeout = TimeSpan.FromSeconds(12)
+            Timeout = TimeSpan.FromSeconds(18)
         };
-        _http = new HttpClient(handler)
+        _rawHttp = new HttpClient(CreateHandler(enableCompression: false))
         {
-            Timeout = TimeSpan.FromSeconds(20)
+            Timeout = TimeSpan.FromSeconds(45)
         };
     }
+
+    private static SocketsHttpHandler CreateHandler(bool enableCompression) => new()
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        AutomaticDecompression = enableCompression
+            ? DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli
+            : DecompressionMethods.None,
+        EnableMultipleHttp2Connections = true,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+        KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+        KeepAlivePingDelay = TimeSpan.FromSeconds(25),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+        ConnectTimeout = TimeSpan.FromSeconds(8)
+    };
 
     public static Uri BuildUri(string origin, string path, IReadOnlyList<(string Key, string Value)>? query = null)
     {
@@ -118,7 +133,7 @@ public sealed class MonitorApi : IDisposable
         var activeOrigin = ServerOrigin.Normalize(origin)
             ?? throw new MonitorApiException(0, "请先填写有效的 HTTPS 服务器地址");
         using var request = new HttpRequestMessage(method, BuildUri(activeOrigin, path, query));
-        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        request.Headers.TryAddWithoutValidation("Accept", identityEncoding ? "application/octet-stream" : "application/json");
         request.Headers.TryAddWithoutValidation("Origin", activeOrigin);
         if (identityEncoding)
         {
@@ -136,14 +151,15 @@ public sealed class MonitorApi : IDisposable
             request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         }
 
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        var client = identityEncoding ? _rawHttp : _http;
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         var status = (int)response.StatusCode;
         var succeeded = status is >= 200 and < 300;
         var cap = succeeded ? maxBytes : 16 * 1024;
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var ms = new MemoryStream();
-        var buffer = new byte[16 * 1024];
+        var buffer = new byte[32 * 1024];
         while (true)
         {
             var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
@@ -175,5 +191,9 @@ public sealed class MonitorApi : IDisposable
         return data;
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        _rawHttp.Dispose();
+    }
 }

@@ -13,6 +13,20 @@ public final class NativeListPresentation {
         return NativeScreenPolicy.toolIndex(tool) == 0 ? "任务" : NativeScreenPolicy.toolLabel(tool);
     }
 
+    /** Only the server's reader-scoped hint can identify an answerable interaction. */
+    public static String pendingKind(JSONObject task) {
+        if (task == null || task.optBoolean("archived") || task.optBoolean("stale")
+                || NativeScreenPolicy.toolIndex(task.optString("tool")) == 0) return "";
+        String kind = task.optString("pending_interaction_kind");
+        return "question".equals(kind) || "approval".equals(kind) ? kind : "";
+    }
+
+    public static String waitingLabel(String kind) {
+        if ("question".equals(kind)) return "等待回答";
+        if ("approval".equals(kind)) return "等待批准";
+        return "待处理";
+    }
+
     public static String availableSources(JSONArray sources) {
         boolean[] available = new boolean[NativeScreenPolicy.toolFilterCount()];
         if (sources != null) for (int i = 0; i < sources.length(); i++) {
@@ -41,6 +55,7 @@ public final class NativeListPresentation {
             for (String name : new String[]{"id", "title", "device_id", "tool", "status", "updated_at"}) field(result, value(task, name));
             field(result, String.valueOf(task.optBoolean("archived")));
             JSONObject device = devices.get(task.optString("device_id"));
+            field(result, !stale && device != null && device.optBoolean("online") ? pendingKind(task) : "");
             field(result, value(device, "name")); field(result, String.valueOf(device != null));
             field(result, String.valueOf(device != null && device.optBoolean("online")));
         }

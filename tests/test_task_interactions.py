@@ -73,6 +73,33 @@ def submit(hub, data, headers=None):
     return hub[1].post('/api/native/tasks/controls/decision', headers=hub[2] if headers is None else headers, json=data)
 
 
+def test_workbench_shows_only_this_readers_actionable_request_kind(hub):
+    app, client, headers, task_id, _, _, reader = hub
+    def card(auth):
+        response = client.get('/api/native/workbench', headers=auth)
+        assert response.status_code == 200
+        return next(t for t in response.json()['tasks'] if t['id'] == task_id)
+
+    command = live(hub)
+    assert 'pending_interaction_kind' not in card(headers)
+    approval, question = pending(), pending('question')
+    publish(hub, command, approval)
+    assert card(headers)['pending_interaction_kind'] == 'approval'
+    publish(hub, command, question)
+    task = card(headers)
+    assert task['pending_interaction_kind'] == 'question'
+    assert question['questions'][0]['text'] not in json.dumps(task)
+    assert 'pending_interaction_kind' not in card(reader())
+    app.state.store.archive_task(task_id, True)
+    assert 'pending_interaction_kind' not in card(headers)
+    app.state.store.archive_task(task_id, False)
+    assert submit(hub, decision(hub, question, decision='answer', answers=[{'question_id':'question', 'choices':['two']}])).status_code == 200
+    assert card(headers)['pending_interaction_kind'] == 'approval'
+    with app.state.store.lock, app.state.store.db:
+        app.state.store.db.execute('UPDATE task_interactions SET expires_at=0 WHERE id=?', (approval['id'],))
+    assert 'pending_interaction_kind' not in card(headers)
+
+
 @pytest.mark.parametrize('mode', ['missing', 'cookie', 'read_only', 'foreign_origin'])
 def test_controls_require_native_full_app_and_do_not_discover_without_auth(hub, mode):
     called = []

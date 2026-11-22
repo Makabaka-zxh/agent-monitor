@@ -192,9 +192,17 @@ class TaskInteractions:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS task_interaction_decision_unique ON task_interactions(decision_id) WHERE decision_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS task_interaction_command ON task_interactions(command_id,state);
+                CREATE INDEX IF NOT EXISTS task_interaction_pending_reader ON task_interactions(reader_id,expires_at) WHERE state='pending';
+                CREATE TABLE IF NOT EXISTS claude_question_host (singleton INTEGER PRIMARY KEY CHECK(singleton=1), owner TEXT NOT NULL);
             """)
             if 'decision_hash' not in {row['name'] for row in store.db.execute('PRAGMA table_info(task_interactions)')}:
                 store.db.execute("ALTER TABLE task_interactions ADD COLUMN decision_hash TEXT NOT NULL DEFAULT ''")
+            if 'hook_seen_at' not in {row['name'] for row in store.db.execute('PRAGMA table_info(task_interactions)')}:
+                store.db.execute("ALTER TABLE task_interactions ADD COLUMN hook_seen_at REAL")
+            from .claude_question_hook import local_principal
+            store.db.execute("DELETE FROM claude_question_host")
+            if replies.local_enabled:
+                store.db.execute("INSERT INTO claude_question_host VALUES(1,?)", (local_principal(),))
             store.db.execute("UPDATE task_interactions SET state='cancelled',payload='',decision='',finished_at=? WHERE state IN ('pending','submitted')", (time.time(),))
 
     def _catalog(self, device_id, source_id):
@@ -324,6 +332,12 @@ class TaskInteractions:
     def _live_command(self, row):
         if self.replies.stopping.is_set():
             return False
+        if row["command_id"] == "":
+            from .claude_question_hook import LEASE_SECONDS, local_task
+            return (self.replies.local_enabled and row["kind"] == "question" and row["provider"] == "claude"
+                    and row["hook_seen_at"] is not None and row["hook_seen_at"] > time.time() - LEASE_SECONDS
+                    and self.store.valid_full_reader(row["reader_id"])
+                    and local_task(self.store, row["source_id"]) == row["device_id"])
         command = self.store.db.execute("SELECT * FROM task_replies WHERE id=? AND device_id=? AND source_id=?", (row["command_id"], row["device_id"], row["source_id"])).fetchone()
         if not command or command["state"] not in ("dispatching", "running") or command["reader_id"] != row["reader_id"] or not self.replies._valid_reader(row["reader_id"]):
             return False
@@ -385,6 +399,24 @@ class TaskInteractions:
             self.store.db.execute("""INSERT INTO task_interactions(device_id,id,revision,command_id,reader_id,source_id,provider,kind,turn_id,payload,payload_hash,state,expires_at,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""", (device_id, request.id, request.revision, command_id, command["reader_id"], source_id, request.provider, request.kind, request.turn_id, payload, digest, request.expires_at, time.time()))
             return self._public(self._row(device_id, request.id, request.revision))
+
+    def pending_kinds(self, reader_id):
+        """List badges for the authenticated workbench without reading question text."""
+        if self.replies.stopping.is_set():
+            return {}
+        rows = self.store.db.execute("""
+            SELECT c.task_id, CASE WHEN MAX(i.kind='question') THEN 'question' ELSE 'approval' END AS kind
+            FROM task_interactions i JOIN task_replies c ON c.id=i.command_id
+                AND c.reader_id=i.reader_id AND c.device_id=i.device_id AND c.source_id=i.source_id
+            WHERE i.reader_id=? AND i.state='pending' AND i.expires_at>? AND c.state IN ('dispatching','running')
+            GROUP BY c.task_id""", (reader_id, time.time()))
+        result = {row["task_id"]: row["kind"] for row in rows}
+        hooks = self.store.db.execute("""SELECT device_id,source_id,command_id,reader_id,kind,provider,hook_seen_at FROM task_interactions
+            WHERE reader_id=? AND state='pending' AND command_id='' AND expires_at>?""", (reader_id, time.time()))
+        for row in hooks:
+            if self._live_command(row):
+                result[row["device_id"] + ":" + row["source_id"]] = "question"
+        return result
 
     def get(self, reader, task_id):
         device_id, source_id, device, task, reason = self.replies._base_capability(task_id, for_catalog=True)

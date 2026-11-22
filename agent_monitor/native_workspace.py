@@ -48,6 +48,7 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
     def workbench(reader):
         mark_request_phase("snapshot_start")
         snapshot = store.snapshot()
+        pending_kinds = app.state.task_replies.controls.pending_kinds(reader["id"])
         mark_request_phase("snapshot_end")
         mark_request_phase("usage_start")
         snapshot = app.state.usage.enrich(snapshot)
@@ -55,6 +56,9 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
         names = {device["id"]: device["name"] for device in snapshot["devices"]}
         for task in snapshot["tasks"]:
             task["device_name"] = names.get(task["device_id"], "电脑")
+            task.pop("pending_interaction_kind", None)
+            if not task["archived"] and not task["stale"] and task["id"] in pending_kinds:
+                task["pending_interaction_kind"] = pending_kinds[task["id"]]
             # Final answers are fetched on demand by the task panel. Repeating
             # every answer in five-second polling wastes bandwidth on mobile.
             task.pop("output", None)
