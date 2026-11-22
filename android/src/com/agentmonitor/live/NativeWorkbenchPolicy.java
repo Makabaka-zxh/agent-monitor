@@ -13,7 +13,8 @@ public final class NativeWorkbenchPolicy {
             case "tasks": case "task": case "devices": case "device": return PageRead.WORKBENCH;
             case "usage": return PageRead.USAGE;
             case "account": case "profile": case "sync": case "sessions": return PageRead.ACCOUNT;
-            // Browsing local settings must not broaden the account or workspace request scope.
+            // Browsing local settings or local sync diagnostics must not broaden request scope.
+            case "sync-diagnostics":
             case "settings": case "settings-appearance": case "settings-notifications":
             case "settings-support": case "settings-security": return PageRead.NONE;
             // Pairing has its own explicit create/details requests, not account data.

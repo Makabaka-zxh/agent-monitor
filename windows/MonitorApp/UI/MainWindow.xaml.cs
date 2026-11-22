@@ -64,14 +64,19 @@ public partial class MainWindow : Window
     private MainShellPlan? _lastMainPlan;
     private TextBox? _taskSearchBox;
     private TextBlock? _searchMatchSummary;
+    private ContentControl? _pendingEntryHost;
     private StackPanel? _taskFilterHost;
     private StackPanel? _taskListHost;
     private ContentControl? _taskDetailRightHost;
     private string? _mountedDetailTaskId;
     private string _mountedTaskCardsSignature = "";
     private StackPanel? _taskDetailCardsHost;
+    private TextBlock? _replyHeadingText;
     private TextBlock? _replyModelSummaryText;
     private TextBlock? _replyStatusText;
+    private Border? _replyReceiptBadge;
+    private TextBlock? _replyReceiptText;
+    private TextBlock? _replyAppliedText;
     private TextBox? _replyInputBox;
     private Button? _replySendBtn;
     private ContentControl? _pageBodyHost;
@@ -2633,11 +2638,15 @@ public partial class MainWindow : Window
 
         var headerRow = new DockPanel { Margin = new Thickness(2, 0, 2, 11) };
         headerRow.Children.Add(UiKit.Heading("工作台", 23));
+        var headerRight = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
         _searchMatchSummary = UiKit.Body("", 12, UiKit.MutedBrush);
-        _searchMatchSummary.VerticalAlignment = VerticalAlignment.Bottom;
-        DockPanel.SetDock(_searchMatchSummary, Dock.Right);
-        _searchMatchSummary.HorizontalAlignment = HorizontalAlignment.Right;
-        headerRow.Children.Add(_searchMatchSummary);
+        _searchMatchSummary.VerticalAlignment = VerticalAlignment.Center;
+        _searchMatchSummary.Margin = new Thickness(0, 0, 6, 0);
+        headerRight.Children.Add(_searchMatchSummary);
+        _pendingEntryHost = new ContentControl { VerticalAlignment = VerticalAlignment.Center };
+        headerRight.Children.Add(_pendingEntryHost);
+        DockPanel.SetDock(headerRight, Dock.Right);
+        headerRow.Children.Add(headerRight);
         topControls.Children.Add(headerRow);
 
         // Liquid Glass Search Bar with icon + placeholder + clear button
@@ -2770,6 +2779,30 @@ public partial class MainWindow : Window
             Foreground = color,
             VerticalAlignment = VerticalAlignment.Center
         });
+        var contMode = task.EffectiveContinuation(_controller.IsFresh, _controller.IsDeviceOnline(task.DeviceId));
+        var contLabel = MonitorTask.ContinuationTitleFor(contMode);
+        if (!string.IsNullOrEmpty(contLabel))
+        {
+            var isContinuable = contMode == "continuable";
+            row.Children.Add(new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = isContinuable ? UiKit.AccentBrush : UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(6, 1, 6, 1),
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = contLabel,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 11,
+                    FontWeight = isContinuable ? FontWeights.SemiBold : FontWeights.Normal,
+                    Foreground = isContinuable ? UiKit.AccentBrush : UiKit.MutedBrush
+                }
+            });
+        }
         if (!string.IsNullOrEmpty(task.UpdatedAt))
         {
             row.Children.Add(new TextBlock
@@ -2795,6 +2828,40 @@ public partial class MainWindow : Window
             _searchMatchSummary.Text = string.IsNullOrWhiteSpace(_controller.SearchQuery)
                 ? ""
                 : $"匹配 {visible.Count} 项";
+        }
+
+        if (_pendingEntryHost is not null)
+        {
+            var pendingTasks = _controller.PendingTasks;
+            if (pendingTasks.Count > 0)
+            {
+                var pillBorder = new Border
+                {
+                    Background = UiKit.GlassTrackBrush,
+                    BorderBrush = UiKit.WarningBrush,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(9),
+                    Padding = new Thickness(9, 3.5, 9, 3.5),
+                    Child = new TextBlock
+                    {
+                        Text = $"待处理 {pendingTasks.Count}",
+                        FontFamily = UiKit.AppFont,
+                        FontSize = 12,
+                        FontWeight = FontWeights.SemiBold,
+                        Foreground = UiKit.WarningBrush
+                    }
+                };
+                var pendingBtn = UiKit.BareButton(pillBorder, () =>
+                    Dialogs.ShowPendingTasksDialog(this, _controller, SelectTask));
+                pendingBtn.ToolTip = "查看所有在线电脑待批准或待回复选项的任务（不改动当前筛选）";
+                pendingBtn.MouseEnter += (_, _) => pillBorder.Background = UiKit.GlassCardHoverBrush;
+                pendingBtn.MouseLeave += (_, _) => pillBorder.Background = UiKit.GlassTrackBrush;
+                _pendingEntryHost.Content = pendingBtn;
+            }
+            else
+            {
+                _pendingEntryHost.Content = null;
+            }
         }
 
         if (_taskFilterHost is not null)
@@ -2839,15 +2906,42 @@ public partial class MainWindow : Window
 
             if (visible.Count == 0)
             {
-                var emptyText = !string.IsNullOrWhiteSpace(_controller.SearchQuery)
-                    ? "没有匹配的任务\n试试其他关键词，或调整来源与状态筛选"
-                    : _controller.Scope == TaskScope.Archived
-                    ? "暂无归档任务"
-                    : "这里很清爽\n切换「全部任务」可查看历史记录";
-                var empty = UiKit.Body(emptyText, 13.5, UiKit.MutedBrush);
-                empty.Margin = new Thickness(8, 36, 8, 0);
-                empty.TextAlignment = TextAlignment.Center;
-                _taskListHost.Children.Add(empty);
+                var hidden = WorkbenchVisibilityPolicy.HiddenFilterSummary(
+                    _controller.Tasks, _controller.Devices, _controller.Tool, _controller.Scope,
+                    _controller.SearchQuery, _controller.IsFresh, visible.Count);
+                if (hidden.ShowResetAction && hidden.HiddenCount > 0)
+                {
+                    var hiddenStack = new StackPanel { Margin = new Thickness(8, 34, 8, 0), HorizontalAlignment = HorizontalAlignment.Center };
+                    var hiddenMsg = UiKit.Body(hidden.Message, 13.5, UiKit.MutedBrush);
+                    hiddenMsg.TextAlignment = TextAlignment.Center;
+                    hiddenStack.Children.Add(hiddenMsg);
+
+                    var showAllBtn = UiKit.SecondaryButton("查看全部", () =>
+                    {
+                        _controller.Scope = TaskScope.All;
+                        _controller.SearchQuery = "";
+                        if (_taskSearchBox is not null && !string.IsNullOrEmpty(_taskSearchBox.Text))
+                            _taskSearchBox.Text = "";
+                        _ = _controller.SaveToolFilterAsync(ToolFilter.All);
+                        UpdateTasksPageInPlace();
+                    });
+                    showAllBtn.HorizontalAlignment = HorizontalAlignment.Center;
+                    showAllBtn.Margin = new Thickness(0, 12, 0, 0);
+                    hiddenStack.Children.Add(showAllBtn);
+                    _taskListHost.Children.Add(hiddenStack);
+                }
+                else
+                {
+                    var emptyText = !string.IsNullOrWhiteSpace(_controller.SearchQuery)
+                        ? "没有匹配的任务\n试试其他关键词，或调整来源与状态筛选"
+                        : _controller.Scope == TaskScope.Archived
+                        ? "暂无归档任务"
+                        : "这里很清爽\n切换「全部任务」可查看历史记录";
+                    var empty = UiKit.Body(emptyText, 13.5, UiKit.MutedBrush);
+                    empty.Margin = new Thickness(8, 36, 8, 0);
+                    empty.TextAlignment = TextAlignment.Center;
+                    _taskListHost.Children.Add(empty);
+                }
             }
             else
             {
@@ -3068,7 +3162,8 @@ public partial class MainWindow : Window
         {
             var replyStack = new StackPanel();
             var topRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
-            topRow.Children.Add(UiKit.Heading("继续任务", 18));
+            _replyHeadingText = UiKit.Heading("继续此会话", 18);
+            topRow.Children.Add(_replyHeadingText);
 
             var rightTools = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
             _replyModelSummaryText = UiKit.Body(detail.ModelSettingsSummary, 12, UiKit.MutedBrush);
@@ -3117,6 +3212,33 @@ public partial class MainWindow : Window
             footer.Children.Add(sendBtn);
             replyStack.Children.Add(footer);
 
+            _replyReceiptText = new TextBlock
+            {
+                FontFamily = UiKit.AppFont,
+                FontSize = 12.5,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.AccentBrush
+            };
+            _replyReceiptBadge = new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(11, 6, 11, 6),
+                Margin = new Thickness(0, 10, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Visibility = Visibility.Collapsed,
+                Child = _replyReceiptText
+            };
+            replyStack.Children.Add(_replyReceiptBadge);
+
+            _replyAppliedText = UiKit.Body("", 12.5, UiKit.AccentBrush);
+            _replyAppliedText.FontWeight = FontWeights.SemiBold;
+            _replyAppliedText.Margin = new Thickness(0, 6, 0, 0);
+            _replyAppliedText.Visibility = Visibility.Collapsed;
+            replyStack.Children.Add(_replyAppliedText);
+
             var replyCard = UiKit.Card(replyStack, 22);
             replyCard.Margin = new Thickness(0, 18, 0, 0);
             root.Children.Add(replyCard);
@@ -3129,10 +3251,27 @@ public partial class MainWindow : Window
 
     private void UpdateReplyComposerControls(TaskDetailController detail)
     {
+        if (_replyHeadingText is not null)
+            _replyHeadingText.Text = detail.ReplyAvailable ? "继续此会话" : "继续任务";
         if (_replyModelSummaryText is not null)
             _replyModelSummaryText.Text = detail.ModelSettingsSummary;
         if (_replyStatusText is not null)
             _replyStatusText.Text = detail.ReplyMessage;
+        if (_replyReceiptBadge is not null && _replyReceiptText is not null)
+        {
+            _replyReceiptText.Text = detail.ReplyReceiptTrail;
+            _replyReceiptText.Foreground = detail.ReplyDelivered ? UiKit.AccentBrush : UiKit.TextBrush;
+            _replyReceiptBadge.Visibility = string.IsNullOrEmpty(detail.ReplyReceiptTrail)
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
+        if (_replyAppliedText is not null)
+        {
+            _replyAppliedText.Text = detail.SettingsReceiptText;
+            _replyAppliedText.Visibility = string.IsNullOrEmpty(detail.SettingsReceiptText)
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
         if (_replySendBtn is not null)
         {
             var mayRetry = detail.PendingReply?.MayRetry == true;
@@ -3154,6 +3293,7 @@ public partial class MainWindow : Window
           .Append(task.Title).Append('|')
           .Append(task.Status).Append('|')
           .Append(task.EffectivePendingKind).Append('|')
+          .Append(task.ContinuationState).Append('|')
           .Append(task.Archived ? '1' : '0').Append('|')
           .Append(task.Stale == true ? '1' : '0').Append('|')
           .Append(UsageFormatting.RelativeTime(task.UpdatedAt)).Append('|')
@@ -3183,7 +3323,8 @@ public partial class MainWindow : Window
         if (detail.Controls?.Pending is { Count: > 0 } pendings)
         {
             foreach (var p in pendings)
-                sb.Append(SessionControlPolicy.AttentionFingerprint(p)).Append(':').Append(p.State).Append(';');
+                sb.Append(SessionControlPolicy.AttentionFingerprint(p)).Append(':').Append(p.State)
+                  .Append(':').Append(p.Delivered == true ? '1' : '0').Append(':').Append(p.Outcome).Append(';');
         }
         return sb.ToString();
     }
@@ -3259,7 +3400,8 @@ public partial class MainWindow : Window
         // Top-placed Pending Attention Requests (Structured Questions / Single-Turn Approvals — Parity with Mobile & macOS)
         if (_taskDetail.Controls?.Pending is { Count: > 0 } pendings)
         {
-            foreach (var req in pendings.Where(p => p.State is "pending" or "submitted" or "forwarded" or "acknowledged"))
+            foreach (var req in pendings.Where(p => p.State is "pending" or "submitted" or "forwarded" or "acknowledged"
+                                                    || p.Outcome == "handled_on_desktop"))
             {
                 var attCard = BuildAttentionCard(req, _taskDetail);
                 attCard.Margin = new Thickness(0, 0, 0, 16);
@@ -3494,7 +3636,7 @@ public partial class MainWindow : Window
         var rightHead = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var stateChip = new TextBlock
         {
-            Text = SessionControlPolicy.StateLabel(req.State),
+            Text = SessionControlPolicy.StateLabel(req.State, req.Outcome),
             FontFamily = UiKit.AppFont,
             FontSize = 11.5,
             FontWeight = FontWeights.Medium,
@@ -3512,8 +3654,12 @@ public partial class MainWindow : Window
         headRow.Children.Add(rightHead);
         stack.Children.Add(headRow);
 
+        detail.SessionDecisionMemos.TryGetValue(req.Id, out var memo);
         var defaultTitle = req.Kind == "question" ? "电脑正在等待你选择选项" : "等待确认操作";
-        stack.Children.Add(UiKit.Heading(string.IsNullOrWhiteSpace(req.Title) ? defaultTitle : req.Title, 16.5));
+        var displayTitle = string.IsNullOrWhiteSpace(req.Title)
+            ? defaultTitle
+            : (req.Title == "请求已结束" && !string.IsNullOrWhiteSpace(memo.Title) ? memo.Title : req.Title);
+        stack.Children.Add(UiKit.Heading(displayTitle, 16.5));
         if (!string.IsNullOrWhiteSpace(req.Detail))
         {
             var d = UiKit.Body(req.Detail!, 13, UiKit.MutedBrush);
@@ -3541,24 +3687,40 @@ public partial class MainWindow : Window
             });
         }
 
+        var sendingThis = detail.DecisionSending && detail.DecisionSendingId == req.Id;
+        var hasLocalRecord = detail.Decisions.ContainsKey(req.Id);
+        var receiptTrail = SessionControlPolicy.ReceiptTrail(req, sendingThis, hasLocalRecord);
+
         if (req.State != "pending")
         {
-            var receiptNote = req.State switch
+            if (!string.IsNullOrWhiteSpace(memo.Summary))
             {
-                "submitted" => "已发送你的选择，正在等待电脑确认接收…",
-                "forwarded" => "电脑已接收你的选择，正在继续执行任务…",
-                "acknowledged" => "电脑已确认处理完成",
-                _ => SessionControlPolicy.StateLabel(req.State)
-            };
+                var chosenTxt = UiKit.Body(memo.Summary, 13, UiKit.TextBrush);
+                chosenTxt.Margin = new Thickness(0, 10, 0, 0);
+                stack.Children.Add(chosenTxt);
+            }
+            var isRejected = req.Outcome == "rejected" || receiptTrail.Contains("已拒绝");
+            var isAdopted = req.Outcome == "adopted" || receiptTrail.Contains("已采用");
+            var receiptText = !string.IsNullOrEmpty(receiptTrail)
+                ? receiptTrail
+                : SessionControlPolicy.StateLabel(req.State, req.Outcome);
             var receiptBox = new Border
             {
                 Background = UiKit.GlassTrackBrush,
-                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderBrush = isRejected ? UiKit.WarningBrush : isAdopted ? UiKit.AccentBrush : UiKit.GlassSubtleRimBrush,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(12, 9, 12, 9),
-                Margin = new Thickness(0, 12, 0, 0),
-                Child = UiKit.Body(receiptNote, 13, UiKit.MutedBrush)
+                Padding = new Thickness(12, 8.5, 12, 8.5),
+                Margin = new Thickness(0, 10, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock
+                {
+                    Text = receiptText,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 12.8,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = isRejected ? UiKit.WarningBrush : isAdopted ? UiKit.AccentBrush : UiKit.TextBrush
+                }
             };
             stack.Children.Add(receiptBox);
         }
@@ -3797,6 +3959,29 @@ public partial class MainWindow : Window
             rejectBtn.Margin = new Thickness(10, 0, 0, 0);
             btnRow.Children.Add(rejectBtn);
             stack.Children.Add(btnRow);
+        }
+
+        if (req.State == "pending" && !string.IsNullOrEmpty(receiptTrail))
+        {
+            var liveReceiptBox = new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(11, 6.5, 11, 6.5),
+                Margin = new Thickness(0, 10, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock
+                {
+                    Text = receiptTrail,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 12.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = UiKit.TextBrush
+                }
+            };
+            stack.Children.Add(liveReceiptBox);
         }
 
         if (!string.IsNullOrEmpty(detail.ControlsFeedback))
@@ -4984,6 +5169,50 @@ public partial class MainWindow : Window
             stack.Children.Add(appCard);
             stack.Children.Add(miniCard);
         }
+
+        // 2c. Sync Diagnostics Card (First-screen duration + 3 timestamps)
+        var diagSample = _controller.SyncDiagnostics;
+        var diagStack = new StackPanel();
+        var diagHead = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+        diagHead.Children.Add(UiKit.Heading("同步诊断", 17));
+        var probeSyncBtn = UiKit.SecondaryButton(
+            _controller.Refreshing ? "测速中…" : "立即测速同步",
+            async () => await _controller.RefreshWorkbenchAsync(),
+            !_controller.Refreshing,
+            glyph: "refresh");
+        DockPanel.SetDock(probeSyncBtn, Dock.Right);
+        probeSyncBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        diagHead.Children.Add(probeSyncBtn);
+        diagStack.Children.Add(diagHead);
+
+        void AddDiagRow(string keyLabel, string valLabel, bool highlight = false)
+        {
+            var r = new DockPanel { Margin = new Thickness(0, 4, 0, 4) };
+            r.Children.Add(UiKit.Body(keyLabel, 13, UiKit.MutedBrush));
+            var v = UiKit.Body(valLabel, 13, highlight ? UiKit.AccentBrush : UiKit.TextBrush);
+            if (highlight) v.FontWeight = FontWeights.SemiBold;
+            DockPanel.SetDock(v, Dock.Right);
+            v.HorizontalAlignment = HorizontalAlignment.Right;
+            r.Children.Add(v);
+            diagStack.Children.Add(r);
+        }
+
+        AddDiagRow("最近一次首屏耗时", WorkbenchVisibilityPolicy.FormatDuration(diagSample.FirstScreenMs), highlight: true);
+        AddDiagRow("最近一次刷新耗时", WorkbenchVisibilityPolicy.FormatDuration(diagSample.LastRefreshMs));
+        diagStack.Children.Add(new Border { Height = 1, Background = UiKit.LineBrush, Margin = new Thickness(0, 8, 0, 8) });
+        AddDiagRow("电脑完成", WorkbenchVisibilityPolicy.FormatTimestamp(diagSample.ComputerCompletedAt));
+        AddDiagRow("服务收到", WorkbenchVisibilityPolicy.FormatTimestamp(diagSample.ServerReceivedAt));
+        AddDiagRow("本机显示", WorkbenchVisibilityPolicy.FormatTimestamp(diagSample.ClientDisplayedAt), highlight: true);
+        diagStack.Children.Add(new Border { Height = 1, Background = UiKit.LineBrush, Margin = new Thickness(0, 8, 0, 8) });
+        AddDiagRow("电脑 → 服务", WorkbenchVisibilityPolicy.FormatLeg(diagSample.ComputerCompletedAt, diagSample.ServerReceivedAt));
+        AddDiagRow("服务 → 本机", WorkbenchVisibilityPolicy.FormatLeg(diagSample.ServerReceivedAt, diagSample.ClientDisplayedAt));
+        var diagExplain = UiKit.Body(WorkbenchVisibilityPolicy.Diagnosis(diagSample), 12.5, UiKit.MutedBrush);
+        diagExplain.Margin = new Thickness(0, 8, 0, 0);
+        diagStack.Children.Add(diagExplain);
+
+        var diagCard = UiKit.Card(diagStack, 22);
+        diagCard.Margin = new Thickness(0, 0, 0, 18);
+        stack.Children.Add(diagCard);
 
         // 3. Logged-in Devices & Sessions Management (Parity with Android buildSessions)
         var nativeDevs = _controller.Account?.NativeDevices ?? [];

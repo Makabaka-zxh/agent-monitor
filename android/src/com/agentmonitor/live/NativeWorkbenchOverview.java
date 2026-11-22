@@ -1,6 +1,9 @@
 package com.agentmonitor.live;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -123,6 +126,56 @@ public final class NativeWorkbenchOverview {
         }
         if (uncertain) append(description, "部分状态待确认");
         return SCOPE + description;
+    }
+
+    /**
+     * Returns all unarchived tasks on online computers currently waiting for user action,
+     * independent of the workbench's active tool/scope/search filters.
+     * Answerable interactions (questions and approvals) are ordered ahead of generic waiting tasks.
+     */
+    public static List<JSONObject> pendingTasks(JSONObject snapshot, boolean stale) {
+        JSONArray tasks = snapshot == null ? null : snapshot.optJSONArray("tasks");
+        JSONArray devices = snapshot == null ? null : snapshot.optJSONArray("devices");
+        if (tasks == null || devices == null || stale) return Collections.emptyList();
+
+        Map<String, Boolean> onlineById = new HashMap<>();
+        for (int index = 0; index < devices.length(); index++) {
+            JSONObject device = devices.optJSONObject(index);
+            String id = device == null ? null : nonemptyString(device.opt("id"));
+            Object online = device == null ? null : device.opt("online");
+            if (id == null || !(online instanceof Boolean)) {
+                if (id != null) onlineById.put(id, null);
+                continue;
+            }
+            if (onlineById.containsKey(id)) onlineById.put(id, null);
+            else onlineById.put(id, (Boolean) online);
+        }
+
+        List<JSONObject> answerable = new ArrayList<>();
+        List<JSONObject> generalWaiting = new ArrayList<>();
+        for (int index = 0; index < tasks.length(); index++) {
+            JSONObject task = tasks.optJSONObject(index);
+            if (task == null || !Boolean.FALSE.equals(task.opt("archived"))) continue;
+            String id = nonemptyString(task.opt("id"));
+            String tool = nonemptyString(task.opt("tool"));
+            String status = nonemptyString(task.opt("status"));
+            String deviceId = nonemptyString(task.opt("device_id"));
+            if (id == null || tool == null || deviceId == null || !Boolean.TRUE.equals(onlineById.get(deviceId))) {
+                continue;
+            }
+            String kind = NativeListPresentation.pendingKind(task);
+            String effective = !kind.isEmpty() ? "waiting" : status;
+            if (NativeWorkbenchPolicy.uncertainTask("all", tool, effective, false, false)) continue;
+            if (!"waiting".equals(effective)) continue;
+            if (!kind.isEmpty()) answerable.add(task);
+            else generalWaiting.add(task);
+        }
+        answerable.addAll(generalWaiting);
+        return Collections.unmodifiableList(answerable);
+    }
+
+    public static int waitingCount(JSONObject snapshot, boolean stale) {
+        return pendingTasks(snapshot, stale).size();
     }
 
     private static String nonemptyString(Object value) {

@@ -32,6 +32,7 @@ public sealed class MonitorController : IDisposable
     public string UsageError { get; private set; } = "";
     public string? Notice { get; set; }
     public ComputerPairingCodeDto? PairingCode { get; private set; }
+    public SyncDiagnosticsSample SyncDiagnostics { get; private set; } = new();
 
     public ToolFilter Tool { get; set; } = ToolFilter.All;
     public TaskScope Scope { get; set; } = TaskScope.Active;
@@ -63,6 +64,12 @@ public sealed class MonitorController : IDisposable
 
     public List<MonitorTask> VisibleTasks =>
         Tasks.Where(t => t.Matches(Tool, Scope, IsFresh, SearchQuery)).ToList();
+
+    public List<MonitorTask> PendingTasks =>
+        WorkbenchVisibilityPolicy.PendingTasks(Tasks, Devices, IsFresh);
+
+    public bool IsDeviceOnline(string? deviceId) =>
+        IsFresh && !string.IsNullOrWhiteSpace(deviceId) && Devices.Any(d => d.Id == deviceId && d.Online);
 
     public Computer? BuiltInLocalHubComputer =>
         Devices.FirstOrDefault(d => d.Local);
@@ -643,12 +650,15 @@ public sealed class MonitorController : IDisposable
         if (_credential is not { } login || Refreshing || !Connected || DateTimeOffset.UtcNow < _cooldownUntil) return;
         if (login.ExpiresAt <= DateTimeOffset.UtcNow) { Invalidate(login.Token); return; }
         Refreshing = true;
+        var wasFirstScreen = LastSuccess is null;
+        var sw = Stopwatch.StartNew();
         var epoch = _generation;
         NotifyChanged();
         try
         {
             var res = await Api.JsonAsync<WorkbenchResponse>(Origin, "/api/native/workbench", System.Net.Http.HttpMethod.Get, token: login.Token);
             if (epoch != _generation || _credential?.Token != login.Token) return;
+            sw.Stop();
             var devMap = res.Devices
                 .Where(d => !string.IsNullOrEmpty(d.Id))
                 .GroupBy(d => d.Id, StringComparer.Ordinal)
@@ -668,8 +678,17 @@ public sealed class MonitorController : IDisposable
                 Tool = ToolFilterExtensions.ParseTool(res.Preferences.ToolFilter);
                 _filterInitialized = true;
             }
-            LastSuccess = DateTimeOffset.UtcNow;
+            var now = DateTimeOffset.UtcNow;
+            LastSuccess = now;
             ConnectionMessage = "";
+            SyncDiagnostics = new SyncDiagnosticsSample
+            {
+                FirstScreenMs = wasFirstScreen || SyncDiagnostics.FirstScreenMs < 0 ? sw.ElapsedMilliseconds : SyncDiagnostics.FirstScreenMs,
+                LastRefreshMs = sw.ElapsedMilliseconds,
+                ComputerCompletedAt = MonitorDate.Parse(res.SyncTimings?.ComputerCompletedAt),
+                ServerReceivedAt = MonitorDate.Parse(res.SyncTimings?.ServerReceivedAt ?? res.GeneratedAt),
+                ClientDisplayedAt = now
+            };
             if (res.Usage is not null)
             {
                 if (Usage is null)

@@ -201,7 +201,7 @@ public static class Dialogs
                 }
             }
             effortCombo.IsEnabled = !string.IsNullOrEmpty(chosenId) && effortCombo.Items.Count > 1;
-            var supportsFast = opt?.ServiceTiers?.Contains("fast") == true;
+            var supportsFast = opt?.ServiceTiers?.Any(t => t is "priority" or "fast") == true;
             var supportsPlan = catalog?.CollaborationModes?.Contains("plan") == true && !string.IsNullOrEmpty(chosenId);
             fastCheck.Visibility = supportsFast ? Visibility.Visible : Visibility.Collapsed;
             planCheck.Visibility = supportsPlan ? Visibility.Visible : Visibility.Collapsed;
@@ -605,6 +605,91 @@ public static class Dialogs
 
         RebuildDialog();
         PresentModal(win, host);
+    }
+
+    public static void ShowPendingTasksDialog(Window owner, MonitorController controller, Action<MonitorTask> onSelectTask)
+    {
+        var pending = controller.PendingTasks;
+        var win = CreateModal(owner, $"待处理 · {pending.Count}", 470);
+        var root = new StackPanel { Margin = new Thickness(24, 22, 24, 24) };
+        var head = UiKit.Heading($"待处理 · {pending.Count}", 20);
+        head.Margin = new Thickness(0, 0, 28, 0);
+        root.Children.Add(head);
+
+        var hasActiveFilter = controller.Tool != ToolFilter.All
+                              || controller.Scope != TaskScope.All
+                              || !string.IsNullOrWhiteSpace(controller.SearchQuery);
+        var descText = hasActiveFilter
+            ? "汇总所有在线电脑上等你批准或回复选项的任务；直接打开并作答，不会修改你当前的筛选条件。"
+            : "点击任意待处理任务，直接跳到对应的问题或单次批准。";
+        var desc = UiKit.Body(descText, 12.5, UiKit.MutedBrush);
+        desc.Margin = new Thickness(0, 6, 0, 14);
+        root.Children.Add(desc);
+
+        var listStack = new StackPanel();
+        foreach (var task in pending)
+        {
+            var captured = task;
+            var cardCol = new StackPanel();
+            cardCol.Children.Add(UiKit.TaskIdentityBadge(task.Tool, task.DeviceName ?? "电脑", 15));
+            var titleBlock = UiKit.Heading(task.Title, 14.5);
+            titleBlock.Margin = new Thickness(0, 6, 0, 6);
+            cardCol.Children.Add(titleBlock);
+
+            var metaRow = new DockPanel();
+            var kindText = task.StatusTitle;
+            var badge = new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.WarningBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(7),
+                Padding = new Thickness(8, 2, 8, 2),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock
+                {
+                    Text = kindText,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 11.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = UiKit.WarningBrush
+                }
+            };
+            metaRow.Children.Add(badge);
+
+            if (!string.IsNullOrEmpty(task.UpdatedAt))
+            {
+                var rel = UiKit.Body(UsageFormatting.RelativeTime(task.UpdatedAt), 11.5, UiKit.MutedBrush);
+                DockPanel.SetDock(rel, Dock.Right);
+                rel.HorizontalAlignment = HorizontalAlignment.Right;
+                rel.VerticalAlignment = VerticalAlignment.Center;
+                metaRow.Children.Add(rel);
+            }
+            cardCol.Children.Add(metaRow);
+
+            var itemBorder = UiKit.Card(cardCol, 14, 14);
+            itemBorder.BorderBrush = UiKit.WarningBrush;
+            var btn = UiKit.BareButton(itemBorder, () =>
+            {
+                win.Close();
+                onSelectTask(captured);
+            });
+            btn.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            btn.Margin = new Thickness(0, 0, 0, 8);
+            btn.MouseEnter += (_, _) => itemBorder.Background = UiKit.GlassCardHoverBrush;
+            btn.MouseLeave += (_, _) => itemBorder.Background = UiKit.GlassCardBrush;
+            listStack.Children.Add(btn);
+        }
+
+        var scroll = new ScrollViewer
+        {
+            MaxHeight = 380,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = listStack
+        };
+        root.Children.Add(scroll);
+
+        PresentModal(win, root);
     }
 
     public static void OpenBundledMiSansLicense()

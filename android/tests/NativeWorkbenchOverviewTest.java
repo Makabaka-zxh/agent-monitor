@@ -30,8 +30,37 @@ public final class NativeWorkbenchOverviewTest {
 
     public static void main(String[] args) {
         availability(); activeCounts(); uncertainTasks(); sourceAvailability(); archivedExcluded(); inputsAndPrivacy();
-        priorityDescription();
+        priorityDescription(); pendingTasksCrossFilter();
         System.out.println("NativeWorkbenchOverviewTest: " + checks + " checks passed");
+    }
+
+    private static void pendingTasksCrossFilter() {
+        JSONArray computers = new JSONArray()
+                .put(device("pc-codex", true))
+                .put(device("pc-claude", true))
+                .put(device("pc-offline", false));
+        JSONObject codexRunning = task("running", "pc-codex", false).put("id", "t-codex");
+        JSONObject genericWait = task("waiting", "pc-codex", false).put("id", "t-wait");
+        JSONObject claudeQuestion = task("completed", "pc-claude", false)
+                .put("id", "t-claude-q").put("tool", "claude").put("pending_interaction_kind", "question");
+        JSONObject agApproval = task("waiting", "pc-claude", false)
+                .put("id", "t-ag-a").put("tool", "antigravity").put("pending_interaction_kind", "approval");
+        JSONObject offlineQuestion = task("waiting", "pc-offline", false)
+                .put("id", "t-offline").put("tool", "claude").put("pending_interaction_kind", "question");
+        JSONObject archivedQuestion = task("waiting", "pc-claude", true)
+                .put("id", "t-archived").put("tool", "claude").put("pending_interaction_kind", "question");
+        JSONObject data = snapshot(new JSONArray()
+                .put(codexRunning).put(genericWait).put(claudeQuestion)
+                .put(agApproval).put(offlineQuestion).put(archivedQuestion), computers)
+                .put("tool_filter", "codex");
+        java.util.List<JSONObject> pending = NativeWorkbenchOverview.pendingTasks(data, false);
+        check(pending.size() == 3 && NativeWorkbenchOverview.waitingCount(data, false) == 3,
+                "cross-computer waiting count includes Claude and Antigravity even when tool_filter is codex");
+        check("t-claude-q".equals(pending.get(0).optString("id"))
+                && "t-ag-a".equals(pending.get(1).optString("id"))
+                && "t-wait".equals(pending.get(2).optString("id")),
+                "answerable question and approval tasks are ordered ahead of generic waiting tasks");
+        check(NativeWorkbenchOverview.pendingTasks(data, true).isEmpty(), "stale snapshot exposes zero clickable pending tasks");
     }
 
     private static void availability() {

@@ -89,11 +89,17 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _finish(store, device, request_id, state):
+def _finish(store, device, request_id, state, *, outcome=""):
     with store.db:
-        store.db.execute("""UPDATE task_interactions SET state=?,finished_at=?,payload='',decision=''
-            WHERE device_id=? AND id=? AND command_id='' AND state IN ('pending','submitted')""",
-            (state, time.time(), device, request_id))
+        cols = {r[1] for r in store.db.execute("PRAGMA table_info(task_interactions)")}
+        if "outcome" in cols and outcome:
+            store.db.execute("""UPDATE task_interactions SET state=?,outcome=?,finished_at=?,payload='',decision=''
+                WHERE device_id=? AND id=? AND command_id='' AND state IN ('pending','submitted')""",
+                (state, outcome, time.time(), device, request_id))
+        else:
+            store.db.execute("""UPDATE task_interactions SET state=?,finished_at=?,payload='',decision=''
+                WHERE device_id=? AND id=? AND command_id='' AND state IN ('pending','submitted')""",
+                (state, time.time(), device, request_id))
 
 
 def handle(store, reader_id, event, output, *, wait=MAX_WAIT, interval=.5):
@@ -145,6 +151,7 @@ def handle(store, reader_id, event, output, *, wait=MAX_WAIT, interval=.5):
         if written.rowcount != 1:
             return
     final_state = "cancelled"
+    final_outcome = ""
     next_heartbeat = time.monotonic() + 3
     try:
         while time.monotonic() < deadline:
@@ -159,9 +166,16 @@ def handle(store, reader_id, event, output, *, wait=MAX_WAIT, interval=.5):
                     store.db.execute("BEGIN IMMEDIATE")
                     if (not _host_matches(store) or not store.valid_full_reader(reader_id) or local_task(store, source) != device):
                         return
-                    claimed = store.db.execute("""UPDATE task_interactions SET delivered=1 WHERE device_id=? AND id=?
-                        AND revision=? AND delivered=0 AND state='submitted' AND expires_at>?""",
-                        (device, request_id, revision, time.time()))
+                    now_claim = time.time()
+                    cols = {r[1] for r in store.db.execute("PRAGMA table_info(task_interactions)")}
+                    if "delivered_at" in cols:
+                        claimed = store.db.execute("""UPDATE task_interactions SET delivered=1,delivered_at=? WHERE device_id=? AND id=?
+                            AND revision=? AND delivered=0 AND state='submitted' AND expires_at>?""",
+                            (now_claim, device, request_id, revision, now_claim))
+                    else:
+                        claimed = store.db.execute("""UPDATE task_interactions SET delivered=1 WHERE device_id=? AND id=?
+                            AND revision=? AND delivered=0 AND state='submitted' AND expires_at>?""",
+                            (device, request_id, revision, now_claim))
                     if claimed.rowcount != 1:
                         return
                     decision = json.loads(row["decision"])
@@ -175,6 +189,7 @@ def handle(store, reader_id, event, output, *, wait=MAX_WAIT, interval=.5):
                         next_heartbeat = time.monotonic() + 3
             if decision is not None:
                 if decision["decision"] != "answer":
+                    final_outcome = "rejected"
                     return
                 answers = tuple(Answer.model_validate_json(json.dumps(answer)) for answer in decision["answers"])
                 updated = claude_answered_input(data, questions, answers)
@@ -186,7 +201,7 @@ def handle(store, reader_id, event, output, *, wait=MAX_WAIT, interval=.5):
             time.sleep(interval)
         final_state = "expired"
     finally:
-        _finish(store, device, request_id, final_state)
+        _finish(store, device, request_id, final_state, outcome=final_outcome)
 
 
 def main(argv=None):

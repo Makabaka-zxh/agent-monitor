@@ -21,7 +21,28 @@ public final class NativeReplyPresentationPolicyTest {
         pendingReplyCannotBeHidden();
         temporaryAttentionDoesNotOverwriteUserChoice();
         failureAndRetryRemainVisible();
+        explicitReplyAndSettingsReceipts();
         System.out.println("NativeReplyPresentationPolicyTest: " + checks + " checks passed");
+    }
+    private static void explicitReplyAndSettingsReceipts() {
+        check("手机已发送 → 等待电脑接收".equals(NativeReplyPresentationPolicy.replyReceipt(true, "", false)),
+                "in-flight send displays initial receipt");
+        check("手机已发送 → 等待电脑接收".equals(NativeReplyPresentationPolicy.replyReceipt(false, "queued", false)),
+                "unclaimed queued reply waits for computer");
+        check("手机已发送 → 电脑已收到".equals(NativeReplyPresentationPolicy.replyReceipt(false, "queued", true)),
+                "claimed reply transitions to computer received");
+        check("手机已发送 → 电脑已收到".equals(NativeReplyPresentationPolicy.replyReceipt(false, "running", false)),
+                "running reply confirms computer received");
+        check("手机已发送 → 电脑已收到 → 本轮已完成".equals(NativeReplyPresentationPolicy.replyReceipt(false, "succeeded", true)),
+                "completed reply shows terminal receipt");
+        check("本轮实际使用：GPT-5.4 · 思考强度 高 · 快速模式 · 计划模式".equals(
+                NativeReplyPresentationPolicy.settingsReceipt("GPT-5.4", "高", true, true, true)),
+                "verified applied settings display model, effort, fast mode and plan mode");
+        check("已随回复提交：Claude Sonnet 4.6 · 思考强度 中".equals(
+                NativeReplyPresentationPolicy.settingsReceipt("Claude Sonnet 4.6", "中", false, false, false)),
+                "unverified requested settings never claim verified application");
+        check("".equals(NativeReplyPresentationPolicy.settingsReceipt("", "", false, false, true)),
+                "empty settings omit receipt line");
     }
     private static void collapsedDraftSurvivesRefreshAndRecreation() {
         // Draft content and keyboard focus are deliberately not authority to reopen the composer.

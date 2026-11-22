@@ -896,4 +896,4 @@ def _collect_snapshot(codex_home=None, claude_home=None, include_output=False, l
             final = read_antigravity_result(task["id"].removeprefix("antigravity:"), base=antigravity_home)
             if final:
                 task.update(final_result_id=final["result_id"], final_result_at=final["completed_at"])
-    return {"tasks": published, "sources": sources}
+    return {"tasks": published, "sources": sources, "collected_at": _iso(utc_now())}

@@ -64,11 +64,47 @@ class AgentPoll(BaseModel):
     supported_tools: list[Literal["codex", "claude", "antigravity"]] = Field(default_factory=list, max_length=3)
 
 
+MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]+\])?\Z")
+EFFORT_PATTERN = re.compile(r"^[a-z0-9_]{1,32}\Z")
+
+
+def sanitize_applied_settings(value) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    cleaned: dict[str, str] = {}
+    model = value.get("model")
+    if isinstance(model, str) and 1 <= len(model) <= 120 and MODEL_ID_PATTERN.fullmatch(model):
+        cleaned["model"] = model
+    effort = value.get("effort")
+    if isinstance(effort, str) and EFFORT_PATTERN.fullmatch(effort):
+        cleaned["effort"] = effort
+    tier = value.get("service_tier")
+    if tier == "priority":
+        cleaned["service_tier"] = "priority"
+    mode = value.get("collaboration_mode")
+    if mode == "plan":
+        cleaned["collaboration_mode"] = "plan"
+    return cleaned or None
+
+
 class AgentUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
     state: Literal["running", "succeeded", "failed", "blocked", "uncertain"]
     error_code: str = Field(default="", max_length=80, pattern=r"^[a-z_]*$")
+    applied: dict[str, str] | None = None
+
+    @field_validator("applied")
+    @classmethod
+    def valid_applied(cls, value):
+        if value is None:
+            return None
+        if set(value) - {"model", "effort", "service_tier", "collaboration_mode"}:
+            raise ValueError("无效的运行设置回执")
+        cleaned = sanitize_applied_settings(value)
+        if cleaned is None or set(cleaned) != set(value):
+            raise ValueError("无效的运行设置回执")
+        return cleaned
 
 
 class TaskReplies:
@@ -82,6 +118,7 @@ class TaskReplies:
         self.lifecycle_lock = threading.RLock()
         self.closed = False
         self._capabilities = {}
+        self._local_tools_cache: tuple[set[str], float] = (set(), 0.0)
         with store.lock, store.db:
             store.db.executescript("""
                 CREATE TABLE IF NOT EXISTS task_replies (
@@ -100,6 +137,8 @@ class TaskReplies:
                 store.db.execute("ALTER TABLE task_replies ADD COLUMN selection TEXT NOT NULL DEFAULT ''")
             if 'request_schema' not in columns:
                 store.db.execute('ALTER TABLE task_replies ADD COLUMN request_schema INTEGER NOT NULL DEFAULT 1')
+            if 'applied' not in columns:
+                store.db.execute("ALTER TABLE task_replies ADD COLUMN applied TEXT NOT NULL DEFAULT ''")
             # Never replay a command after a hub restart; the tool may have received it.
             store.db.execute("UPDATE task_replies SET state='uncertain',reason_code='restarted',"
                              "prompt='',finished_at=? WHERE state IN ('queued','dispatching','running')", (time.time(),))
@@ -126,11 +165,79 @@ class TaskReplies:
         value = {key: row[key] for key in ("id", "task_id", "state")}
         value["found"] = True
         value["reason"] = REASONS.get(row["reason_code"], REASONS[row["state"]])
-        for key in ("queued_at", "started_at", "finished_at"):
-            value[key] = iso(row[key]) if row[key] is not None else None
+        keys = row.keys()
+        for key in ("queued_at", "claimed_at", "started_at", "finished_at"):
+            value[key] = iso(row[key]) if key in keys and row[key] is not None else None
         if row["started_at"]:
             value["delivery_ms"] = max(0, round((row["started_at"] - row["queued_at"]) * 1000))
+        if "selection" in keys and row["selection"]:
+            try:
+                parsed_sel = sanitize_applied_settings(json.loads(row["selection"]))
+                if parsed_sel:
+                    value["requested_selection"] = parsed_sel
+            except (ValueError, TypeError):
+                pass
+        if "applied" in keys and row["applied"]:
+            try:
+                parsed_app = sanitize_applied_settings(json.loads(row["applied"]))
+                if parsed_app:
+                    value["applied"] = parsed_app
+            except (ValueError, TypeError):
+                pass
         return value
+
+    def _local_supported_tools(self) -> set[str]:
+        if not self.local_enabled:
+            return set()
+        if self.inspector is not None or self.executor_factory is not None:
+            return {"codex", "claude", "antigravity"}
+        now = time.monotonic()
+        cached, stamp = self._local_tools_cache
+        if stamp > 0 and now - stamp < 15.0:
+            return cached
+        try:
+            from .local_executor import supported_tools
+            found = set(supported_tools())
+        except Exception:
+            found = set()
+        self._local_tools_cache = (found, now)
+        return found
+
+    def continuation_states(self, snapshot: dict) -> dict[str, str]:
+        """Classify each live, unarchived task as continuable, computer_in_use, or view_only."""
+        now = time.time()
+        devices = {d["id"]: d for d in snapshot.get("devices", []) if isinstance(d, dict) and "id" in d}
+        busy_devices = {
+            r["device_id"]
+            for r in self.store.db.execute(
+                "SELECT DISTINCT device_id FROM task_replies WHERE state IN ('queued','dispatching','running')"
+            ).fetchall()
+        }
+        local_tools = self._local_supported_tools() if any(d.get("local") and d.get("online") for d in devices.values()) else set()
+        states: dict[str, str] = {}
+        for task in snapshot.get("tasks", []):
+            if not isinstance(task, dict) or task.get("archived") or task.get("stale"):
+                continue
+            dev = devices.get(task.get("device_id", ""))
+            if not dev or not dev.get("online"):
+                continue
+            tool = task.get("tool", "")
+            status = task.get("status", "")
+            if tool not in {"codex", "claude", "antigravity"} or status not in {"running", "waiting", "completed", "idle", "error"}:
+                states[task["id"]] = "view_only"
+                continue
+            if dev.get("local"):
+                supported = self.local_enabled and tool in local_tools
+            else:
+                rem_tools, stamp = self._capabilities.get(dev["id"], ([], 0))
+                supported = (now - stamp < ONLINE_SECONDS) and (tool in rem_tools)
+            if not supported:
+                states[task["id"]] = "view_only"
+            elif status in {"running", "waiting"} or dev["id"] in busy_devices:
+                states[task["id"]] = "computer_in_use"
+            else:
+                states[task["id"]] = "continuable"
+        return states
 
     def _base_capability(self, task_id, *, for_catalog=False):
         device_id, source_id, row, task = self._task(task_id)
@@ -198,9 +305,11 @@ class TaskReplies:
             data.selection.model_dump_json() if data.selection is not None else ''))
         return self._public(self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (data.request_id,)).fetchone())
 
-    def update(self, command_id, state, error_code="", *, device_id=None):
+    def update(self, command_id, state, error_code="", *, device_id=None, applied=None):
         if state not in (*FINAL, "running"):
             return
+        cleaned_applied = sanitize_applied_settings(applied)
+        applied_json = json.dumps(cleaned_applied, separators=(",", ":"), sort_keys=True) if cleaned_applied else None
         with self.store.lock, self.store.db:
             row = self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (command_id,)).fetchone()
             if not row or (device_id and row["device_id"] != device_id):
@@ -213,6 +322,8 @@ class TaskReplies:
             reason = error_code if error_code in REASONS else ""
             if state == 'running':
                 self.store.db.execute('UPDATE task_replies SET started_at=COALESCE(started_at,?) WHERE id=?', (time.time(), command_id))
+            if applied_json is not None:
+                self.store.db.execute("UPDATE task_replies SET applied=? WHERE id=?", (applied_json, command_id))
             self.store.db.execute("UPDATE task_replies SET state=?,reason_code=?,prompt='',finished_at=? WHERE id=?",
                                   (state, reason, time.time() if state in FINAL else None, command_id))
             if state in FINAL:
@@ -221,7 +332,8 @@ class TaskReplies:
 
     def _emit(self, event):
         try:
-            self.update(event.get("command_id", event.get("id", "")), event["state"], event.get("error_code", ""))
+            self.update(event.get("command_id", event.get("id", "")), event["state"], event.get("error_code", ""),
+                        applied=event.get("applied"))
         except (HTTPException, KeyError):
             pass
 
@@ -307,13 +419,20 @@ class TaskReplies:
                     if self.executor is None:
                         if self.executor_factory:
                             self.executor = self.executor_factory(self._emit)
+                            if hasattr(self.executor, "report_applied"):
+                                self.executor.report_applied = True
                         else:
                             from .local_executor import LocalReplyExecutor
-                            self.executor = LocalReplyExecutor(emit=self._emit, interaction_handler=self.controls.local_handler)
+                            self.executor = LocalReplyExecutor(
+                                emit=self._emit,
+                                interaction_handler=self.controls.local_handler,
+                                report_applied=True,
+                            )
                     settings = {'selection': command['selection']} if 'selection' in command else {}
                     result = self.executor.start(command["id"], command["source_id"], command["text"], **settings)
                     if isinstance(result, dict) and result.get("state") in FINAL:
-                        self.update(command["id"], result["state"], result.get("error_code", ""))
+                        self.update(command["id"], result["state"], result.get("error_code", ""),
+                                    applied=result.get("applied"))
                 except Exception:
                     # Do not reveal raw errors (which can contain prompt, path or credentials).
                     self.update(command["id"], "uncertain")
@@ -372,4 +491,7 @@ def install_reply_routes(app, store, perform):
 
     @app.post("/api/agent/replies/update")
     def update_reply(data: AgentUpdate, request: Request):
-        return app.state.agent_operation(request, lambda device_id: service.update(data.id, data.state, data.error_code, device_id=device_id))
+        return app.state.agent_operation(
+            request,
+            lambda device_id: service.update(data.id, data.state, data.error_code, device_id=device_id, applied=data.applied),
+        )

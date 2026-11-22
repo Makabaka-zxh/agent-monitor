@@ -85,6 +85,12 @@ public final class MainActivity extends Activity {
     private View pageRule;
     private TextView title, connection, trackingButton, trackingNote, archiveButton, emptyLabel, deviceStatus, profileSaveButton, avatarPickButton;
     private TextView loginStatus, loginNote, loginButton, loginCheckButton;
+    private LinearLayout emptyStateContainer, syncDiagnosticsBody;
+    private TextView emptyShowAllButton, taskPendingEntry;
+    private LivePresentationSheet taskPendingSheet;
+    private boolean focusPendingOnOpen;
+    private NativeSyncDiagnostics.Sample syncDiagnosticsSample = NativeSyncDiagnostics.empty();
+    private long firstWorkbenchStartedElapsed;
     private TextView taskSearchSummary;
     private TextView expandedRootTitle, taskSearchAffordanceLabel;
     private View taskSearchAffordance;
@@ -227,6 +233,7 @@ public final class MainActivity extends Activity {
         setContentView(root); root.requestApplyInsets();
         if (Build.VERSION.SDK_INT >= 33) { backCallback = this::back; getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback); }
         JSONObject store = SessionStore.read(this); if (fullConnection(store)) loadedToken = store.optString("reader_token");
+        loadSavedSyncDiagnostics();
         if (saved != null) {
             taskQuery = NativeTaskSearchPolicy.restoreQuery(saved.getString("task_query", ""),
                     saved.getString("state_fingerprint", ""), tokenFingerprint(loadedToken));
@@ -267,6 +274,7 @@ public final class MainActivity extends Activity {
         JSONObject store = SessionStore.read(this); String token = fullConnection(store) ? store.optString("reader_token") : "";
         if (token.equals(loadedToken)) return;
         sessionEpoch++; actionRevision++; pageEpoch++; pendingTaskSearchFocus = null; loadedToken = token; taskQuery = ""; taskSearchExpanded = false; taskReturnDevice = ""; selectedId = ""; page = "tasks"; snapshot = null; account = null; lastSuccess = 0; nextSnapshot = 0; failed = false;
+        focusPendingOnOpen = false; firstWorkbenchStartedElapsed = 0; loadSavedSyncDiagnostics();
         usageSummary = null; usagePageState = null; nativeUsage = null; usageBusy = false; usageFailed = false; nextUsage = 0;
         usageRequestRevision = 0; usageAcceptedRevision = 0; usageAlertRevision = 0;
         UsageAlerts.sync(this);
@@ -340,6 +348,8 @@ public final class MainActivity extends Activity {
         if (!canReadWorkspace()) return;
         long started = SystemClock.elapsedRealtime();
         if (NativeWorkbenchPolicy.snapshotDelay(started, nextSnapshot, apiCooldownUntil) > 0) { scheduleSnapshot(); return; }
+        final boolean wasFirstScreen = snapshot == null;
+        if (wasFirstScreen && firstWorkbenchStartedElapsed == 0) firstWorkbenchStartedElapsed = started;
         snapshotBusy = true; final long requestedData = dataRevision.capture();
         final long requestedUsage = ++usageRequestRevision;
         updateConnection();
@@ -360,6 +370,11 @@ public final class MainActivity extends Activity {
                 if (!filterInitialized && preferences != null) { tool = NativeScreenPolicy.tool(preferences.optString("tool_filter")); filterInitialized = true; saveFilters(); updateTaskFilterLabels(); }
             }
             updateConnection(); updateWorkspace();
+            if (value != null) {
+                long anchor = wasFirstScreen && firstWorkbenchStartedElapsed > 0 ? firstWorkbenchStartedElapsed : started;
+                firstWorkbenchStartedElapsed = 0;
+                recordSyncDiagnostics(value, Math.max(0, SystemClock.elapsedRealtime() - anchor), wasFirstScreen);
+            }
             scheduleSnapshot();
         });
     }
@@ -487,11 +502,11 @@ public final class MainActivity extends Activity {
         expandedRootTitle = null; expandedRootOpening = 0; taskSearchAffordance = null; taskSearchAffordanceLabel = null;
         UsageAlerts.dismissSettings(this); liveSettings.dismiss(); currentSettingsSheet = ""; settingsSheetDialog = null;
         if (helpDialog != null && (loadedToken.isEmpty() || !pageKey().equals(helpPage))) dismissHelp();
-        dismissTaskFilterSheet();
+        dismissTaskFilterSheet(); dismissTaskPendingSheet();
         if (taskResults != null) { taskResults.dispose(); taskResults = null; }
         taskHeadingTitle = null; taskHeadingTool = null;
         if (nativeUsage != null) usagePageState = nativeUsage.saveState(); nativeUsage = null; taskUsage = null;
-        list = null; scroll = null; fixedBottomAction = null; taskAdapter = null; deviceAdapter = null; taskScopeFilter = null; taskSourceFilter = null; taskSourceCounts = null; taskDetail = null; trackingButton = null; trackingNote = null; archiveButton = null; emptyLabel = null; deviceStatus = null; nameInput = null; avatarView = null; outputSwitch = null; profileSaveButton = null; avatarPickButton = null;
+        list = null; scroll = null; fixedBottomAction = null; taskAdapter = null; deviceAdapter = null; taskScopeFilter = null; taskSourceFilter = null; taskPendingEntry = null; taskSourceCounts = null; taskDetail = null; trackingButton = null; trackingNote = null; archiveButton = null; emptyStateContainer = null; emptyLabel = null; emptyShowAllButton = null; syncDiagnosticsBody = null; deviceStatus = null; nameInput = null; avatarView = null; outputSwitch = null; profileSaveButton = null; avatarPickButton = null;
         loginStatus = null; loginNote = null; loginButton = null; loginCheckButton = null;
         accountCard = null; accountName = null; accountRetry = null; accountAvatar = null; accountChevron = null;
         body.animate().cancel(); body.setAlpha(1); body.setTranslationY(0); body.setTranslationX(0); body.removeAllViews(); titleBar.removeAllViews();
@@ -560,7 +575,7 @@ public final class MainActivity extends Activity {
             case "tasks": buildTasks(); break; case "devices": buildDevices(); break; case "task": buildTask(); break; case "device": buildDevice(); break;
             case "account": buildAccount(); break;
             case "settings": case "settings-appearance": case "settings-background": case "settings-notifications": case "settings-support": case "settings-security": buildSettings(); break;
-            case "profile": buildProfile(); break; case "sync": buildSync(); break; case "sessions": buildSessions(); break; case "usage": buildUsage(); break;
+            case "profile": buildProfile(); break; case "sync": buildSync(); break; case "sync-diagnostics": buildSyncDiagnostics(); break; case "sessions": buildSessions(); break; case "usage": buildUsage(); break;
             case "pairing": buildPairing(); break; case "pairing-confirm": buildPairingConfirm(); break; default: break;
         }
         updateConnection(); updateWorkspace(); updateNavigationInsets(); restorePosition();
@@ -673,7 +688,7 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48));
         params.gravity = Gravity.CENTER_VERTICAL; (titleActions == null ? titleBar : titleActions).addView(action, params);
     }
-    private String pageTitle() { String settings = NativeNavigationPolicy.settingsTitle(page); if (!settings.isEmpty()) return settings; switch (page) { case "tasks": return "工作台"; case "devices": return "我的电脑"; case "account": return "我的"; case "profile": return "个人资料"; case "sync": return "个人同步"; case "sessions": return "登录设备"; case "usage": return "用量"; case "pairing": return "添加电脑"; case "pairing-confirm": return "确认电脑"; case "device": return "电脑详情"; default: return "任务详情"; } }
+    private String pageTitle() { String settings = NativeNavigationPolicy.settingsTitle(page); if (!settings.isEmpty()) return settings; switch (page) { case "tasks": return "工作台"; case "devices": return "我的电脑"; case "account": return "我的"; case "profile": return "个人资料"; case "sync": return "个人同步"; case "sync-diagnostics": return "同步诊断"; case "sessions": return "登录设备"; case "usage": return "用量"; case "pairing": return "添加电脑"; case "pairing-confirm": return "确认电脑"; case "device": return "电脑详情"; default: return "任务详情"; } }
     private void buildNavigation() {
         bottomBar.setSelected(NativeNavigationPolicy.tabForPage(page, taskReturnDevice), true);
         updateNavigationInsets();
@@ -772,6 +787,17 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams sourceParams = new LinearLayout.LayoutParams(0, -2, 1);
         sourceParams.setMarginStart(ui.dp(8));
         choices.addView(taskSourceFilter, sourceParams);
+        taskPendingEntry = ui.button("", false, this::showPendingTasksSheet);
+        taskPendingEntry.setSingleLine(true);
+        taskPendingEntry.setTextSize(13);
+        taskPendingEntry.setPaddingRelative(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+        taskPendingEntry.setMinHeight(ui.dp(40));
+        taskPendingEntry.setTextColor(ui.warning);
+        taskPendingEntry.setBackground(ui.ripple(ui.dark ? 0xFF423B2C : 0xFFF3EBDC, 12));
+        taskPendingEntry.setVisibility(View.GONE);
+        LinearLayout.LayoutParams pendingParams = new LinearLayout.LayoutParams(-2, -2);
+        pendingParams.setMarginStart(ui.dp(8));
+        choices.addView(taskPendingEntry, pendingParams);
         filters.addView(choices, wrap());
         updateTaskFilterLabels();
         buildTaskSearch(filters);
@@ -868,6 +894,63 @@ public final class MainActivity extends Activity {
         LivePresentationSheet dialog = taskFilterSheet;
         taskFilterSheet = null;
         dialog.dismiss();
+    }
+    private void showPendingTasksSheet() {
+        if (!visible || isFinishing() || isDestroyed() || !page.equals("tasks") || loadedToken.isEmpty()) return;
+        java.util.List<JSONObject> pending = NativeWorkbenchOverview.pendingTasks(snapshot, stale());
+        if (pending.isEmpty()) { notice("当前没有待处理的任务"); return; }
+        dismissTaskPendingSheet();
+        final long requestedPage = pageEpoch;
+        LivePresentationSheet dialog = new LivePresentationSheet(this, "待处理 · " + pending.size(), "关闭待处理列表");
+        taskPendingSheet = dialog;
+        if (!"all".equals(tool) || !"all".equals(scope) || NativeTaskSearchPolicy.isSearching(taskQuery)) {
+            dialog.note("列出所有在线电脑上等你批准或回复选项的任务；直接进入处理不会改动当前工作台筛选");
+        }
+        LinearLayout listColumn = ui.column();
+        for (int i = 0; i < pending.size(); i++) {
+            final JSONObject item = pending.get(i);
+            final String id = item.optString("id");
+            JSONObject computer = findDevice(item.optString("device_id"));
+            View row = NativePages.pendingTaskRow(ui, item, computer, () -> {
+                if (!visible || !samePage(requestedPage)) return;
+                dismissTaskPendingSheet();
+                openPendingTask(id);
+            });
+            LinearLayout.LayoutParams rowParams = wrap();
+            if (i + 1 < pending.size()) rowParams.bottomMargin = ui.dp(10);
+            listColumn.addView(row, rowParams);
+        }
+        dialog.body(listColumn);
+        dialog.setOnDismissListener(ignored -> { if (taskPendingSheet == dialog) taskPendingSheet = null; });
+        try { dialog.show(); }
+        catch (RuntimeException failure) { dismissTaskPendingSheet(); notice("暂时无法打开待处理列表，请重试"); }
+    }
+    private void dismissTaskPendingSheet() {
+        if (taskPendingSheet == null) return;
+        LivePresentationSheet dialog = taskPendingSheet;
+        taskPendingSheet = null;
+        dialog.dismiss();
+    }
+    private void openPendingTask(String taskId) {
+        if (taskId == null || taskId.isEmpty()) return;
+        focusPendingOnOpen = true;
+        navigate("task", taskId);
+    }
+    private void resetAllTaskFilters() {
+        if (!visible || loadedToken.isEmpty()) return;
+        tool = "all";
+        scope = "all";
+        taskQuery = "";
+        filterInitialized = true;
+        if (taskSearchInput != null && taskSearchInput.length() > 0) taskSearchInput.setText("");
+        if (taskSearchExpanded) setTaskSearchExpanded(false, false);
+        saveFilters();
+        updateTaskFilterLabels();
+        persistFilter();
+        listPositions.remove(pageKey());
+        workbenchHeaderScroll = 0;
+        updateWorkspace();
+        if (list != null) list.setSelection(0);
     }
     private void buildTaskSearch(LinearLayout filters) {
         taskSearchPanel = ui.column();
@@ -985,16 +1068,26 @@ public final class MainActivity extends Activity {
     private void attachList(LinearLayout column) {
         listBaseBottomPadding = list.getPaddingBottom();
         FrameLayout area = new FrameLayout(this); column.addView(area, new LinearLayout.LayoutParams(-1, 0, 1)); area.addView(list, new FrameLayout.LayoutParams(-1, -1));
-        emptyLabel = ui.text("正在读取", 17, false); emptyLabel.setTextColor(ui.muted); emptyLabel.setGravity(Gravity.CENTER); emptyLabel.setPadding(ui.dp(16), ui.dp(30), ui.dp(16), ui.dp(30));
+        emptyStateContainer = ui.column();
+        emptyStateContainer.setGravity(Gravity.CENTER);
+        emptyStateContainer.setPadding(ui.dp(16), ui.dp(30), ui.dp(16), ui.dp(30));
+        emptyLabel = ui.text("正在读取", 16, false); emptyLabel.setTextColor(ui.muted); emptyLabel.setGravity(Gravity.CENTER);
+        emptyStateContainer.addView(emptyLabel, wrap());
+        emptyShowAllButton = ui.button("查看全部", false, this::resetAllTaskFilters);
+        emptyShowAllButton.setVisibility(View.GONE);
+        LinearLayout.LayoutParams showAllParams = new LinearLayout.LayoutParams(-2, -2);
+        showAllParams.topMargin = ui.dp(14);
+        emptyStateContainer.addView(emptyShowAllButton, showAllParams);
         if (page.equals("tasks") || page.equals("device")) {
             // A list footer keeps the filters or device identity visible when there are no tasks.
             FrameLayout emptyRow = new FrameLayout(this);
-            emptyRow.addView(emptyLabel, new FrameLayout.LayoutParams(-1, -2));
+            emptyRow.addView(emptyStateContainer, new FrameLayout.LayoutParams(-1, -2));
             list.addFooterView(emptyRow, null, false);
         } else {
-            area.addView(emptyLabel, new FrameLayout.LayoutParams(-1, -1)); list.setEmptyView(emptyLabel);
+            area.addView(emptyStateContainer, new FrameLayout.LayoutParams(-1, -1)); list.setEmptyView(emptyStateContainer);
         }
         emptyLabel.setOnClickListener(v -> {
+            if (emptyShowAllButton != null && emptyShowAllButton.getVisibility() == View.VISIBLE) return;
             if (page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null) return;
             if (!snapshotBusy) refreshWorkspaceNow();
         });
@@ -1030,7 +1123,30 @@ public final class MainActivity extends Activity {
         }, taskResultsState); taskResultsState = null;
         final NativeTaskResults results = taskResults;
         LinearLayout.LayoutParams attentionSpace = wrap(); attentionSpace.topMargin = ui.dp(16); attentionSpace.bottomMargin = ui.dp(20);
-        if (interactive) column.addView(results.attentionView, attentionSpace);
+        if (interactive) {
+            column.addView(results.attentionView, attentionSpace);
+            if (focusPendingOnOpen) {
+                final ScrollView targetScroll = scroll;
+                final View targetAttention = results.attentionView;
+                results.attentionView.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                    @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                        if (!focusPendingOnOpen || scroll != targetScroll || !page.equals("task")) {
+                            targetAttention.removeOnLayoutChangeListener(this);
+                            return;
+                        }
+                        if (targetAttention.getVisibility() == View.VISIBLE && b - t > 0) {
+                            focusPendingOnOpen = false;
+                            targetAttention.removeOnLayoutChangeListener(this);
+                            targetScroll.post(() -> {
+                                if (scroll == targetScroll) targetScroll.smoothScrollTo(0, Math.max(0, targetAttention.getTop() - ui.dp(12)));
+                            });
+                        }
+                    }
+                });
+            }
+        } else {
+            focusPendingOnOpen = false;
+        }
         column.addView(taskDetail.errorSection, wrap());
         column.addView(ui.space(24));
         column.addView(taskResults.view, wrap());
@@ -1136,6 +1252,17 @@ public final class MainActivity extends Activity {
                 if (!android.text.TextUtils.equals(deviceStatus.getText(), label)) deviceStatus.setText(label);
             }
         }
+        if (taskPendingEntry != null) {
+            int waitingCount = NativeWorkbenchOverview.waitingCount(snapshot, stale());
+            if (waitingCount > 0) {
+                String pendingLabel = "待处理 " + waitingCount;
+                if (!android.text.TextUtils.equals(taskPendingEntry.getText(), pendingLabel)) taskPendingEntry.setText(pendingLabel);
+                taskPendingEntry.setContentDescription(pendingLabel + "，查看所有电脑待批准或待回答的任务");
+                taskPendingEntry.setVisibility(View.VISIBLE);
+            } else {
+                taskPendingEntry.setVisibility(View.GONE);
+            }
+        }
         int uncertainSelectedTasks = 0;
         if (taskAdapter != null) {
             NativeTaskListModel.Result selected = NativeTaskListModel.select(tasks(), devices(), tool, scope,
@@ -1156,14 +1283,32 @@ public final class MainActivity extends Activity {
         if (emptyLabel != null) {
             JSONArray computers = devices(); int online = 0;
             for (int i = 0; i < computers.length(); i++) { JSONObject computer = computers.optJSONObject(i); if (computer != null && computer.optBoolean("online")) online++; }
-            emptyLabel.setText(snapshot == null ? failed ? "暂时无法读取，点此重试" : "正在读取" : page.equals("devices") ? "还没有连接电脑" : page.equals("tasks") && scope.equals("active") ? NativeWorkbenchPolicy.emptyActive(stale(), computers.length(), online, uncertainSelectedTasks) : page.equals("tasks") && scope.equals("archived") ? "暂无归档任务" : "暂无任务");
-            boolean searching = page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null;
-            if (searching && !(scope.equals("active") && (stale() || uncertainSelectedTasks > 0)))
-                emptyLabel.setText("没有匹配的任务\n试试其他关键词，或调整来源和状态筛选");
-            if (page.equals("tasks") || page.equals("device")) {
-                emptyLabel.setVisibility(taskAdapter.getCount() == 0 ? View.VISIBLE : View.GONE);
+            NativeTaskListModel.HiddenSummary hidden = (page.equals("tasks") || page.equals("device")) && snapshot != null && taskAdapter != null
+                    ? NativeTaskListModel.hiddenSummary(tasks(), computers,
+                        page.equals("device") ? "all" : tool,
+                        page.equals("device") ? "all" : scope,
+                        page.equals("device") ? selectedId : null,
+                        page.equals("device") ? "" : taskQuery,
+                        stale(), taskAdapter.getCount())
+                    : null;
+            boolean showHiddenSummary = hidden != null && hidden.hiddenTasks > 0
+                    && page.equals("tasks")
+                    && !(scope.equals("active") && stale());
+            if (showHiddenSummary) {
+                emptyLabel.setText(hidden.message);
+                if (emptyShowAllButton != null) emptyShowAllButton.setVisibility(View.VISIBLE);
+                emptyLabel.setClickable(false);
+            } else {
+                if (emptyShowAllButton != null) emptyShowAllButton.setVisibility(View.GONE);
+                emptyLabel.setText(snapshot == null ? failed ? "暂时无法读取，点此重试" : "正在读取" : page.equals("devices") ? "还没有连接电脑" : page.equals("tasks") && scope.equals("active") ? NativeWorkbenchPolicy.emptyActive(stale(), computers.length(), online, uncertainSelectedTasks) : page.equals("tasks") && scope.equals("archived") ? "暂无归档任务" : "暂无任务");
+                boolean searching = page.equals("tasks") && NativeTaskSearchPolicy.isSearching(taskQuery) && snapshot != null;
+                if (searching && !(scope.equals("active") && (stale() || uncertainSelectedTasks > 0)))
+                    emptyLabel.setText("没有匹配的任务\n试试其他关键词，或调整来源和状态筛选");
+                emptyLabel.setClickable(!searching);
             }
-            emptyLabel.setClickable(!searching);
+            if ((page.equals("tasks") || page.equals("device")) && emptyStateContainer != null) {
+                emptyStateContainer.setVisibility(taskAdapter.getCount() == 0 ? View.VISIBLE : View.GONE);
+            }
         }
     }
     private void updateConnection() {
@@ -1245,6 +1390,7 @@ public final class MainActivity extends Activity {
         addAccountSection(column, "设备与同步", menuGroup(
                 accountMenu("devices", "我的电脑", () -> navigate("devices", "")),
                 accountMenu("cloud", "个人同步", () -> navigate("sync", "")),
+                accountMenu("refresh", "同步诊断", () -> navigate("sync-diagnostics", "")),
                 accountMenu("shield", "登录设备", () -> navigate("sessions", ""))));
         addAccountSection(column, "应用", menuGroup(
                 accountMenu("settings", "设置", () -> navigate("settings", ""))));
@@ -1466,6 +1612,117 @@ public final class MainActivity extends Activity {
         });
         card.addView(outputSwitch, wrap()); column.addView(card, wrap()); column.addView(ui.space(20));
         TextView state = ui.text("任务状态和已连接电脑会随账号同步", 15, false); state.setTextColor(ui.muted); column.addView(state, wrap());
+    }
+    private void loadSavedSyncDiagnostics() {
+        String fp = tokenFingerprint(loadedToken);
+        if (fp.isEmpty()) { syncDiagnosticsSample = NativeSyncDiagnostics.empty(); return; }
+        android.content.SharedPreferences prefs = getSharedPreferences("native_sync_diag", MODE_PRIVATE);
+        if (!fp.equals(prefs.getString("fingerprint", ""))) { syncDiagnosticsSample = NativeSyncDiagnostics.empty(); return; }
+        syncDiagnosticsSample = new NativeSyncDiagnostics.Sample(
+                prefs.getLong("first_screen_ms", -1),
+                prefs.getLong("last_refresh_ms", -1),
+                prefs.getLong("computer_completed_ms", 0),
+                prefs.getLong("server_received_ms", 0),
+                prefs.getLong("phone_displayed_ms", 0));
+    }
+    private void recordSyncDiagnostics(JSONObject workbenchSnapshot, long durationMs, boolean wasFirstScreen) {
+        syncDiagnosticsSample = NativeSyncDiagnostics.recordWorkbench(
+                syncDiagnosticsSample, workbenchSnapshot, durationMs, System.currentTimeMillis(), wasFirstScreen);
+        String fp = tokenFingerprint(loadedToken);
+        if (!fp.isEmpty()) {
+            getSharedPreferences("native_sync_diag", MODE_PRIVATE).edit()
+                    .putString("fingerprint", fp)
+                    .putLong("first_screen_ms", syncDiagnosticsSample.firstScreenMs)
+                    .putLong("last_refresh_ms", syncDiagnosticsSample.lastRefreshMs)
+                    .putLong("computer_completed_ms", syncDiagnosticsSample.computerCompletedMs)
+                    .putLong("server_received_ms", syncDiagnosticsSample.serverReceivedMs)
+                    .putLong("phone_displayed_ms", syncDiagnosticsSample.phoneDisplayedMs)
+                    .apply();
+        }
+        if (page.equals("sync-diagnostics")) renderSyncDiagnostics();
+    }
+    private void buildSyncDiagnostics() {
+        LinearLayout column = content();
+        syncDiagnosticsBody = ui.column();
+        column.addView(syncDiagnosticsBody, wrap());
+        renderSyncDiagnostics();
+    }
+    private void renderSyncDiagnostics() {
+        if (syncDiagnosticsBody == null || !page.equals("sync-diagnostics")) return;
+        syncDiagnosticsBody.removeAllViews();
+        NativeSyncDiagnostics.Sample sample = syncDiagnosticsSample;
+        LinearLayout summaryCard = ui.card();
+        summaryCard.addView(ui.heading("首屏与刷新耗时", 16), wrap());
+        summaryCard.addView(ui.space(12));
+        addDiagnosticRow(summaryCard, "最近一次首屏耗时", NativeSyncDiagnostics.formatDuration(sample.firstScreenMs), true);
+        summaryCard.addView(ui.space(10));
+        addDiagnosticRow(summaryCard, "最近一次刷新耗时", NativeSyncDiagnostics.formatDuration(sample.lastRefreshMs), false);
+        syncDiagnosticsBody.addView(summaryCard, wrap());
+        syncDiagnosticsBody.addView(ui.space(14));
+
+        LinearLayout timelineCard = ui.card();
+        timelineCard.addView(ui.heading("三段时间点（本机时区）", 16), wrap());
+        timelineCard.addView(ui.space(12));
+        addDiagnosticRow(timelineCard, "电脑完成", NativeSyncDiagnostics.formatTimestamp(sample.computerCompletedMs, null), false);
+        timelineCard.addView(ui.space(10));
+        addDiagnosticRow(timelineCard, "服务收到", NativeSyncDiagnostics.formatTimestamp(sample.serverReceivedMs, null), false);
+        timelineCard.addView(ui.space(10));
+        addDiagnosticRow(timelineCard, "手机显示", NativeSyncDiagnostics.formatTimestamp(sample.phoneDisplayedMs, null), true);
+        timelineCard.addView(ui.space(14));
+        View divider = new View(this); divider.setBackgroundColor(ui.line);
+        timelineCard.addView(divider, new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(1))));
+        timelineCard.addView(ui.space(12));
+        addDiagnosticRow(timelineCard, "电脑 → 服务", NativeSyncDiagnostics.formatLeg(sample.computerCompletedMs, sample.serverReceivedMs), false);
+        timelineCard.addView(ui.space(8));
+        addDiagnosticRow(timelineCard, "服务 → 手机", NativeSyncDiagnostics.formatLeg(sample.serverReceivedMs, sample.phoneDisplayedMs), false);
+        syncDiagnosticsBody.addView(timelineCard, wrap());
+        syncDiagnosticsBody.addView(ui.space(14));
+
+        LinearLayout diagnosisCard = ui.card();
+        diagnosisCard.addView(ui.heading("分段定位说明", 16), wrap());
+        diagnosisCard.addView(ui.space(8));
+        TextView explain = ui.text(NativeSyncDiagnostics.diagnosis(sample), 14, false);
+        explain.setTextColor(ui.muted);
+        diagnosisCard.addView(explain, wrap());
+        syncDiagnosticsBody.addView(diagnosisCard, wrap());
+        syncDiagnosticsBody.addView(ui.space(18));
+
+        final TextView probeButton = ui.button(snapshotBusy ? "正在测速同步…" : "立即测速同步一次", false, null);
+        probeButton.setEnabled(!snapshotBusy);
+        probeButton.setOnClickListener(v -> {
+            if (snapshotBusy || loadedToken.isEmpty()) return;
+            probeButton.setEnabled(false);
+            probeButton.setText("正在测速同步…");
+            final long probeStarted = SystemClock.elapsedRealtime();
+            final boolean wasFirst = snapshot == null;
+            final long requestedData = dataRevision.capture();
+            final long requestedUsage = ++usageRequestRevision;
+            request("GET", "/api/native/workbench", null, (value, revision) -> {
+                if (value != null && dataRevision.accepts(requestedData)) {
+                    snapshot = value; failed = false; lastSuccess = SystemClock.elapsedRealtime();
+                    MonitorWidgetUpdater.cacheWorkbench(this, value, loadedToken);
+                    acceptUsage(value.optJSONObject("usage"), requestedUsage);
+                    recordSyncDiagnostics(value, Math.max(0, SystemClock.elapsedRealtime() - probeStarted), wasFirst);
+                } else if (samePage(revision)) {
+                    notice("同步测速未成功，请稍后重试");
+                    renderSyncDiagnostics();
+                }
+            });
+        });
+        syncDiagnosticsBody.addView(probeButton, wrap());
+    }
+    private void addDiagnosticRow(LinearLayout parent, String label, String value, boolean emphasize) {
+        LinearLayout row = ui.row();
+        TextView keyView = ui.text(label, 14, false);
+        keyView.setTextColor(ui.muted);
+        row.addView(keyView, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView valView = ui.text(value, 14, emphasize);
+        valView.setTextColor(emphasize ? ui.accent : ui.text);
+        valView.setGravity(Gravity.END);
+        LinearLayout.LayoutParams valParams = new LinearLayout.LayoutParams(-2, -2);
+        valParams.setMarginStart(ui.dp(12));
+        row.addView(valView, valParams);
+        parent.addView(row, wrap());
     }
     private void applyOutputPreference(boolean enabled) {
         try {
@@ -1847,6 +2104,7 @@ public final class MainActivity extends Activity {
         TrackingService.requestStop(this, TrackingService.generation); UsageAlerts.sync(this); MonitorWidgetUpdater.refreshAll(this);
         sessionEpoch++; pageEpoch++; actionRevision++; loadedToken = ""; invalidToken = "";
         snapshot = null; account = null; usageSummary = null; profileDraft = false; taskQuery = "";
+        syncDiagnosticsSample = NativeSyncDiagnostics.empty(); firstWorkbenchStartedElapsed = 0; focusPendingOnOpen = false;
         draftName = ""; draftAvatar = ""; pendingAvatarUri = ""; pairingCode = ""; pairingExpires = "";
         mutations.clear(); listPositions.clear(); scrollPositions.clear(); workbenchHeaderScroll = 0; clearNotificationRequest();
         if (taskResults != null) { taskResults.dispose(); taskResults = null; }
@@ -1935,7 +2193,7 @@ public final class MainActivity extends Activity {
         if (target == null) finish(); else navigate(target.page, target.id);
     }
     @Override public void onBackPressed() { back(); }
-    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); savePosition(); captureDraft(); dismissTaskFilterSheet(); dismissHelp(); setIntent(intent); if (openNotification(intent)) { cancelDuration(); clearNotificationRequest(); showPage(false); loadCurrentPage(); } else handleReturn(intent); }
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); savePosition(); captureDraft(); dismissTaskFilterSheet(); dismissTaskPendingSheet(); dismissHelp(); setIntent(intent); if (openNotification(intent)) { cancelDuration(); clearNotificationRequest(); showPage(false); loadCurrentPage(); } else handleReturn(intent); }
     @Override protected void onSaveInstanceState(Bundle saved) {
         if (taskResults != null) saved.putBundle("task_results", taskResults.saveState());
         if (nativeUsage != null) usagePageState = nativeUsage.saveState();
@@ -1971,10 +2229,10 @@ public final class MainActivity extends Activity {
         if (hasFocus && systemBars != null) updateHeaderSurface();
         if (hasFocus) restoreTaskSearchFocus();
     }
-    @Override protected void onPause() { pendingSettingsSheet = showingSettingsSheet(); visible = false; dismissTaskFilterSheet(); if (bingWallpaper != null) bingWallpaper.cancel(); if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace); super.onPause(); }
+    @Override protected void onPause() { pendingSettingsSheet = showingSettingsSheet(); visible = false; dismissTaskFilterSheet(); dismissTaskPendingSheet(); if (bingWallpaper != null) bingWallpaper.cancel(); if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace); super.onPause(); }
     @Override protected void onDestroy() {
         if (bingWallpaper != null) bingWallpaper.close();
-        visible = false; dismissTaskFilterSheet(); cancelSearchAnimation(); if (taskResults != null) { taskResults.dispose(); taskResults = null; } sessionEpoch++; pageEpoch++; actionRevision++; dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); clearNotificationRequest(); handler.removeCallbacksAndMessages(null); workbenchReader.shutdown(); worker.shutdown();
+        visible = false; dismissTaskFilterSheet(); dismissTaskPendingSheet(); cancelSearchAnimation(); if (taskResults != null) { taskResults.dispose(); taskResults = null; } sessionEpoch++; pageEpoch++; actionRevision++; dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); clearNotificationRequest(); handler.removeCallbacksAndMessages(null); workbenchReader.shutdown(); worker.shutdown();
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback); super.onDestroy();
     }
     private static String tokenFingerprint(String token) {

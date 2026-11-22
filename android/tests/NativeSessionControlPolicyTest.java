@@ -252,6 +252,18 @@ public final class NativeSessionControlPolicyTest {
         check(NativeSessionControlPolicy.stateLabel(approval().put("state", "submitted"), NOW).contains("等待"), "submitted label is pending source confirmation");
         check(NativeSessionControlPolicy.stateLabel(approval().put("state", "acknowledged"), NOW).contains("执行结果请看"), "acknowledgment is not execution success");
         check(NativeSessionControlPolicy.stateLabel(approval().put("state", "forwarded"), NOW).equals("已交给电脑，等待任务结果"), "forwarded transport does not claim source acceptance");
+        check("手机已发送 → 等待电脑接收".equals(NativeSessionControlPolicy.receiptTrail(approval().put("state", "submitted").put("delivered", false), false, false)),
+                "undelivered submission shows phone sent waiting for computer");
+        check("手机已发送 → 电脑已收到".equals(NativeSessionControlPolicy.receiptTrail(approval().put("state", "submitted").put("delivered", true), false, false)),
+                "polled submission shows computer received");
+        check("手机已发送 → 电脑已收到".equals(NativeSessionControlPolicy.receiptTrail(approval().put("state", "forwarded"), false, false)),
+                "forwarded without provider adoption stays at computer received");
+        check("手机已发送 → 电脑已收到 → 已采用".equals(NativeSessionControlPolicy.receiptTrail(approval().put("state", "acknowledged").put("outcome", "adopted"), false, false)),
+                "provider adoption appends 已采用");
+        check("手机已发送 → 电脑已收到 → 已拒绝".equals(NativeSessionControlPolicy.receiptTrail(approval().put("state", "forwarded").put("outcome", "rejected"), false, false)),
+                "provider rejection appends 已拒绝");
+        check("已在电脑端处理".equals(NativeSessionControlPolicy.receiptTrail(approval().put("state", "cancelled").put("outcome", "handled_on_desktop"), false, false)),
+                "desktop-resolved request shows 已在电脑端处理");
         System.out.println("NativeSessionControlPolicyTest: " + checks + " checks passed");
     }
     private static String repeat(char value, int count) { char[] result = new char[count]; java.util.Arrays.fill(result, value); return new String(result); }

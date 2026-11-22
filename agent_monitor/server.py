@@ -162,6 +162,17 @@ class Source(BaseModel):
 class Heartbeat(BaseModel):
     tasks: list[Task] = Field(max_length=100)
     sources: list[Source] = Field(max_length=10)
+    collected_at: str | None = Field(default=None, max_length=80)
+
+    @field_validator("collected_at")
+    @classmethod
+    def valid_collected_at(cls, value):
+        if value is None:
+            return None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("时间必须带时区")
+        return iso(min(parsed.timestamp(), time.time()))
 
 
 class Attempts:
@@ -207,7 +218,12 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
             snapshot = collect_snapshot(include_output=store.preferences()["sync_output"], codex_growth=codex_growth,
                                         codex_primary_backfill=True)
             parsed = Heartbeat.model_validate(snapshot)
-            store.ingest(local_id, [t.model_dump() for t in parsed.tasks], [s.model_dump() for s in parsed.sources])
+            tasks_dump = [t.model_dump() for t in parsed.tasks]
+            sources_dump = [s.model_dump() for s in parsed.sources]
+            if parsed.collected_at is not None:
+                store.ingest(local_id, tasks_dump, sources_dump, collected_at=parsed.collected_at)
+            else:
+                store.ingest(local_id, tasks_dump, sources_dump)
         except Exception as exc:
             # Handle failures before they reach the future: a cancelled shield
             # may otherwise report the raw worker exception through asyncio.
@@ -489,7 +505,8 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
         device_id = store.agent_device(token)
         if not device_id:
             raise HTTPException(401, "设备连接已失效，请重新配对")
-        store.ingest(device_id, [t.model_dump() for t in payload.tasks], [s.model_dump() for s in payload.sources])
+        store.ingest(device_id, [t.model_dump() for t in payload.tasks], [s.model_dump() for s in payload.sources],
+                     collected_at=payload.collected_at)
         return {"sync_output": store.preferences()["sync_output"], "antigravity_v1": True}
 
     from .google_login import install_google_routes

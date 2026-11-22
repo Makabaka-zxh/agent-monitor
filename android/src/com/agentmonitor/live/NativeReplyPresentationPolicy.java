@@ -43,4 +43,49 @@ public final class NativeReplyPresentationPolicy {
         if (!available) return reason.isEmpty() ? "当前任务暂不可回复" : reason;
         return selectionReady ? "" : "暂时无法确认模型选项，请稍后再试，或在模型设置中重新选择";
     }
+
+    /** Explicit phone-to-computer receipt trail for a submitted reply. */
+    public static String replyReceipt(boolean sending, String state, boolean deliveredToComputer) {
+        if (sending) return "手机已发送 → 等待电脑接收";
+        if (state == null) return "";
+        switch (state) {
+            case "queued":
+                return deliveredToComputer ? "手机已发送 → 电脑已收到" : "手机已发送 → 等待电脑接收";
+            case "dispatching":
+                return deliveredToComputer ? "手机已发送 → 电脑已收到" : "手机已发送 → 等待电脑确认";
+            case "running":
+                return "手机已发送 → 电脑已收到";
+            case "succeeded":
+                return "手机已发送 → 电脑已收到 → 本轮已完成";
+            case "blocked":
+                return deliveredToComputer ? "手机已发送 → 电脑已收到 · 等待处理" : "";
+            case "failed":
+                return deliveredToComputer ? "手机已发送 → 电脑已收到 · 执行未完成" : "";
+            default:
+                return "";
+        }
+    }
+
+    /** Formats either verified actual turn settings (`applied`) or requested settings before confirmation. */
+    public static String settingsReceipt(String modelLabel, String effortLabel,
+                                         boolean fastMode, boolean planMode, boolean verifiedApplied) {
+        StringBuilder parts = new StringBuilder();
+        if (modelLabel != null && !modelLabel.trim().isEmpty()) {
+            parts.append(modelLabel.trim());
+        }
+        if (effortLabel != null && !effortLabel.trim().isEmpty()) {
+            if (parts.length() > 0) parts.append(" · ");
+            parts.append("思考强度 ").append(effortLabel.trim());
+        }
+        if (fastMode) {
+            if (parts.length() > 0) parts.append(" · ");
+            parts.append("快速模式");
+        }
+        if (planMode) {
+            if (parts.length() > 0) parts.append(" · ");
+            parts.append("计划模式");
+        }
+        if (parts.length() == 0) return "";
+        return (verifiedApplied ? "本轮实际使用：" : "已随回复提交：") + parts;
+    }
 }

@@ -125,6 +125,7 @@ public sealed class MonitorTask
     [JsonPropertyName("archived")] public bool Archived { get; set; }
     [JsonPropertyName("stale")] public bool? Stale { get; set; }
     [JsonPropertyName("pending_interaction_kind")] public string? PendingInteractionKind { get; set; }
+    [JsonPropertyName("continuation_state")] public string? ContinuationState { get; set; }
     [JsonPropertyName("failure_code")] public string? FailureCode { get; set; }
     [JsonPropertyName("error_analysis")] public ErrorAnalysisDto? ErrorAnalysis { get; set; }
     [JsonPropertyName("usage")] public TaskUsageSummary? Usage { get; set; }
@@ -164,6 +165,21 @@ public sealed class MonitorTask
             "error" => "需要关注",
             _ => "状态未知"
         }
+    };
+
+    public string EffectiveContinuation(bool fresh, bool deviceOnline = true) =>
+        Archived || !fresh || !deviceOnline || Stale == true
+            ? ""
+            : ContinuationState is "continuable" or "computer_in_use" or "view_only"
+                ? ContinuationState!
+                : "";
+
+    public static string ContinuationTitleFor(string? state) => state switch
+    {
+        "continuable" => "可在手机继续",
+        "computer_in_use" => "电脑正在使用",
+        "view_only" => "仅可查看",
+        _ => ""
     };
 
     public bool Matches(ToolFilter filter, TaskScope scope, bool fresh, string? query = null)
@@ -222,12 +238,21 @@ public sealed class PreferencesDto
     [JsonPropertyName("tool_filter")] public string? ToolFilter { get; set; }
 }
 
+public sealed class SyncTimingsDto
+{
+    [JsonPropertyName("computer_completed_at")] public string? ComputerCompletedAt { get; set; }
+    [JsonPropertyName("server_received_at")] public string? ServerReceivedAt { get; set; }
+    [JsonPropertyName("server_generated_at")] public string? ServerGeneratedAt { get; set; }
+}
+
 public sealed class WorkbenchResponse
 {
     [JsonPropertyName("devices")] public List<Computer> Devices { get; set; } = [];
     [JsonPropertyName("tasks")] public List<MonitorTask> Tasks { get; set; } = [];
     [JsonPropertyName("preferences")] public PreferencesDto Preferences { get; set; } = new();
     [JsonPropertyName("usage")] public UsageSummaryDto? Usage { get; set; }
+    [JsonPropertyName("sync_timings")] public SyncTimingsDto? SyncTimings { get; set; }
+    [JsonPropertyName("generated_at")] public string? GeneratedAt { get; set; }
 }
 
 public sealed class ProfileDto
@@ -330,12 +355,23 @@ public sealed class TaskResultDto
     [JsonPropertyName("reason")] public string? Reason { get; set; }
 }
 
+public sealed class AppliedSettingsDto
+{
+    [JsonPropertyName("model")] public string? Model { get; set; }
+    [JsonPropertyName("effort")] public string? Effort { get; set; }
+    [JsonPropertyName("service_tier")] public string? ServiceTier { get; set; }
+    [JsonPropertyName("collaboration_mode")] public string? CollaborationMode { get; set; }
+}
+
 public sealed class ReplyCommandDto
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";
     [JsonPropertyName("state")] public string State { get; set; } = "";
     [JsonPropertyName("reason")] public string? Reason { get; set; }
     [JsonPropertyName("delivery_ms")] public int? DeliveryMs { get; set; }
+    [JsonPropertyName("claimed_at")] public string? ClaimedAt { get; set; }
+    [JsonPropertyName("requested_selection")] public SessionModelSelectionDto? RequestedSelection { get; set; }
+    [JsonPropertyName("applied")] public AppliedSettingsDto? Applied { get; set; }
 }
 
 public sealed class ReplyStateDto
@@ -345,6 +381,9 @@ public sealed class ReplyStateDto
     [JsonPropertyName("found")] public bool? Found { get; set; }
     [JsonPropertyName("available")] public bool? Available { get; set; }
     [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("claimed_at")] public string? ClaimedAt { get; set; }
+    [JsonPropertyName("requested_selection")] public SessionModelSelectionDto? RequestedSelection { get; set; }
+    [JsonPropertyName("applied")] public AppliedSettingsDto? Applied { get; set; }
     [JsonPropertyName("latest")] public ReplyCommandDto? Latest { get; set; }
 }
 
@@ -522,6 +561,12 @@ public sealed class SessionPendingRequestDto
     [JsonPropertyName("expires_at")] public double? ExpiresAt { get; set; }
     [JsonPropertyName("state")] public string State { get; set; } = "";
     [JsonPropertyName("decision_id")] public string? DecisionId { get; set; }
+    [JsonPropertyName("delivered")] public bool? Delivered { get; set; }
+    [JsonPropertyName("decision_kind")] public string? DecisionKind { get; set; }
+    [JsonPropertyName("outcome")] public string? Outcome { get; set; }
+    [JsonPropertyName("submitted_at")] public string? SubmittedAt { get; set; }
+    [JsonPropertyName("delivered_at")] public string? DeliveredAt { get; set; }
+    [JsonPropertyName("resolved_at")] public string? ResolvedAt { get; set; }
 }
 
 public sealed class TaskControlsResponseDto

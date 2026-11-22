@@ -87,6 +87,9 @@ public sealed class TaskDetailController : IDisposable
     public bool DecisionSending { get; private set; }
     public string ControlsFeedback { get; set; } = "";
     private string _observedPendingKind = "";
+    private string _observedContinuationState = "";
+    public string DecisionSendingId { get; private set; } = "";
+    public Dictionary<string, (string Title, string Summary)> SessionDecisionMemos { get; } = new(StringComparer.Ordinal);
 
     public PersistedPendingReply? PendingReply { get; private set; }
     public PersistedModelOverrides ModelOverrides { get; private set; } = new();
@@ -94,6 +97,9 @@ public sealed class TaskDetailController : IDisposable
 
     public bool ReplyAvailable { get; private set; }
     public bool ReplySending { get; private set; }
+    public bool ReplyDelivered { get; private set; }
+    public string ReplyReceiptTrail { get; private set; } = "";
+    public string SettingsReceiptText { get; private set; } = "";
     public string ReplyMessage { get; private set; } = "";
     public string DraftText { get; set; } = "";
 
@@ -131,9 +137,9 @@ public sealed class TaskDetailController : IDisposable
             var label = Controls?.Catalog?.Models?.FirstOrDefault(m => m.Id == sel.Model)?.Label
                         ?? UsageFormatting.FormatModelName(sel.Model);
             var extras = new List<string> { label };
-            if (!string.IsNullOrWhiteSpace(sel.Effort)) extras.Add(sel.Effort!);
-            if (ModelOverrides.FastNext) extras.Add("Fast(下轮)");
-            if (ModelOverrides.PlanNext) extras.Add("Plan(下轮)");
+            if (!string.IsNullOrWhiteSpace(sel.Effort)) extras.Add($"思考强度 {SessionControlPolicy.LocalizedEffort(sel.Effort)}");
+            if (ModelOverrides.FastNext) extras.Add("快速模式(下轮)");
+            if (ModelOverrides.PlanNext) extras.Add("计划模式(下轮)");
             return string.Join(" · ", extras);
         }
     }
@@ -183,6 +189,17 @@ public sealed class TaskDetailController : IDisposable
             if (!string.IsNullOrEmpty(nextKind) && IsActive)
             {
                 _ = RefreshControlsAsync();
+            }
+        }
+
+        var nextCont = task?.ContinuationState ?? "";
+        if (nextCont != _observedContinuationState)
+        {
+            var releasedToContinuable = nextCont == "continuable";
+            _observedContinuationState = nextCont;
+            if (releasedToContinuable && SupportsReply && IsActive)
+            {
+                _ = RefreshReplyStateAsync();
             }
         }
     }
@@ -350,15 +367,17 @@ public sealed class TaskDetailController : IDisposable
             DpapiVault.Write(_hub.Origin, _decisionVaultKey, Decisions);
         }
 
+        SessionDecisionMemos[request.Id] = (request.Title, DescribeDecision(request, payload));
         DecisionSending = true;
-        ControlsFeedback = "正在发送决定…";
+        DecisionSendingId = request.Id;
+        ControlsFeedback = "";
         Notify();
         try
         {
             _ = await _hub.Api.JsonAsync<SessionPendingRequestDto>(
                 _hub.Origin, "/api/native/tasks/controls/decision", HttpMethod.Post,
                 body: payload, token: _token, ct: _cts.Token);
-            ControlsFeedback = "决定已发送，正在等待电脑端确认";
+            ControlsFeedback = "";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -372,9 +391,35 @@ public sealed class TaskDetailController : IDisposable
         finally
         {
             DecisionSending = false;
+            DecisionSendingId = "";
             Notify();
         }
         await RefreshControlsAsync();
+    }
+
+    private static string DescribeDecision(SessionPendingRequestDto req, SessionDecisionPayloadDto payload)
+    {
+        if (payload.Decision == "allow_once") return "已选：仅允许这一次";
+        if (payload.Decision == "deny") return "已选：拒绝";
+        if (req.Questions is not { Count: > 0 } qs) return "已提交回答";
+        var lines = new List<string>();
+        foreach (var q in qs)
+        {
+            var ans = payload.Answers.FirstOrDefault(a => a.QuestionId == q.Id);
+            if (ans is null) continue;
+            if (!string.IsNullOrWhiteSpace(ans.Text))
+            {
+                lines.Add($"{q.Text}：{ans.Text}");
+            }
+            else if (ans.Choices.Count > 0 && q.Options is { } opts)
+            {
+                var labels = ans.Choices
+                    .Select(cid => opts.FirstOrDefault(o => o.Id == cid)?.Label ?? cid)
+                    .ToList();
+                lines.Add($"{q.Text}：{string.Join("、", labels)}");
+            }
+        }
+        return lines.Count > 0 ? string.Join("\n", lines) : "已提交选项回答";
     }
 
     public async Task RefreshReplyStateAsync()
@@ -399,15 +444,24 @@ public sealed class TaskDetailController : IDisposable
                 }
                 else if (state.Id == cur.Id && !string.IsNullOrEmpty(state.State))
                 {
+                    ReplyDelivered = !string.IsNullOrEmpty(state.ClaimedAt) || state.State is "running" or "succeeded";
+                    ReplyReceiptTrail = SessionControlPolicy.ReplyReceiptTrail(false, state.State, ReplyDelivered);
+                    var receiptSettings = SessionControlPolicy.FormatSettingsReceipt(state.Applied, state.RequestedSelection ?? cur.SubmittedSelection);
+                    if (!string.IsNullOrEmpty(receiptSettings)) SettingsReceiptText = receiptSettings;
                     UpdatePendingState(state.State, state.Reason);
                 }
             }
             else if (state.Latest is { } latest)
             {
+                ReplyDelivered = !string.IsNullOrEmpty(latest.ClaimedAt) || latest.State is "running" or "succeeded";
+                ReplyReceiptTrail = SessionControlPolicy.ReplyReceiptTrail(false, latest.State, ReplyDelivered);
+                var receiptSettings = SessionControlPolicy.FormatSettingsReceipt(latest.Applied, latest.RequestedSelection);
+                if (!string.IsNullOrEmpty(receiptSettings)) SettingsReceiptText = receiptSettings;
                 ReplyMessage = !string.IsNullOrWhiteSpace(latest.Reason) ? latest.Reason! : StateLabel(latest.State);
             }
             else
             {
+                ReplyReceiptTrail = "";
                 ReplyMessage = state.Reason ?? "";
             }
         }
@@ -489,7 +543,7 @@ public sealed class TaskDetailController : IDisposable
                     Model = sel.Model,
                     Effort = sel.Effort,
                     ApplyAt = "next_message",
-                    ServiceTier = ModelOverrides.FastNext ? "fast" : null,
+                    ServiceTier = ModelOverrides.FastNext ? "priority" : null,
                     CollaborationMode = ModelOverrides.PlanNext ? "plan" : null
                 };
             }
@@ -512,6 +566,9 @@ public sealed class TaskDetailController : IDisposable
 
         PendingReply = record;
         ReplySending = true;
+        ReplyDelivered = false;
+        ReplyReceiptTrail = SessionControlPolicy.ReplyReceiptTrail(true, "", false);
+        SettingsReceiptText = SessionControlPolicy.FormatSettingsReceipt(null, record.SubmittedSelection);
         ReplyMessage = "正在发送…";
         Notify();
 

@@ -14,7 +14,7 @@ public final class NativeNavigationPolicy {
         if (page == null) return "tasks";
         switch (page) {
             case "tasks": case "task": case "usage": case "account":
-            case "devices": case "device": case "profile": case "sync": case "sessions": case "settings":
+            case "devices": case "device": case "profile": case "sync": case "sync-diagnostics": case "sessions": case "settings":
             case "settings-appearance": case "settings-background": case "settings-notifications": case "settings-support": case "settings-security":
             case "pairing": case "pairing-confirm": return page;
             default: return "tasks";

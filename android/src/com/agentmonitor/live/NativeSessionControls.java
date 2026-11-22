@@ -41,10 +41,11 @@ public final class NativeSessionControls {
     private LinearLayout settingsView;
     private AlertDialog settingsDialog, optionDialog;
     private final Map<String, QuestionDraft> drafts = new LinkedHashMap<>();
+    private final Map<String, DecisionMemo> sessionMemos = new LinkedHashMap<>();
     private JSONObject response, selection, fastNext, planNext, records = new JSONObject();
     private boolean fetching, sending, replyLocked, disposed, selectionCorrupt, fastCorrupt, planCorrupt, recordsCorrupt, waiting, controlsReadFailed;
     private long nextFetch, observedAt, retryAt;
-    private String renderKey = "", settingsKey = "", feedback = "", pendingKind = "";
+    private String renderKey = "", settingsKey = "", feedback = "", pendingKind = "", sendingRequestId = "", lastAppliedSummary = "";
 
     public NativeSessionControls(NativeUi ui, String taskId, NativeTaskResults.Host host, Transport transport,
                                  SharedPreferences preferences, String key, Runnable changed) {
@@ -98,8 +99,14 @@ public final class NativeSessionControls {
         if (optionDialog != null) optionDialog.dismiss();
         if (settingsDialog != null) settingsDialog.dismiss();
     }
-    public void dispose() { disposed = true; drafts.clear(); response = null; selection = null; fastNext = null; planNext = null; records = new JSONObject(); }
+    public void dispose() { disposed = true; drafts.clear(); sessionMemos.clear(); response = null; selection = null; fastNext = null; planNext = null; records = new JSONObject(); }
     public void setReplyLocked(boolean value) { if (replyLocked == value) return; replyLocked = value; renderSettings(); }
+    public void setLastAppliedSummary(String summary) {
+        String next = summary == null ? "" : summary;
+        if (next.equals(lastAppliedSummary)) return;
+        lastAppliedSummary = next;
+        renderSettings();
+    }
     public boolean canSendReply() {
         return !selectionCorrupt && !fastCorrupt && !planCorrupt
                 && (selection == null || validCatalog() && NativeSessionControlPolicy.selection(selection, catalog(), now()))
@@ -168,10 +175,15 @@ public final class NativeSessionControls {
                 + String.valueOf(catalog.optJSONArray("collaboration_modes")) + "\n"
                 + String.valueOf(catalog.optJSONArray("models"));
         String signature = catalogOptions + state + message + String.valueOf(selection) + selectionCorrupt
-                + String.valueOf(fastNext) + fastCorrupt + String.valueOf(planNext) + planCorrupt + replyLocked;
+                + String.valueOf(fastNext) + fastCorrupt + String.valueOf(planNext) + planCorrupt + replyLocked + lastAppliedSummary;
         if (signature.equals(settingsKey)) return; settingsKey = signature;
         settingsView.removeAllViews();
         settingsView.addView(note("此任务的回复设置"), wrap());
+        if (!lastAppliedSummary.isEmpty()) {
+            TextView appliedNote = ui.text(lastAppliedSummary, 13, true);
+            appliedNote.setTextColor(ui.accent);
+            settingsView.addView(appliedNote, spaced(8));
+        }
         String selectedId = NativeSessionControlPolicy.nullableText(selection, "model");
         if (valid) {
             String current = NativeSessionControlPolicy.nullableText(catalog, "current_model");
@@ -342,7 +354,7 @@ public final class NativeSessionControls {
         StringBuilder expiry = new StringBuilder();
         boolean needsAction = false;
         if (pending != null) for (int i = 0; i < Math.min(20, pending.length()); i++) { JSONObject request = pending.optJSONObject(i); expiry.append(NativeSessionControlPolicy.actionable(request, capabilities(), now())); needsAction |= NativeSessionControlPolicy.pending(request, now()); }
-        String signature = String.valueOf(pending) + capabilities().toString() + NativeSessionControlPolicy.nullableText(response, "reason") + fresh() + expiry + needsAction + sending + feedback + waiting + pendingKind + recordsCorrupt + records.toString();
+        String signature = String.valueOf(pending) + capabilities().toString() + NativeSessionControlPolicy.nullableText(response, "reason") + fresh() + expiry + needsAction + sending + sendingRequestId + feedback + waiting + pendingKind + recordsCorrupt + records.toString() + sessionMemos.size();
         if (signature.equals(renderKey)) return; renderKey = signature;
         view.removeAllViews();
         boolean hasPending = pending != null && pending.length() > 0;
@@ -368,28 +380,54 @@ public final class NativeSessionControls {
         view.addView(ui.space(24));
     }
     private void addRequest(JSONObject request) {
+        String id = request.optString("id");
+        DecisionMemo memo = sessionMemos.get(id);
+        JSONObject record = records.optJSONObject(id);
+        boolean terminal = NativeSessionControlPolicy.terminal(request);
+        String shownTitle = request.optString("title");
+        if (terminal && "请求已结束".equals(shownTitle) && memo != null && !memo.title.isEmpty()) {
+            shownTitle = memo.title;
+        }
         LinearLayout card = ui.card(); view.addView(card, spaced(12));
         card.addView(ui.toolBadge(request.optString("provider")), wrap());
-        card.addView(ui.text(request.optString("title"), 17, true), spaced(8));
+        card.addView(ui.text(shownTitle, 17, true), spaced(8));
         if (!request.optString("detail").isEmpty()) { TextView detail = ui.text(request.optString("detail"), 14, false); detail.setTextIsSelectable(true); card.addView(detail, spaced(10)); }
         card.addView(note(NativeSessionControlPolicy.stateLabel(request, now())), spaced(10));
-        if (NativeSessionControlPolicy.terminal(request)) return;
-        String id = request.optString("id"), fingerprint = digest(NativeSessionControlPolicy.fingerprint(request));
-        JSONObject record = records.optJSONObject(id);
+        String receipt = NativeSessionControlPolicy.receiptTrail(
+                request, sending && id.equals(sendingRequestId), record != null);
+        if (terminal) {
+            String summary = memo != null && !memo.summary.isEmpty()
+                    ? memo.summary
+                    : NativeSessionControlPolicy.decisionKindLabel(NativeSessionControlPolicy.nullableText(request, "decision_kind"));
+            if (!summary.isEmpty()) {
+                card.addView(ui.text(summary, 14, false), spaced(10));
+            }
+            if (!receipt.isEmpty()) addReceiptBadge(card, receipt, request);
+            return;
+        }
+        String fingerprint = digest(NativeSessionControlPolicy.fingerprint(request));
         boolean enabled = active() && fresh() && !sending && !recordsCorrupt && NativeSessionControlPolicy.actionable(request, capabilities(), now());
         if ("approval".equals(request.optString("kind"))) {
             card.addView(ui.text("本次操作", 12, true), spaced(14));
             TextView operation = ui.text(request.optString("operation"), 15, false); operation.setTextIsSelectable(true); operation.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG); card.addView(operation, spaced(8));
             card.addView(note("允许后，电脑可执行上面列出的操作；此批准不适用于其他请求"), spaced(10));
         }
-        if (record != null) {
-            boolean unchanged = fingerprint.equals(record.optString("fingerprint"));
-            card.addView(note(unchanged ? "已保存本次发送记录；重复发送会沿用同一决定，不会改换选项" : "请求内容已变化，原决定已停用\n请在电脑确认新请求"), spaced(12));
-            JSONObject payload = record.optJSONObject("payload");
-            if (unchanged && payload != null) card.addView(ui.text(decisionSummary(request, payload), 14, false), spaced(10));
-            TextView retry = ui.button("重试原决定", false, () -> sendDecision(request, payload, fingerprint, true));
-            retry.setEnabled(enabled && unchanged && NativeSessionControlPolicy.decision(request, payload, taskId, now())); retry.setAlpha(retry.isEnabled() ? 1 : .5f);
-            card.addView(retry, spaced(12)); return;
+        if (record != null || "submitted".equals(request.optString("state"))) {
+            if (record != null) {
+                boolean unchanged = fingerprint.equals(record.optString("fingerprint"));
+                JSONObject payload = record.optJSONObject("payload");
+                if (unchanged && payload != null) card.addView(ui.text(decisionSummary(request, payload), 14, false), spaced(10));
+                if ("pending".equals(request.optString("state"))) {
+                    card.addView(note(unchanged ? "已保存本次发送记录；重复发送会沿用同一决定，不会改换选项" : "请求内容已变化，原决定已停用\n请在电脑确认新请求"), spaced(10));
+                    TextView retry = ui.button("重试原决定", false, () -> sendDecision(request, payload, fingerprint, true));
+                    retry.setEnabled(enabled && unchanged && NativeSessionControlPolicy.decision(request, payload, taskId, now())); retry.setAlpha(retry.isEnabled() ? 1 : .5f);
+                    card.addView(retry, spaced(12));
+                }
+            } else if (memo != null && !memo.summary.isEmpty()) {
+                card.addView(ui.text(memo.summary, 14, false), spaced(10));
+            }
+            if (!receipt.isEmpty()) addReceiptBadge(card, receipt, request);
+            return;
         }
         if (!enabled) {
             if ("pending".equals(request.optString("state"))) card.addView(note(fresh() ? "手机暂不能处理这个请求，请到电脑查看" : "状态尚未确认，请先刷新"), spaced(10));
@@ -400,6 +438,16 @@ public final class NativeSessionControls {
             TextView allow = ui.button("仅允许这一次", () -> confirmApproval(request, fingerprint)); card.addView(allow, spaced(16));
             card.addView(ui.button("拒绝", false, () -> sendDecision(request, payload(request, "deny", new JSONArray()), fingerprint, false)), spaced(8));
         } else addQuestions(card, request, fingerprint, true);
+    }
+    private void addReceiptBadge(LinearLayout card, String receipt, JSONObject request) {
+        String outcome = NativeSessionControlPolicy.nullableText(request, "outcome");
+        boolean rejected = "rejected".equals(outcome) || receipt.contains("已拒绝");
+        boolean adopted = "adopted".equals(outcome) || receipt.contains("已采用");
+        TextView badge = ui.text(receipt, 13, true);
+        badge.setTextColor(rejected ? ui.warning : adopted ? ui.accent : ui.text);
+        badge.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+        badge.setBackground(ui.rounded(rejected ? (ui.dark ? 0xFF423B2C : 0xFFF3EBDC) : ui.soft, 10));
+        card.addView(badge, spaced(12));
     }
     private void confirmApproval(JSONObject request, String fingerprint) {
         if (!usable(request, fingerprint)) return;
@@ -491,9 +539,10 @@ public final class NativeSessionControls {
                 records = next;
             }
         } catch (Exception invalid) { host.notice("无法保存决定，尚未发送"); return; }
-        sending = true; render();
+        sessionMemos.put(id, new DecisionMemo(request.optString("title"), decisionSummary(request, payload)));
+        sending = true; sendingRequestId = id; render();
         transport.request("POST", "/api/native/tasks/controls/decision", copy(payload), (value, failure) -> {
-            sending = false; observedAt = 0; feedback = failure == null ? "决定已发送，正在确认电脑是否收到" : "发送结果尚未确认；先刷新，重试会使用原决定";
+            sending = false; sendingRequestId = ""; observedAt = 0; feedback = failure == null ? "" : "发送结果尚未确认；先刷新，重试会使用原决定";
             render(); nextFetch = 0; refresh();
         });
     }
@@ -522,5 +571,12 @@ public final class NativeSessionControls {
     private static final class QuestionDraft {
         final Map<String, List<String>> choices = new LinkedHashMap<>();
         final Map<String, String> text = new LinkedHashMap<>();
+    }
+    private static final class DecisionMemo {
+        final String title, summary;
+        DecisionMemo(String title, String summary) {
+            this.title = title == null ? "" : title;
+            this.summary = summary == null ? "" : summary;
+        }
     }
 }

@@ -13,6 +13,7 @@ from .session_controls import ModelSelection, reply_fingerprint
 
 class _RemoteInteractions:
     """A decision travels only back to the original owned executor callback."""
+    supports_adoption_upgrade = True
     def __init__(self, worker): self.worker = worker
 
     def __call__(self, request, cancelled):
@@ -32,8 +33,11 @@ class _RemoteInteractions:
             cancelled.wait(.5)
         return None
 
-    def resolve(self, request_id, revision, state):
-        self.worker._post('/api/agent/controls/resolve', {'request_id': request_id, 'revision': revision, 'state': state})
+    def resolve(self, request_id, revision, state, *, outcome=""):
+        payload = {'request_id': request_id, 'revision': revision, 'state': state}
+        if outcome:
+            payload['outcome'] = outcome
+        self.worker._post('/api/agent/controls/resolve', payload)
 
 ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 TERMINAL = {'succeeded', 'failed', 'blocked', 'uncertain'}
@@ -85,7 +89,9 @@ class RemoteReplyWorker:
         self.catalog_provider = catalog_provider
         self.interactions = _RemoteInteractions(self)
         self.executor = executor_factory(emit=self._emit, interaction_handler=self.interactions,
-            catalog_provider=catalog_provider) if default_executor else executor_factory(emit=self._emit)
+            catalog_provider=catalog_provider, report_applied=True) if default_executor else executor_factory(emit=self._emit)
+        if hasattr(self.executor, 'report_applied'):
+            self.executor.report_applied = True
 
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +110,8 @@ class RemoteReplyWorker:
                 return
             if item.get('state') in TERMINAL or event.get('state') not in {'running', *TERMINAL}:
                 return
+            if isinstance(event.get('applied'), dict):
+                item['applied'] = dict(event['applied'])
             item.update(state=event['state'], error_code=event.get('error_code', ''), pending=True, updated=time.time())
             self._save()
 
@@ -143,8 +151,10 @@ class RemoteReplyWorker:
             key, item = updates[self.update_cursor % len(updates)]
             self.update_cursor += 1
         try:
-            response = self._post('/api/agent/replies/update', {'id': key, 'state': item['state'],
-                                  'error_code': item.get('error_code', '')})
+            update_payload = {'id': key, 'state': item['state'], 'error_code': item.get('error_code', '')}
+            if isinstance(item.get('applied'), dict):
+                update_payload['applied'] = item['applied']
+            response = self._post('/api/agent/replies/update', update_payload)
         except Exception as error:
             if self.stop.is_set():
                 raise

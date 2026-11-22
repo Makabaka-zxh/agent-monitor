@@ -266,12 +266,52 @@ public final class NativeSessionControlPolicy {
     public static String stateLabel(JSONObject request, long now) {
         if (!request(request)) return "请求信息不完整，请到电脑查看";
         String state = request.optString("state");
+        String outcome = nullableText(request, "outcome");
+        if ("handled_on_desktop".equals(outcome)) return "已在电脑端处理，手机无需重复操作";
+        if ("adopted".equals(outcome)) return "电脑已收到并已采用；执行结果请看任务状态";
+        if ("rejected".equals(outcome)) return "电脑已收到并已拒绝本次请求";
         if ("acknowledged".equals(state)) return "电脑已收到；执行结果请看任务状态";
         if ("forwarded".equals(state)) return "已交给电脑，等待任务结果";
         if ("submitted".equals(state)) return "已发送，等待电脑确认";
         if ("cancelled".equals(state)) return "请求已取消";
         if ("expired".equals(state) || seconds(request, "expires_at") <= now) return "请求已过期";
         return "approval".equals(request.optString("kind")) ? "仅批准这一次操作" : "请选择后发送";
+    }
+
+    /** Explicit step-by-step receipt displayed below the user's decision button. */
+    public static String receiptTrail(JSONObject request, boolean sendingNow, boolean hasLocalRecord) {
+        if (request == null || !request(request)) return sendingNow ? "手机已发送 → 等待电脑接收" : "";
+        String state = nullableText(request, "state");
+        String outcome = nullableText(request, "outcome");
+        String decisionKind = nullableText(request, "decision_kind");
+        boolean delivered = request.optBoolean("delivered");
+        if ("handled_on_desktop".equals(outcome)) {
+            return "已在电脑端处理";
+        }
+        if (sendingNow || ("pending".equals(state) && hasLocalRecord)) {
+            return "手机已发送 → 等待电脑接收";
+        }
+        if ("submitted".equals(state)) {
+            return delivered ? "手机已发送 → 电脑已收到" : "手机已发送 → 等待电脑接收";
+        }
+        if ("adopted".equals(outcome)) {
+            return "手机已发送 → 电脑已收到 → 已采用";
+        }
+        if ("rejected".equals(outcome)
+                || (("forwarded".equals(state) || "acknowledged".equals(state)) && "deny".equals(decisionKind))) {
+            return "手机已发送 → 电脑已收到 → 已拒绝";
+        }
+        if ("forwarded".equals(state) || "acknowledged".equals(state)) {
+            return "手机已发送 → 电脑已收到";
+        }
+        return "";
+    }
+
+    public static String decisionKindLabel(String decisionKind) {
+        if ("allow_once".equals(decisionKind)) return "已选：仅允许这一次";
+        if ("deny".equals(decisionKind)) return "已选：拒绝";
+        if ("answer".equals(decisionKind)) return "已提交选项回答";
+        return "";
     }
     private NativeSessionControlPolicy() { }
 }

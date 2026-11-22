@@ -59,14 +59,14 @@ public final class NativeTaskResults {
     public final LinearLayout attentionView;
     private final boolean interactive;
     private final LinearLayout outputActions, fileRows, replyCard;
-    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle;
+    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle, replyReceiptBadge, replyAppliedLabel;
     private final EditText replyInput;
     private final View resultHeading, refreshButton;
     private final ResultRefresh resultRefresh = new ResultRefresh();
     private final NativeSessionControls controls;
     private JSONObject result;
     private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", commandReason = "", capabilityReason = "";
-    private boolean syncEnabled, replyBusy, sendBusy, downloadBusy, expanded, replyAvailable, knownReply, loadingDraft, filesPending;
+    private boolean syncEnabled, replyBusy, sendBusy, downloadBusy, expanded, replyAvailable, knownReply, loadingDraft, filesPending, commandDelivered;
     private boolean replyExpanded;
     private ViewTreeObserver replyRevealTree, resultRevealTree;
     private ViewTreeObserver.OnPreDrawListener replyReveal, resultReveal;
@@ -75,6 +75,8 @@ public final class NativeTaskResults {
     private Download pendingDownload;
     private String downloadFeedback = "";
     private String submittedSelection = "";
+    private String settingsReceiptText = "";
+    private String lastContinuationState = "";
     private boolean submittedSelectionInvalid;
 
     public NativeTaskResults(NativeUi ui, String taskId, String token, boolean interactive, Host host, Bundle saved) {
@@ -83,10 +85,12 @@ public final class NativeTaskResults {
         preferencesKey = hash(token) + ":" + hash(taskId);
         requestId = preferences.getString(preferencesKey + ":id", ""); submittedText = preferences.getString(preferencesKey + ":text", "");
         commandState = preferences.getString(preferencesKey + ":state", "");
+        commandDelivered = preferences.getBoolean(preferencesKey + ":delivered", false);
+        settingsReceiptText = preferences.getString(preferencesKey + ":settings_receipt", "");
         submittedSelection = preferences.getString(preferencesKey + ":submitted_selection", "");
         if (!submittedSelection.isEmpty()) try { submittedSelectionInvalid = !NativeSessionControlPolicy.selectionSnapshot(new JSONObject(submittedSelection)); } catch (Exception invalid) { submittedSelectionInvalid = true; }
         submittedAt = preferences.getLong(preferencesKey + ":created_at", 0);
-        if (!requestId.matches("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")) { requestId = ""; submittedText = ""; commandState = ""; }
+        if (!requestId.matches("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")) { requestId = ""; submittedText = ""; commandState = ""; commandDelivered = false; settingsReceiptText = ""; }
         view = ui.column();
         controls = interactive ? new NativeSessionControls(ui, taskId, host, (method, path, value, done) -> request(method, path, value, done::done), preferences, preferencesKey, this::updateSend) : null;
         attentionView = interactive ? controls.view : ui.column();
@@ -116,12 +120,15 @@ public final class NativeTaskResults {
         View replyDivider = new View(activity); replyDivider.setBackgroundColor(ui.line); if (interactive) view.addView(replyDivider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
         LinearLayout replyHeader = ui.row(); replyHeader.setMinimumHeight(ui.dp(48));
         replyHeader.addView(ui.heading("回复", 18), new LinearLayout.LayoutParams(0, -2, 1));
-        replyToggle = ui.button("继续任务", this::toggleReply); replyHeader.addView(replyToggle, new LinearLayout.LayoutParams(-2, -2));
+        replyToggle = ui.button("继续此会话", this::toggleReply); replyHeader.addView(replyToggle, new LinearLayout.LayoutParams(-2, -2));
         LinearLayout.LayoutParams replyHeaderSpace = wrap(); replyHeaderSpace.topMargin = ui.dp(18); if (interactive) view.addView(replyHeader, replyHeaderSpace);
         replyStatus = ui.text("", 13, false); replyStatus.setTextColor(ui.muted);
-        replyStatus.setPadding(0, ui.dp(8), 0, ui.dp(8)); if (interactive) view.addView(replyStatus, wrap());
+        replyStatus.setPadding(0, ui.dp(8), 0, ui.dp(4)); if (interactive) view.addView(replyStatus, wrap());
+        replyAppliedLabel = ui.text("", 13, true); replyAppliedLabel.setTextColor(ui.accent);
+        replyAppliedLabel.setPadding(0, ui.dp(2), 0, ui.dp(6)); replyAppliedLabel.setVisibility(View.GONE);
+        if (interactive) view.addView(replyAppliedLabel, wrap());
         replyAvailability = ui.text("", 13, false); replyAvailability.setTextColor(ui.muted);
-        replyAvailability.setPadding(0, ui.dp(8), 0, ui.dp(8)); if (interactive) view.addView(replyAvailability, wrap());
+        replyAvailability.setPadding(0, ui.dp(6), 0, ui.dp(8)); if (interactive) view.addView(replyAvailability, wrap());
         replyCard = ui.column(); replyInput = new EditText(activity); replyInput.setTypeface(ui.regular); replyInput.setTextColor(ui.text); replyInput.setHintTextColor(ui.muted);
         replyInput.setTextSize(16); replyInput.setLineSpacing(ui.dp(6), 1.08f); replyInput.setHint("继续这个任务…"); replyInput.setMinLines(2); replyInput.setMaxLines(8); replyInput.setGravity(Gravity.TOP | Gravity.START);
         replyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
@@ -130,7 +137,14 @@ public final class NativeTaskResults {
         replyCard.addView(replyInput, wrap());
         sendButton = ui.button("发送回复", this::send);
         LinearLayout.LayoutParams sendSpace = new LinearLayout.LayoutParams(-1, -2); sendSpace.gravity = Gravity.END; sendSpace.topMargin = ui.dp(10);
-        replyCard.addView(sendButton, sendSpace); if (interactive) view.addView(replyCard, wrap());
+        replyCard.addView(sendButton, sendSpace);
+        replyReceiptBadge = ui.text("", 13, true);
+        replyReceiptBadge.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+        replyReceiptBadge.setBackground(ui.rounded(ui.soft, 10));
+        replyReceiptBadge.setVisibility(View.GONE);
+        LinearLayout.LayoutParams badgeSpace = wrap(); badgeSpace.topMargin = ui.dp(10);
+        replyCard.addView(replyReceiptBadge, badgeSpace);
+        if (interactive) view.addView(replyCard, wrap());
         replyInput.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) { if (!loadingDraft) updateSend(); }
@@ -273,10 +287,16 @@ public final class NativeTaskResults {
         }
         String marker = task.optString("final_result_id") + "|" + task.optString("final_result_at") + "|" + task.optString("status");
         boolean changed = !marker.equals(snapshotMarker); snapshotMarker = marker;
+        String cont = task.optString("continuation_state");
+        boolean continuationChanged = !cont.equals(lastContinuationState);
+        lastContinuationState = cont;
         if (syncEnabled && (syncChanged || changed)) resultRefresh.expect(marker, task.optString("final_result_id"), SystemClock.elapsedRealtime());
         if (interactive && unresolved()) resultRefresh.rememberReply(requestId, result == null ? "" : result.optString("result_id"));
         if (syncEnabled) fetchResult();
-        if (!knownReply || changed) fetchReply(changed);
+        if (!knownReply || changed || continuationChanged) {
+            if (continuationChanged && "continuable".equals(cont)) replyRefreshAt = 0;
+            fetchReply(changed || continuationChanged);
+        }
     }
     public void tick() {
         if (!current() || !host.visible()) return;
@@ -456,7 +476,18 @@ public final class NativeTaskResults {
         boolean changed = !commandState.equals(state); commandState = state;
         String id = value.optString("request_id", value.optString("id"));
         if (requestId.isEmpty() && id.matches("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")) requestId = id;
-        if (changed && !requestId.isEmpty()) preferences.edit().putString(preferencesKey + ":id", requestId).putString(preferencesKey + ":state", state).apply();
+        boolean delivered = !NativeSessionControlPolicy.nullableText(value, "claimed_at").isEmpty()
+                || "running".equals(state) || "succeeded".equals(state);
+        String nextSettingsReceipt = buildSettingsReceipt(value.optJSONObject("applied"), value.optJSONObject("requested_selection"));
+        if (!nextSettingsReceipt.isEmpty()) settingsReceiptText = nextSettingsReceipt;
+        boolean receiptChanged = delivered != commandDelivered || !nextSettingsReceipt.isEmpty();
+        commandDelivered = delivered;
+        if ((changed || receiptChanged) && !requestId.isEmpty()) {
+            preferences.edit().putString(preferencesKey + ":id", requestId)
+                    .putString(preferencesKey + ":state", state)
+                    .putBoolean(preferencesKey + ":delivered", commandDelivered)
+                    .putString(preferencesKey + ":settings_receipt", settingsReceiptText).apply();
+        }
         commandReason = NativeReplyPresentationPolicy.commandReason(commandReason, changed, value.optString("reason"));
         resultRefresh.reply(id.isEmpty() ? requestId : id, state,
                 result == null ? "" : result.optString("result_id"), changed, SystemClock.elapsedRealtime());
@@ -470,28 +501,66 @@ public final class NativeTaskResults {
             }
         }
     }
+    private String buildSettingsReceipt(JSONObject applied, JSONObject requested) {
+        JSONObject source = applied != null && !NativeSessionControlPolicy.nullableText(applied, "model").isEmpty()
+                || applied != null && !NativeSessionControlPolicy.nullableText(applied, "effort").isEmpty()
+                || applied != null && (!NativeSessionControlPolicy.nullableText(applied, "service_tier").isEmpty()
+                    || !NativeSessionControlPolicy.nullableText(applied, "collaboration_mode").isEmpty())
+                ? applied : null;
+        boolean verified = source != null;
+        if (source == null) {
+            source = requested;
+            if (source == null && !submittedSelectionInvalid && !submittedSelection.isEmpty()) {
+                try { source = new JSONObject(submittedSelection); } catch (Exception ignored) { source = null; }
+            }
+        }
+        if (source == null) return "";
+        String modelId = NativeSessionControlPolicy.nullableText(source, "model");
+        String effortId = NativeSessionControlPolicy.nullableText(source, "effort");
+        boolean fast = "priority".equals(NativeSessionControlPolicy.nullableText(source, "service_tier"));
+        boolean plan = "plan".equals(NativeSessionControlPolicy.nullableText(source, "collaboration_mode"));
+        return NativeReplyPresentationPolicy.settingsReceipt(
+                modelId.isEmpty() ? "" : NativeUsageFormat.modelName(modelId),
+                effortId.isEmpty() ? "" : NativeSessionControlPolicy.effortLabel(effortId),
+                fast, plan, verified);
+    }
     private void updateSend() {
         if (!interactive) return;
         boolean pending = unresolved();
         controls.setReplyLocked(sendBusy || pending);
+        controls.setLastAppliedSummary(settingsReceiptText.startsWith("本轮实际使用：") ? settingsReceiptText : "");
         replyInput.setEnabled(!sendBusy && !pending); replyInput.setAlpha(sendBusy || pending ? .7f : 1f);
         boolean retry = pending && canRetryOriginal();
         boolean selectionReady = controls.canSendReply();
-        String status = NativeReplyPresentationPolicy.commandStatus(sendBusy, pending, commandState, retry, commandReason);
+        String receiptTrail = requestId.isEmpty() && !sendBusy
+                ? "" : NativeReplyPresentationPolicy.replyReceipt(sendBusy, commandState, commandDelivered);
+        String baseStatus = NativeReplyPresentationPolicy.commandStatus(sendBusy, pending, commandState, retry, commandReason);
         String availability = NativeReplyPresentationPolicy.capabilityStatus(sendBusy, pending, knownReply, replyAvailable, selectionReady, capabilityReason);
-        setText(replyStatus, status); replyStatus.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
+        boolean attention = replyNeedsAttention();
+        boolean showReply = NativeReplyPresentationPolicy.expanded(replyExpanded, attention);
+        String combinedStatus = !showReply && !receiptTrail.isEmpty()
+                ? (baseStatus.isEmpty() ? receiptTrail : receiptTrail + " · " + baseStatus)
+                : baseStatus;
+        setText(replyStatus, combinedStatus); replyStatus.setVisibility(combinedStatus.isEmpty() ? View.GONE : View.VISIBLE);
+        setText(replyAppliedLabel, settingsReceiptText);
+        replyAppliedLabel.setVisibility(settingsReceiptText.isEmpty() ? View.GONE : View.VISIBLE);
+        setText(replyReceiptBadge, receiptTrail);
+        replyReceiptBadge.setTextColor("failed".equals(commandState) ? ui.danger
+                : "blocked".equals(commandState) ? ui.warning : commandDelivered ? ui.accent : ui.text);
+        replyReceiptBadge.setVisibility(showReply && !receiptTrail.isEmpty() ? View.VISIBLE : View.GONE);
         setText(replyAvailability, availability); replyAvailability.setVisibility(availability.isEmpty() ? View.GONE : View.VISIBLE);
         replyStatus.setTextColor(commandState.equals("failed") ? ui.danger
                 : commandState.equals("blocked") || commandState.equals("uncertain") || commandState.equals("not_found") ? ui.warning : ui.muted);
         setText(sendButton, pending ? retry ? "重试原回复" : "查询发送结果" : "发送回复");
         boolean enabled = !sendBusy && (pending ? !replyBusy : selectionReady && knownReply && replyAvailable && !replyInput.getText().toString().trim().isEmpty());
         sendButton.setEnabled(enabled); sendButton.setAlpha(enabled ? 1f : .5f);
-        boolean attention = replyNeedsAttention();
-        boolean showReply = NativeReplyPresentationPolicy.expanded(replyExpanded, attention);
         boolean hasDraft = replyInput.length() > 0;
         replyCard.setVisibility(showReply ? View.VISIBLE : View.GONE);
-        setText(replyToggle, showReply ? "收起" : hasDraft ? "继续草稿" : "继续任务");
-        replyToggle.setContentDescription(showReply ? "收起回复输入框，保留草稿" : hasDraft ? "继续草稿，展开回复输入框" : "继续任务，展开回复输入框");
+        String closedLabel = hasDraft ? "继续草稿" : "继续此会话";
+        setText(replyToggle, showReply ? "收起" : closedLabel);
+        replyToggle.setContentDescription(showReply ? "收起回复输入框，保留草稿" : closedLabel + "，展开回复输入框");
+        boolean toggleReady = showReply || hasDraft || (knownReply && replyAvailable);
+        replyToggle.setAlpha(toggleReady ? 1f : .65f);
         if (!Boolean.valueOf(showReply).equals(replyToggle.getTag())) {
             replyToggle.setTextColor(showReply ? ui.muted : ui.dark ? ui.bg : android.graphics.Color.WHITE);
             replyToggle.setBackground(ui.ripple(showReply ? android.graphics.Color.TRANSPARENT : ui.accent, showReply ? 10 : 16));
@@ -511,11 +580,15 @@ public final class NativeTaskResults {
             try { selected = controls.selectionForSend(); submittedSelection = selected == null ? "" : selected.toString(); submittedSelectionInvalid = false; }
             catch (IllegalStateException stale) { host.notice("模型选项已变化，请重新选择或继承电脑设置"); return; }
             requestId = UUID.randomUUID().toString(); submittedAt = System.currentTimeMillis();
+            commandDelivered = false;
+            settingsReceiptText = buildSettingsReceipt(null, selected);
         } submittedText = text; commandState = "";
         // Commit the id before transport. A lost response can be queried after recreation, never resent blindly.
         SharedPreferences.Editor record = preferences.edit().putString(preferencesKey + ":id", requestId)
             .putString(preferencesKey + ":text", text).putString(preferencesKey + ":draft", draft)
             .putString(preferencesKey + ":submitted_selection", submittedSelection)
+            .putBoolean(preferencesKey + ":delivered", commandDelivered)
+            .putString(preferencesKey + ":settings_receipt", settingsReceiptText)
             .putString(preferencesKey + ":state", "").putLong(preferencesKey + ":created_at", submittedAt);
         boolean consumeTurnOptions = !retry && controls.attachTurnOptionConsumption(record, selected);
         if (!record.commit()) { if (!retry) requestId = ""; else commandState = "not_found"; host.notice("无法保存发送记录，请稍后重试"); updateSend(); return; }

@@ -43,9 +43,9 @@ public final class NativeWorkbenchPolicyTest {
     }
     private static void settingsRecreationNeverBroadensReads() {
         PageReads reads = new PageReads();
-        for (String page : new String[]{"settings", "settings-appearance", "settings-notifications", "settings-support", "settings-security"}) {
+        for (String page : new String[]{"sync-diagnostics", "settings", "settings-appearance", "settings-notifications", "settings-support", "settings-security"}) {
             check(NativeWorkbenchPolicy.pageRead(page) == NativeWorkbenchPolicy.PageRead.NONE,
-                    "settings has no account, usage, or workspace data dependency");
+                    "settings and local sync diagnostics have no eager network dependency");
             reads.load(page, true, true); // Enter the category.
             reads.load(page, false, true); // Sheet opens system settings or app pauses.
             reads.load(page, true, true); // Recreated or resumed category/sheet.

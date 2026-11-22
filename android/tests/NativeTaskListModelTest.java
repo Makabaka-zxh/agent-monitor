@@ -42,8 +42,34 @@ public final class NativeTaskListModelTest {
         check(result.uncertainSelectedTasks == uncertain, "uncertain selected-tool records retain their own source/status semantics");
     }
     public static void main(String[] args) {
-        emptyQueryCompatibility(); searchAndFilters(); antigravityTasks(); scopedComputerPage(); refreshAndInputOwnership(); malformedSnapshots(); allowedFieldsOnly(); pendingQuestions();
+        emptyQueryCompatibility(); searchAndFilters(); antigravityTasks(); scopedComputerPage(); refreshAndInputOwnership(); malformedSnapshots(); allowedFieldsOnly(); pendingQuestions(); hiddenFilterExplanation();
         System.out.println("NativeTaskListModelTest: " + checks + " checks passed");
+    }
+    private static void hiddenFilterExplanation() {
+        JSONArray onePc = new JSONArray().put(device("d1", "Studio PC", true));
+        JSONArray sixClaudeTasks = new JSONArray();
+        for (int i = 1; i <= 6; i++) {
+            sixClaudeTasks.put(task("c" + i, "Claude Task " + i, "Proj", "claude", "completed", false, "d1"));
+        }
+        NativeTaskListModel.Result codexOnly = NativeTaskListModel.select(sixClaudeTasks, onePc, "codex", "active", null, "", false);
+        check(codexOnly.tasks.length() == 0, "Codex filter hides all 6 Claude tasks");
+        NativeTaskListModel.HiddenSummary single = NativeTaskListModel.hiddenSummary(
+                sixClaudeTasks, onePc, "codex", "active", null, "", false, codexOnly.tasks.length());
+        check(single.hiddenTasks == 6 && single.showResetAction, "hidden task count and reset action reported");
+        check("这台电脑有 6 条任务，当前筛选隐藏了 6 条".equals(single.message),
+                "single-computer hidden filter message matches product copy: " + single.message);
+
+        JSONArray twoPcs = new JSONArray().put(device("d1", "Studio PC", true)).put(device("d2", "MacBook", true));
+        sixClaudeTasks.optJSONObject(5).put("device_id", "d2");
+        NativeTaskListModel.HiddenSummary multi = NativeTaskListModel.hiddenSummary(
+                sixClaudeTasks, twoPcs, "codex", "all", null, "", false, 0);
+        check("已连接电脑共有 6 条任务，当前筛选隐藏了 6 条".equals(multi.message) && multi.showResetAction,
+                "multi-computer hidden filter message distinguishes multiple computers");
+
+        check(!NativeTaskListModel.hiddenSummary(sixClaudeTasks, onePc, "all", "all", null, "", false, 0).showResetAction,
+                "unfiltered empty state does not blame filters");
+        check(!NativeTaskListModel.hiddenSummary(sixClaudeTasks, onePc, "codex", "active", null, "", true, 0).showResetAction,
+                "stale snapshot does not claim clean filter hiding");
     }
     private static void pendingQuestions() {
         for (String tool : new String[]{"codex", "claude", "antigravity"}) {

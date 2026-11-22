@@ -99,7 +99,7 @@ public final class NativeNavigationPolicyTest {
                 {"settings-appearance", "settings-background"}, {"settings", "settings-notifications"},
                 {"settings", "settings-support"}, {"settings", "settings-security"},
                 {"account", "devices"}, {"devices", "device"}, {"devices", "pairing"},
-                {"pairing", "pairing-confirm"}, {"account", "profile"}, {"account", "sync"},
+                {"pairing", "pairing-confirm"}, {"account", "profile"}, {"account", "sync"}, {"account", "sync-diagnostics"},
                 {"account", "sessions"}, {"device", "task"}
         };
         for (String[] branch : branches) {
@@ -155,7 +155,7 @@ public final class NativeNavigationPolicyTest {
             check(root.equals(NativeNavigationPolicy.tabForPage(root, "old-device")), "stale task ancestry cannot redirect a root tab");
             check(NativeNavigationPolicy.backTarget(root, "old-device") == null, "root Back finishes instead of entering another tab");
         }
-        for (String child : new String[]{"devices", "device", "profile", "sync", "sessions", "settings", "pairing", "pairing-confirm"}) {
+        for (String child : new String[]{"devices", "device", "profile", "sync", "sync-diagnostics", "sessions", "settings", "pairing", "pairing-confirm"}) {
             check(!NativeNavigationPolicy.rootPage(child), "account descendants expose Back");
             check("account".equals(NativeNavigationPolicy.tabForPage(child, "")), "account descendant keeps My Account selected");
             check(child.equals(NativeNavigationPolicy.safePage(child)), "existing saved descendant remains restorable");
@@ -165,7 +165,7 @@ public final class NativeNavigationPolicyTest {
         expectBack("device", "", "devices", "");
         expectBack("pairing", "", "devices", "");
         expectBack("pairing-confirm", "", "pairing", "");
-        for (String child : new String[]{"profile", "sync", "sessions"}) expectBack(child, "", "account", "");
+        for (String child : new String[]{"profile", "sync", "sync-diagnostics", "sessions"}) expectBack(child, "", "account", "");
         check(!NativeNavigationPolicy.rootPage("task"), "task detail is never a root");
         check("tasks".equals(NativeNavigationPolicy.tabForPage("task", "")), "task-list and notification detail belong to Tasks");
         expectBack("task", "", "tasks", "");

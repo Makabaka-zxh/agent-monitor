@@ -858,23 +858,49 @@ class _Run:
     error_code: str = ""
     fingerprint: str = ""
     selection: dict | None = None
+    applied: dict | None = None
+
+
+def _build_applied(model=None, effort=None, service_tier=None, collaboration_mode=None) -> dict | None:
+    result = {}
+    if isinstance(model, str) and 1 <= len(model) <= 120 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[[A-Za-z0-9._-]+\])?", model):
+        result["model"] = model
+    if isinstance(effort, str) and re.fullmatch(r"[a-z0-9_]{1,32}", effort):
+        result["effort"] = effort
+    if service_tier == "priority":
+        result["service_tier"] = "priority"
+    if collaboration_mode == "plan":
+        result["collaboration_mode"] = "plan"
+    return result or None
 
 
 class LocalReplyExecutor:
     def __init__(self, emit: Callable[[dict], None], *, timeout_seconds=1800, resolver=resolve_local_session,
                  status_reader=None, executable_finder=find_executable, process_factory=_Process,
-                 interaction_handler=None, catalog_provider=None):
+                 interaction_handler=None, catalog_provider=None, report_applied: bool = False):
         self.emit = emit
         self.timeout = max(.05, min(float(timeout_seconds), 3600))
         self.inspect_options = {"resolver": resolver, "status_reader": status_reader, "executable_finder": executable_finder}
         self.process_factory = process_factory
         self.interaction_handler, self.catalog_provider = interaction_handler, catalog_provider
+        self.report_applied = bool(report_applied)
         self.lock = threading.Lock()
         self.runs = {}
         self.closed = False
 
     def _result(self, run):
-        return {"command_id": run.command_id, "state": run.state, "reason": run.reason, "error_code": run.error_code}
+        res = {"command_id": run.command_id, "state": run.state, "reason": run.reason, "error_code": run.error_code}
+        if self.report_applied and run.applied:
+            res["applied"] = dict(run.applied)
+        return res
+
+    def _record_applied(self, run, applied):
+        if not applied or not isinstance(run, _Run):
+            return
+        with self.lock:
+            run.applied = applied
+        if self.report_applied:
+            self._emit(self._result(run))
 
     def _emit(self, value):
         try: self.emit(dict(value))
@@ -970,7 +996,7 @@ class LocalReplyExecutor:
             if target.tool == "codex": self._codex(transport, target, profile_name, prompt, run, settings)
             elif target.tool == "antigravity": self._antigravity(transport, target, prompt, run, settings)
             elif interactive: self._claude_controlled(transport, target, prompt, run, settings)
-            else: self._claude(transport, target, prompt)
+            else: self._claude(transport, target, prompt, run)
             state, reason, code = "succeeded", "", ""
         except ExecutionIssue as exc:
             state, reason, code = exc.state, REASONS[exc.code], exc.code
@@ -1056,11 +1082,20 @@ class LocalReplyExecutor:
         started = _rpc_response(transport, 3, pending)
         turn_id = started.get("turn", {}).get("id")
         if not isinstance(turn_id, str) or not turn_id: raise ExecutionIssue("protocol", "uncertain")
+        cm_dict = params.get("collaborationMode") if isinstance(params.get("collaborationMode"), dict) else None
+        cm_settings = cm_dict.get("settings") if cm_dict and isinstance(cm_dict.get("settings"), dict) else {}
+        applied = _build_applied(
+            model=cm_settings.get("model") or params.get("model") or resumed.get("model") or target.model,
+            effort=cm_settings.get("reasoning_effort") or params.get("effort") or resumed.get("reasoningEffort") or target.effort,
+            service_tier=params.get("serviceTierForTurn"),
+            collaboration_mode="plan" if cm_dict and cm_dict.get("mode") == "plan" else None,
+        )
+        self._record_applied(run, applied)
         with CodexAsyncQuestions(run.command_id, target.session_id, turn_id, self.interaction_handler) as questions:
             return self._codex_turn(transport, target, run, turn_id, pending, environments, local_approval_environment, questions)
 
     def _codex_turn(self, transport, target, run, turn_id, pending, environments, local_approval_environment, questions):
-        seen, previews = {}, {}
+        seen, previews, forwarded_wires = {}, {}, {}
         failure_code = ""
         stopped_by_phone = False
         while True:
@@ -1077,9 +1112,13 @@ class LocalReplyExecutor:
                 item_id = control_params.get("itemId")
                 preview = previews.get(item_id) if isinstance(item_id, str) else None
                 stopped_by_phone = self._interactive(transport, target, run, turn_id, message, pending, seen,
-                    file_preview=preview, codex_local_command=local_command) or stopped_by_phone
+                    file_preview=preview, codex_local_command=local_command, forwarded_wires=forwarded_wires) or stopped_by_phone
                 continue
             mp = message.get("params", {})
+            if message.get("method") == "serverRequest/resolved" and mp.get("threadId") == target.session_id:
+                resolved_req = forwarded_wires.pop(mp.get("requestId"), None)
+                if resolved_req and getattr(self.interaction_handler, "supports_adoption_upgrade", False):
+                    self._resolve_control_by_id(resolved_req[0], resolved_req[1], "acknowledged", outcome="adopted")
             if message.get("method") == "item/started" and mp.get("threadId") == target.session_id and mp.get("turnId") == turn_id:
                 item = mp.get("item", {})
                 if item.get("type") == "fileChange" and isinstance(item.get("id"), str):
@@ -1103,7 +1142,7 @@ class LocalReplyExecutor:
             raise ExecutionIssue(final_code or failure_code or "failed",
                                  "failed" if turn.get("status") == "failed" else "uncertain")
 
-    def _claude(self, transport, target, prompt):
+    def _claude(self, transport, target, prompt, run=None):
         self._fresh(target)
         transport.send_bytes(prompt.encode("utf-8"), close=True)
         initialized = False
@@ -1115,6 +1154,9 @@ class LocalReplyExecutor:
                 if session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
                 if message.get("permissionMode") != target.claude_mode: raise ExecutionIssue("permissions")
                 initialized = True
+                if run is not None:
+                    applied = _build_applied(model=message.get("model") or target.model)
+                    self._record_applied(run, applied)
             if message.get("type") != "result": continue
             if not initialized or session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
             if message.get("permission_denials"): raise ExecutionIssue("approval")
@@ -1126,17 +1168,28 @@ class LocalReplyExecutor:
         value = target.cwd.stat()
         if (value.st_dev, value.st_ino) != target.directory_identity: raise ExecutionIssue("changed")
 
-    def _resolve_control(self, request, state):
+    def _resolve_control_by_id(self, request_id, revision, state, *, outcome=""):
         callback = getattr(self.interaction_handler, "resolve", None)
         if callback:
-            try: callback(request.public["id"], request.public["revision"], state)
+            try:
+                if outcome:
+                    try:
+                        callback(request_id, revision, state, outcome=outcome)
+                        return
+                    except TypeError:
+                        pass
+                callback(request_id, revision, state)
             except Exception: pass  # A lost acknowledgement must not replay an action.
 
+    def _resolve_control(self, request, state, *, outcome=""):
+        self._resolve_control_by_id(request.public["id"], request.public["revision"], state, outcome=outcome)
+
     def _interactive(self, transport, target, run, turn_id, message, pending, seen, *, file_preview=None,
-                     codex_local_command=False, prompt_rpc_id=None):
+                     codex_local_command=False, prompt_rpc_id=None, forwarded_wires=None):
         request = None
         canceled = threading.Event()
         acknowledged = False
+        desktop_handled = False
         try:
             request = normalize_request(target.tool, message, command_id=run.command_id,
                 source_id=target.source_id, session_id=target.session_id, turn_id=turn_id, file_preview=file_preview,
@@ -1172,7 +1225,9 @@ class LocalReplyExecutor:
                              (target.tool == "claude" and incoming.get("type") == "result") or
                              (target.tool == "antigravity" and prompt_rpc_id is not None
                               and incoming.get("id") == prompt_rpc_id and "method" not in incoming))
-                    if resolved: return
+                    if resolved:
+                        desktop_handled = True
+                        return
                     if len(pending) >= 64: raise ExecutionIssue("protocol", "uncertain")
                     pending.append(incoming)
                     if ended: return
@@ -1187,15 +1242,19 @@ class LocalReplyExecutor:
                 if time.time() >= request.public["expires_at"]: raise ExecutionIssue("approval")
                 transport.send(response)
                 acknowledged = True
+                is_deny = decision.get("decision") == "deny"
                 # Writing the original channel proves forwarding, not provider
                 # acceptance and certainly not successful tool execution.
-                self._resolve_control(request, "forwarded")
+                self._resolve_control(request, "forwarded", outcome="rejected" if is_deny else "")
+                if not is_deny and forwarded_wires is not None:
+                    forwarded_wires[request.wire_id] = (request.public["id"], request.public["revision"])
                 return ((target.tool == "codex" and response.get("result", {}).get("decision") == "cancel") or
-                        (target.tool == "antigravity" and decision.get("decision") == "deny"))
+                        (target.tool == "antigravity" and is_deny))
         finally:
             pending.extend(queued)
             canceled.set()
-            if not acknowledged: self._resolve_control(request, "cancelled")
+            if not acknowledged:
+                self._resolve_control(request, "cancelled", outcome="handled_on_desktop" if desktop_handled else "")
 
     def _antigravity(self, transport, target, prompt, run, settings=None):
         transcript = (_antigravity_base_dir(target.path) / "brain" / target.session_id
@@ -1220,6 +1279,11 @@ class LocalReplyExecutor:
         mode = modes.get("currentModeId") if isinstance(modes, dict) else None
         if mode not in {"default", "accept-edits", "plan"}:
             raise ExecutionIssue("permissions")
+        obs_model = obs_effort = None
+        try:
+            _, obs_model, obs_effort = antigravity_catalog_rows(resumed)
+        except Exception:
+            pass
         if run.selection:
             try:
                 rows, cur_model, cur_effort = antigravity_catalog_rows(resumed)
@@ -1238,6 +1302,11 @@ class LocalReplyExecutor:
             if "effort" in settings:
                 _antigravity_set_config(transport, rpc_id, target.session_id, "thought_level", settings["effort"])
                 rpc_id += 1
+        applied_ag = _build_applied(
+            model=(settings or {}).get("model") or obs_model or target.model,
+            effort=(settings or {}).get("effort") or obs_effort or target.effort,
+        )
+        self._record_applied(run, applied_ag)
         self._directory_current(target)
         prompt_id = rpc_id
         transport.send({"jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt", "params": {
@@ -1310,6 +1379,11 @@ class LocalReplyExecutor:
                 # alias. Do not abort an already-started turn for a valid alias
                 # resolution, or infer a mapping/applied effort from this field.
                 session_initialized = True
+                applied_cl = _build_applied(
+                    model=message.get("model") or (settings or {}).get("model") or target.model,
+                    effort=(settings or {}).get("effort"),
+                )
+                self._record_applied(run, applied_cl)
             if message.get("type") == "control_request":
                 if not session_initialized: raise ExecutionIssue("protocol", "uncertain")
                 self._interactive(transport, target, run, run.command_id, message, pending, seen)

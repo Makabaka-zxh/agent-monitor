@@ -458,4 +458,102 @@ public class CoreTests
         Assert.True(lowOpacityVeil > midOpacityVeil);
         Assert.True(midOpacityVeil > highOpacityVeil);
     }
+
+    [Fact]
+    public void WorkbenchVisibilityPolicy_FindsCrossFilterPendingTasksAndExplainsHiddenFilters()
+    {
+        var devices = new List<Computer>
+        {
+            new() { Id = "pc-1", Name = "Main PC", Online = true },
+            new() { Id = "pc-2", Name = "Mac Studio", Online = true },
+            new() { Id = "pc-offline", Name = "Offline Laptop", Online = false }
+        };
+        var tasks = new List<MonitorTask>
+        {
+            new() { Id = "codex-done", Title = "Codex Done", Tool = "codex", Status = "completed", DeviceId = "pc-1" },
+            new() { Id = "claude-q", Title = "Claude Question", Tool = "claude", Status = "completed", PendingInteractionKind = "question", DeviceId = "pc-2" },
+            new() { Id = "ag-a", Title = "AGY Approval", Tool = "antigravity", Status = "waiting", PendingInteractionKind = "approval", DeviceId = "pc-2" },
+            new() { Id = "offline-q", Title = "Offline Question", Tool = "claude", Status = "waiting", PendingInteractionKind = "question", DeviceId = "pc-offline" }
+        };
+
+        var pending = WorkbenchVisibilityPolicy.PendingTasks(tasks, devices, fresh: true);
+        Assert.Equal(2, pending.Count);
+        Assert.Equal("claude-q", pending[0].Id);
+        Assert.Equal("ag-a", pending[1].Id);
+
+        // Single-computer hidden filter message
+        var onePc = new List<Computer> { new() { Id = "pc-1", Name = "Main PC", Online = true } };
+        var sixClaude = Enumerable.Range(1, 6)
+            .Select(i => new MonitorTask { Id = $"c{i}", Title = $"Task {i}", Tool = "claude", Status = "completed", DeviceId = "pc-1" })
+            .ToList();
+        var hiddenSingle = WorkbenchVisibilityPolicy.HiddenFilterSummary(
+            sixClaude, onePc, ToolFilter.Codex, TaskScope.Active, "", fresh: true, visibleCount: 0);
+        Assert.True(hiddenSingle.ShowResetAction);
+        Assert.Equal(6, hiddenSingle.HiddenCount);
+        Assert.Equal("这台电脑有 6 条任务，当前筛选隐藏了 6 条", hiddenSingle.Message);
+
+        // Multi-computer hidden filter message
+        sixClaude[5].DeviceId = "pc-2";
+        var hiddenMulti = WorkbenchVisibilityPolicy.HiddenFilterSummary(
+            sixClaude, devices, ToolFilter.Codex, TaskScope.All, "", fresh: true, visibleCount: 0);
+        Assert.Equal("已连接电脑共有 6 条任务，当前筛选隐藏了 6 条", hiddenMulti.Message);
+    }
+
+    [Fact]
+    public void ReceiptsAndContinuationLabels_ReflectDeliveryAdoptionDesktopHandlingAndAppliedSettings()
+    {
+        var req = new SessionPendingRequestDto { Id = "r1", State = "submitted", Delivered = false };
+        Assert.Equal("已发送 → 等待电脑接收", SessionControlPolicy.ReceiptTrail(req, sendingNow: false, hasLocalRecord: false));
+
+        req.Delivered = true;
+        Assert.Equal("已发送 → 电脑已收到", SessionControlPolicy.ReceiptTrail(req, sendingNow: false, hasLocalRecord: false));
+
+        req.State = "acknowledged";
+        req.Outcome = "adopted";
+        Assert.Equal("已发送 → 电脑已收到 → 已采用", SessionControlPolicy.ReceiptTrail(req, sendingNow: false, hasLocalRecord: false));
+
+        req.Outcome = "rejected";
+        Assert.Equal("已发送 → 电脑已收到 → 已拒绝", SessionControlPolicy.ReceiptTrail(req, sendingNow: false, hasLocalRecord: false));
+
+        req.State = "cancelled";
+        req.Outcome = "handled_on_desktop";
+        Assert.Equal("已在电脑端处理", SessionControlPolicy.ReceiptTrail(req, sendingNow: false, hasLocalRecord: false));
+
+        var applied = new AppliedSettingsDto
+        {
+            Model = "gpt-5.4",
+            Effort = "high",
+            ServiceTier = "priority",
+            CollaborationMode = "plan"
+        };
+        Assert.Equal(
+            "本轮实际使用：GPT-5.4 · 思考强度 高 · 快速模式 · 计划模式",
+            SessionControlPolicy.FormatSettingsReceipt(applied, null));
+
+        var task = new MonitorTask { Id = "t1", Tool = "codex", Status = "running", ContinuationState = "computer_in_use" };
+        Assert.Equal("电脑正在使用", MonitorTask.ContinuationTitleFor(task.EffectiveContinuation(fresh: true, deviceOnline: true)));
+        task.ContinuationState = "continuable";
+        Assert.Equal("可在手机继续", MonitorTask.ContinuationTitleFor(task.EffectiveContinuation(fresh: true, deviceOnline: true)));
+        task.ContinuationState = "view_only";
+        Assert.Equal("仅可查看", MonitorTask.ContinuationTitleFor(task.EffectiveContinuation(fresh: true, deviceOnline: true)));
+    }
+
+    [Fact]
+    public void SyncDiagnostics_FormatsLegsAndDetectsSlowLeg()
+    {
+        var t0 = DateTimeOffset.Parse("2026-11-22T15:00:01.100Z");
+        var t1 = DateTimeOffset.Parse("2026-11-22T15:00:01.350Z");
+        var t2 = DateTimeOffset.Parse("2026-11-22T15:00:05.600Z");
+        var sample = new SyncDiagnosticsSample
+        {
+            FirstScreenMs = 4250,
+            LastRefreshMs = 4250,
+            ComputerCompletedAt = t0,
+            ServerReceivedAt = t1,
+            ClientDisplayedAt = t2
+        };
+        Assert.Equal("250 ms", WorkbenchVisibilityPolicy.FormatLeg(sample.ComputerCompletedAt, sample.ServerReceivedAt));
+        Assert.Equal("4.25 秒 (4250 ms)", WorkbenchVisibilityPolicy.FormatLeg(sample.ServerReceivedAt, sample.ClientDisplayedAt));
+        Assert.Contains("服务收到 → 本机显示", WorkbenchVisibilityPolicy.Diagnosis(sample));
+    }
 }

@@ -49,6 +49,7 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
         mark_request_phase("snapshot_start")
         snapshot = store.snapshot()
         pending_kinds = app.state.task_replies.controls.pending_kinds(reader["id"])
+        continuation = app.state.task_replies.continuation_states(snapshot)
         mark_request_phase("snapshot_end")
         mark_request_phase("usage_start")
         snapshot = app.state.usage.enrich(snapshot)
@@ -57,13 +58,32 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
         for task in snapshot["tasks"]:
             task["device_name"] = names.get(task["device_id"], "电脑")
             task.pop("pending_interaction_kind", None)
-            if not task["archived"] and not task["stale"] and task["id"] in pending_kinds:
-                task["pending_interaction_kind"] = pending_kinds[task["id"]]
+            task.pop("continuation_state", None)
+            if not task["archived"] and not task["stale"]:
+                if task["id"] in pending_kinds:
+                    task["pending_interaction_kind"] = pending_kinds[task["id"]]
+                if task["id"] in continuation:
+                    task["continuation_state"] = continuation[task["id"]]
             # Final answers are fetched on demand by the task panel. Repeating
             # every answer in five-second polling wastes bandwidth on mobile.
             task.pop("output", None)
+        online_devs = [d for d in snapshot["devices"] if d.get("online")]
+        source_devs = online_devs or snapshot["devices"]
+        collected_candidates = [d["collected_at"] for d in source_devs if d.get("collected_at")]
+        if not collected_candidates:
+            collected_candidates = [
+                t.get("final_result_at") or t.get("updated_at")
+                for t in snapshot["tasks"]
+                if not t.get("stale") and (t.get("final_result_at") or t.get("updated_at"))
+            ]
+        received_candidates = [d["last_seen"] for d in source_devs if d.get("last_seen")]
+        sync_timings = {
+            "computer_completed_at": max(collected_candidates) if collected_candidates else None,
+            "server_received_at": max(received_candidates) if received_candidates else None,
+            "server_generated_at": snapshot["server_time"],
+        }
         # Frequent task polling must not repeatedly transmit avatar bytes.
-        return {**snapshot, "generated_at": snapshot["server_time"],
+        return {**snapshot, "generated_at": snapshot["server_time"], "sync_timings": sync_timings,
                 "preferences": store.preferences(), "mode": "full_app"}
 
     def account(reader):

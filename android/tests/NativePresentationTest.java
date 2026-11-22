@@ -30,6 +30,22 @@ public final class NativePresentationTest {
         check(!questionKey.equals(key(task, device)), "switching from question to approval refreshes the card");
         check("等待批准".equals(NativeListPresentation.waitingLabel(NativeListPresentation.pendingKind(task))), "an explicit approval is labeled as approval");
         task.put("pending_interaction_kind", JSONObject.NULL);
+        check("".equals(NativeListPresentation.continuationState(task, device, false)), "absent continuation state stays blank");
+        task.put("continuation_state", "computer_in_use");
+        String inUseKey = key(task, device);
+        check(!before.equals(inUseKey), "continuation_state participates in row refresh key");
+        check("电脑正在使用".equals(NativeListPresentation.continuationLabel(NativeListPresentation.continuationState(task, device, false))),
+                "active desktop session labeled 电脑正在使用");
+        task.put("continuation_state", "continuable");
+        check(!inUseKey.equals(key(task, device)), "desktop release to continuable refreshes row");
+        check("可在手机继续".equals(NativeListPresentation.continuationLabel(NativeListPresentation.continuationState(task, device, false))),
+                "released compatible session labeled 可在手机继续");
+        task.put("continuation_state", "view_only");
+        check("仅可查看".equals(NativeListPresentation.continuationLabel(NativeListPresentation.continuationState(task, device, false))),
+                "incompatible session labeled 仅可查看");
+        check("".equals(NativeListPresentation.continuationState(task, device().put("online", false), false)),
+                "offline computer hides live continuation label");
+        task.put("continuation_state", JSONObject.NULL);
         for (String field : new String[]{"id", "title", "device_id", "tool", "status", "updated_at"}) {
             JSONObject changed = task("synthetic-task"); changed.put(field, "changed");
             check(!before.equals(key(changed, device)), "visible task field invalidates: " + field);

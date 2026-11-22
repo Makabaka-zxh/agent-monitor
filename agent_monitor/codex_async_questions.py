@@ -76,15 +76,21 @@ class CodexAsyncQuestions:
         for key in list(self.pending):
             self._finish(key, "cancelled")
 
-    def _finish(self, key, state):
+    def _finish(self, key, state, *, outcome=""):
         prompt = self.pending.pop(key)
         prompt.cancelled.set()
-        self._resolve(prompt, state)
+        self._resolve(prompt, state, outcome=outcome)
 
-    def _resolve(self, prompt, state):
+    def _resolve(self, prompt, state, *, outcome=""):
         resolve = getattr(self.handler, "resolve", None)
         if resolve:
             try:
+                if outcome:
+                    try:
+                        resolve(prompt.public["id"], prompt.public["revision"], state, outcome=outcome)
+                        return
+                    except TypeError:
+                        pass
                 resolve(prompt.public["id"], prompt.public["revision"], state)
             except Exception:
                 pass
@@ -144,7 +150,8 @@ class CodexAsyncQuestions:
                 if prompt.rpc_id == rpc_id:
                     result = message.get("result")
                     accepted = isinstance(result, dict) and result.get("turnId") == self.turn and "error" not in message
-                    self._finish(key, "acknowledged" if accepted else "cancelled")
+                    self._finish(key, "acknowledged" if accepted else "cancelled",
+                                 outcome="adopted" if accepted else "rejected")
                     break
             return
         params = message.get("params")
@@ -159,7 +166,7 @@ class CodexAsyncQuestions:
             answered = _answered_ids(item)
             for key, prompt in list(self.pending.items()):
                 if prompt.rpc_id is None and answered.intersection(prompt.item_ids):
-                    self._finish(key, "cancelled")
+                    self._finish(key, "cancelled", outcome="handled_on_desktop")
 
     def _send_decisions(self, transport):
         for key, prompt in list(self.pending.items()):

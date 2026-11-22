@@ -426,16 +426,90 @@ public static class SessionControlPolicy
         return true;
     }
 
-    public static string StateLabel(string? state) => state switch
+    public static string StateLabel(string? state, string? outcome = null)
     {
-        "pending" => "待你处理",
-        "submitted" => "已发送，等待电脑确认",
-        "forwarded" => "已交给电脑，等待任务结果",
-        "acknowledged" => "电脑已收到",
-        "cancelled" => "已在电脑处理或取消",
-        "expired" => "请求已过期",
-        _ => "状态确认中"
+        if (outcome == "handled_on_desktop") return "已在电脑端处理";
+        if (outcome == "adopted") return "电脑已收到并已采用";
+        if (outcome == "rejected") return "电脑已收到并已拒绝";
+        return state switch
+        {
+            "pending" => "待你处理",
+            "submitted" => "已发送，等待电脑确认",
+            "forwarded" => "已交给电脑，等待任务结果",
+            "acknowledged" => "电脑已收到",
+            "cancelled" => "已在电脑处理或取消",
+            "expired" => "请求已过期",
+            _ => "状态确认中"
+        };
+    }
+
+    public static string LocalizedEffort(string? effort) => effort switch
+    {
+        "none" => "关闭",
+        "minimal" => "最低",
+        "low" => "低",
+        "medium" => "中",
+        "high" => "高",
+        "xhigh" => "极高",
+        "max" => "最高",
+        _ => effort ?? ""
     };
+
+    public static string ReceiptTrail(SessionPendingRequestDto req, bool sendingNow, bool hasLocalRecord)
+    {
+        if (req.Outcome == "handled_on_desktop")
+            return "已在电脑端处理";
+        if (sendingNow || (req.State == "pending" && hasLocalRecord))
+            return "已发送 → 等待电脑接收";
+        if (req.State == "submitted")
+            return req.Delivered == true ? "已发送 → 电脑已收到" : "已发送 → 等待电脑接收";
+        if (req.Outcome == "adopted")
+            return "已发送 → 电脑已收到 → 已采用";
+        if (req.Outcome == "rejected" || (req.State is "forwarded" or "acknowledged" && req.DecisionKind == "deny"))
+            return "已发送 → 电脑已收到 → 已拒绝";
+        if (req.State is "forwarded" or "acknowledged")
+            return "已发送 → 电脑已收到";
+        return "";
+    }
+
+    public static string ReplyReceiptTrail(bool sending, string? state, bool deliveredToComputer)
+    {
+        if (sending) return "已发送 → 等待电脑接收";
+        return state switch
+        {
+            "queued" => deliveredToComputer ? "已发送 → 电脑已收到" : "已发送 → 等待电脑接收",
+            "dispatching" => deliveredToComputer ? "已发送 → 电脑已收到" : "已发送 → 等待电脑确认",
+            "running" => "已发送 → 电脑已收到",
+            "succeeded" => "已发送 → 电脑已收到 → 本轮已完成",
+            "blocked" => deliveredToComputer ? "已发送 → 电脑已收到 · 等待处理" : "",
+            "failed" => deliveredToComputer ? "已发送 → 电脑已收到 · 执行未完成" : "",
+            _ => ""
+        };
+    }
+
+    public static string FormatSettingsReceipt(AppliedSettingsDto? applied, SessionModelSelectionDto? requested)
+    {
+        var hasApplied = applied is not null && (!string.IsNullOrWhiteSpace(applied.Model)
+                                                 || !string.IsNullOrWhiteSpace(applied.Effort)
+                                                 || !string.IsNullOrWhiteSpace(applied.ServiceTier)
+                                                 || !string.IsNullOrWhiteSpace(applied.CollaborationMode));
+        var model = hasApplied ? applied!.Model : requested?.Model;
+        var effort = hasApplied ? applied!.Effort : requested?.Effort;
+        var tier = hasApplied ? applied!.ServiceTier : requested?.ServiceTier;
+        var mode = hasApplied ? applied!.CollaborationMode : requested?.CollaborationMode;
+
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(model))
+            parts.Add(UsageFormatting.FormatModelName(model));
+        if (!string.IsNullOrWhiteSpace(effort))
+            parts.Add($"思考强度 {LocalizedEffort(effort)}");
+        if (tier is "priority" or "fast")
+            parts.Add("快速模式");
+        if (mode == "plan")
+            parts.Add("计划模式");
+        if (parts.Count == 0) return "";
+        return (hasApplied ? "本轮实际使用：" : "已随回复提交：") + string.Join(" · ", parts);
+    }
 
     public static bool ValidAnswers(SessionPendingRequestDto req, IReadOnlyList<SessionAnswerPayloadDto>? answers)
     {
@@ -714,6 +788,87 @@ public static class ResponsiveLayoutPolicy
             UsageColumns: usageCols,
             DevicesColumns: devCols,
             AccountTwoColumnBento: accountBento);
+    }
+}
+
+public sealed class SyncDiagnosticsSample
+{
+    public long FirstScreenMs { get; set; } = -1;
+    public long LastRefreshMs { get; set; } = -1;
+    public DateTimeOffset? ComputerCompletedAt { get; set; }
+    public DateTimeOffset? ServerReceivedAt { get; set; }
+    public DateTimeOffset? ClientDisplayedAt { get; set; }
+}
+
+public static class WorkbenchVisibilityPolicy
+{
+    public static List<MonitorTask> PendingTasks(IReadOnlyList<MonitorTask> tasks, IReadOnlyList<Computer> devices, bool fresh)
+    {
+        if (!fresh || tasks.Count == 0 || devices.Count == 0) return [];
+        var onlineIds = devices
+            .Where(d => !string.IsNullOrWhiteSpace(d.Id) && d.Online)
+            .Select(d => d.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        return tasks
+            .Where(t => !t.Archived && t.Stale != true && onlineIds.Contains(t.DeviceId) && t.EffectiveStatus == "waiting")
+            .OrderBy(t => !string.IsNullOrEmpty(t.EffectivePendingKind) ? 0 : 1)
+            .ToList();
+    }
+
+    public static (int HiddenCount, string Message, bool ShowResetAction) HiddenFilterSummary(
+        IReadOnlyList<MonitorTask> tasks,
+        IReadOnlyList<Computer> devices,
+        ToolFilter tool,
+        TaskScope scope,
+        string? query,
+        bool fresh,
+        int visibleCount)
+    {
+        if (!fresh || visibleCount > 0 || tasks.Count == 0)
+            return (0, "", false);
+        var hasFilter = tool != ToolFilter.All || scope != TaskScope.All || !string.IsNullOrWhiteSpace(query);
+        if (!hasFilter)
+            return (0, "", false);
+        var unarchived = tasks.Where(t => !t.Archived).ToList();
+        if (unarchived.Count == 0)
+            return (0, "", false);
+        var distinctDevs = unarchived.Select(t => t.DeviceId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).Count();
+        var singleComputer = devices.Count <= 1 && distinctDevs <= 1;
+        var msg = singleComputer
+            ? $"这台电脑有 {unarchived.Count} 条任务，当前筛选隐藏了 {unarchived.Count} 条"
+            : $"已连接电脑共有 {unarchived.Count} 条任务，当前筛选隐藏了 {unarchived.Count} 条";
+        return (unarchived.Count, msg, true);
+    }
+
+    public static string FormatDuration(long ms) =>
+        ms < 0 ? "尚未记录" : ms < 1000 ? $"{ms} ms" : $"{ms / 1000.0:0.00} 秒 ({ms} ms)";
+
+    public static string FormatTimestamp(DateTimeOffset? stamp) =>
+        stamp is { } s ? s.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) : "暂未提供";
+
+    public static string FormatLeg(DateTimeOffset? from, DateTimeOffset? to)
+    {
+        if (from is not { } f || to is not { } t) return "暂未提供";
+        var deltaMs = (long)Math.Round((t - f).TotalMilliseconds);
+        return deltaMs < 0 ? $"时钟偏差 ({deltaMs} ms)" : FormatDuration(deltaMs);
+    }
+
+    public static string Diagnosis(SyncDiagnosticsSample sample)
+    {
+        if (sample.FirstScreenMs < 0 && sample.ClientDisplayedAt is null)
+            return "完成一次工作台同步后，这里会保留最近一次首屏耗时及电脑完成、服务收到、本机显示三个时间点。";
+        var leg1 = sample.ComputerCompletedAt is { } c && sample.ServerReceivedAt is { } s && s >= c
+            ? (long)(s - c).TotalMilliseconds : -1;
+        var leg2 = sample.ServerReceivedAt is { } sr && sample.ClientDisplayedAt is { } d && d >= sr
+            ? (long)(d - sr).TotalMilliseconds : -1;
+        if (sample.LastRefreshMs >= 3000 || sample.FirstScreenMs >= 3000)
+        {
+            if (leg1 >= 2500 && leg1 >= leg2)
+                return "最近一次耗时主要在「电脑完成 → 服务收到」，可检查来源电脑采集上报网络。";
+            var reqMs = sample.LastRefreshMs >= 0 ? sample.LastRefreshMs : sample.FirstScreenMs;
+            return $"最近一次耗时主要在「服务收到 → 本机显示」（请求耗时 {FormatDuration(reqMs)}），可检查网络或服务响应。";
+        }
+        return "最近一次三段同步耗时正常；若再次遇到 4–6 秒延迟，可直接对比三个时间点定位慢在哪一段。";
     }
 }
 

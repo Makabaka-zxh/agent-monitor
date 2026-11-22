@@ -27,6 +27,24 @@ public final class NativeListPresentation {
         return "待处理";
     }
 
+    /** Only non-stale, unarchived tasks on online computers report a live continuation state. */
+    public static String continuationState(JSONObject task, JSONObject device, boolean stale) {
+        if (task == null || stale || task.optBoolean("archived")
+                || device == null || !device.optBoolean("online")) return "";
+        String value = task.optString("continuation_state");
+        if ("continuable".equals(value) || "computer_in_use".equals(value) || "view_only".equals(value)) {
+            return value;
+        }
+        return "";
+    }
+
+    public static String continuationLabel(String state) {
+        if ("continuable".equals(state)) return "可在手机继续";
+        if ("computer_in_use".equals(state)) return "电脑正在使用";
+        if ("view_only".equals(state)) return "仅可查看";
+        return "";
+    }
+
     public static String availableSources(JSONArray sources) {
         boolean[] available = new boolean[NativeScreenPolicy.toolFilterCount()];
         if (sources != null) for (int i = 0; i < sources.length(); i++) {
@@ -56,6 +74,7 @@ public final class NativeListPresentation {
             field(result, String.valueOf(task.optBoolean("archived")));
             JSONObject device = devices.get(task.optString("device_id"));
             field(result, !stale && device != null && device.optBoolean("online") ? pendingKind(task) : "");
+            field(result, continuationState(task, device, stale));
             field(result, value(device, "name")); field(result, String.valueOf(device != null));
             field(result, String.valueOf(device != null && device.optBoolean("online")));
         }

@@ -71,7 +71,8 @@ class Store:
           CREATE TABLE IF NOT EXISTS devices (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL,
             token_hash TEXT UNIQUE, local INTEGER NOT NULL DEFAULT 0,
-            last_seen REAL NOT NULL DEFAULT 0, sources TEXT NOT NULL DEFAULT '[]'
+            last_seen REAL NOT NULL DEFAULT 0, sources TEXT NOT NULL DEFAULT '[]',
+            last_collected_at REAL
           );
           CREATE TABLE IF NOT EXISTS tasks (
             device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -113,6 +114,9 @@ class Store:
         ):
             if column not in qr_columns:
                 self.db.execute(f"ALTER TABLE qr_pairing ADD COLUMN {column} {definition}")
+        dev_columns = {row[1] for row in self.db.execute("PRAGMA table_info(devices)")}
+        if "last_collected_at" not in dev_columns:
+            self.db.execute("ALTER TABLE devices ADD COLUMN last_collected_at REAL")
         self.db.commit()
 
     def close(self):
@@ -440,12 +444,24 @@ class Store:
             row = self.db.execute("SELECT id FROM devices WHERE token_hash=? AND local=0", (digest(token),)).fetchone()
         return row["id"] if row else None
 
-    def ingest(self, device_id: str, tasks: list[dict], sources: list[dict]):
+    def ingest(self, device_id: str, tasks: list[dict], sources: list[dict], *, collected_at: str | None = None):
         with self.lock, self.db:
             if not self.db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone():
                 raise ValueError("设备已断开，请重新配对")
             sync_output = self.preferences()["sync_output"]
-            self.db.execute("UPDATE devices SET last_seen=?,sources=? WHERE id=?", (time.time(), json.dumps(sources, ensure_ascii=False), device_id))
+            now = time.time()
+            collected_ts = None
+            if isinstance(collected_at, str) and collected_at:
+                try:
+                    parsed = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+                    if parsed.tzinfo is not None:
+                        collected_ts = min(parsed.timestamp(), now)
+                except ValueError:
+                    collected_ts = None
+            self.db.execute(
+                "UPDATE devices SET last_seen=?,last_collected_at=COALESCE(?,last_collected_at),sources=? WHERE id=?",
+                (now, collected_ts, json.dumps(sources, ensure_ascii=False), device_id),
+            )
             self.db.execute("DELETE FROM tasks WHERE device_id=?", (device_id,))
             for item in tasks[:100]:
                 task = dict(item)
@@ -480,7 +496,10 @@ class Store:
         with self.lock:
             devices = []
             for row in self.db.execute("SELECT * FROM devices ORDER BY local DESC,name").fetchall():
-                devices.append({"id": row["id"], "name": row["name"], "platform": row["platform"], "last_seen": iso(row["last_seen"]), "online": now - row["last_seen"] < ONLINE_SECONDS, "local": bool(row["local"]), "sources": json.loads(row["sources"])})
+                entry = {"id": row["id"], "name": row["name"], "platform": row["platform"], "last_seen": iso(row["last_seen"]), "online": now - row["last_seen"] < ONLINE_SECONDS, "local": bool(row["local"]), "sources": json.loads(row["sources"])}
+                if "last_collected_at" in row.keys() and row["last_collected_at"]:
+                    entry["collected_at"] = iso(row["last_collected_at"])
+                devices.append(entry)
             online = {d["id"]: d["online"] for d in devices}
             tasks = []
             for row in self.db.execute("""SELECT tasks.*,COALESCE(task_archive.archived,0) AS archived FROM tasks

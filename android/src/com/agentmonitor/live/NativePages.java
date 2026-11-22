@@ -178,7 +178,7 @@ public final class NativePages {
         private final class TaskHolder {
             final LinearLayout outer = ui.column(), card = ui.column();
             final LinearLayout toolBadge = ui.taskIdentity("", "");
-            final TextView title = ui.text("", 17, false), status = ui.text("", 12, false), updated = ui.text("", 12, false);
+            final TextView title = ui.text("", 17, false), status = ui.text("", 12, false), continuation = ui.text("", 12, false), updated = ui.text("", 12, false);
             JSONObject current;
             TaskHolder() {
                 outer.addView(card, matchWrap());
@@ -195,13 +195,17 @@ public final class NativePages {
                 LinearLayout bottom = ui.row();
                 status.setPadding(0, ui.dp(4), 0, ui.dp(4)); status.setMaxLines(1);
                 bottom.addView(status, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                continuation.setMaxLines(1);
+                LinearLayout.LayoutParams contParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                contParams.setMarginStart(ui.dp(8));
+                bottom.addView(continuation, contParams);
                 updated.setTextColor(ui.muted); updated.setGravity(Gravity.END); updated.setMaxLines(1); updated.setEllipsize(TextUtils.TruncateAt.END);
                 LinearLayout.LayoutParams updatedParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1); updatedParams.setMargins(ui.dp(8), 0, 0, 0); bottom.addView(updated, updatedParams);
                 card.addView(bottom, matchWrap());
                 View divider = new View(ui.activity); divider.setBackgroundColor(ui.line);
                 divider.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
                 outer.addView(divider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
-                for (View info : new View[]{toolBadge, title, status, updated}) info.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                for (View info : new View[]{toolBadge, title, status, continuation, updated}) info.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             }
             JSONObject latest() { return current == null ? null : latestTasks.get(current.optString("id")); }
             void bind(JSONObject task) {
@@ -210,8 +214,11 @@ public final class NativePages {
                 String state = status(task, computer, stale); setText(title, titleValue);
                 ui.bindTaskIdentity(toolBadge, task.optString("tool"), deviceName);
                 bindStatus(ui, status, state, task);
+                String contMode = NativeListPresentation.continuationState(task, computer, stale);
+                bindContinuation(ui, continuation, contMode);
                 setText(updated, relative(task.optString("updated_at")));
-                card.setContentDescription(titleValue + "，" + toolName(task.optString("tool")) + "，" + deviceName + "，" + status.getText());
+                String contDesc = continuation.getVisibility() == View.VISIBLE ? "，" + continuation.getText() : "";
+                card.setContentDescription(titleValue + "，" + toolName(task.optString("tool")) + "，" + deviceName + "，" + status.getText() + contDesc);
             }
         }
     }
@@ -268,7 +275,7 @@ public final class NativePages {
     public static final class TaskDetail {
         public final LinearLayout view;
         private final NativeUi ui;
-        private final TextView note, state, time, project;
+        private final TextView note, state, continuation, time, project;
         final LinearLayout projectRow, errorSection, noteSection;
         private final LinearLayout errorCard;
         private final TextView errorUnavailable, errorSummary, errorLocation, errorSuggestion, errorEvidence;
@@ -277,6 +284,10 @@ public final class NativePages {
             LinearLayout statusLine = ui.row();
             state = ui.text("", 13, false); state.setPadding(0, ui.dp(4), 0, ui.dp(4));
             statusLine.addView(state, new LinearLayout.LayoutParams(-2, -2));
+            continuation = ui.text("", 12, false);
+            LinearLayout.LayoutParams contParams = new LinearLayout.LayoutParams(-2, -2);
+            contParams.setMarginStart(ui.dp(8));
+            statusLine.addView(continuation, contParams);
             time = ui.text("", 12); time.setTextColor(ui.muted); time.setGravity(Gravity.END);
             LinearLayout.LayoutParams stamp = new LinearLayout.LayoutParams(0, -2, 1);
             stamp.setMarginStart(ui.dp(10)); statusLine.addView(time, stamp);
@@ -312,7 +323,18 @@ public final class NativePages {
         public void update(JSONObject task, JSONObject device, boolean stale) { update(task, device, stale, true); }
         public void update(JSONObject task, JSONObject device, boolean stale, boolean syncOutput) {
             String code = status(task, device, stale); bindStatus(ui, state, code, task);
-            String noteText = "unknown".equals(code) ? "当前状态未知，显示最后收到的记录" : "waiting".equals(code) ? "任务正在等待回答或批准" : "";
+            String contMode = NativeListPresentation.continuationState(task, device, stale);
+            bindContinuation(ui, continuation, contMode);
+            String kind = NativeListPresentation.pendingKind(task);
+            String noteText = "unknown".equals(code)
+                    ? "当前状态未知，显示最后收到的记录"
+                    : "waiting".equals(code)
+                        ? (!kind.isEmpty()
+                            ? "任务正在等待你的" + ("question".equals(kind) ? "选项回答" : "批准")
+                            : "computer_in_use".equals(contMode)
+                                ? "电脑正在使用此会话；原工具未开放转交接口的本地审批需在电脑端处理，桌面释放会话后可在手机继续"
+                                : "任务正在等待回答或批准")
+                        : "";
             setText(note, noteText); noteSection.setVisibility(noteText.isEmpty() ? View.GONE : View.VISIBLE);
             String updated = absolute(value(task, "updated_at", ""));
             setText(time, "尚未更新".equals(updated) ? updated : "更新于 " + updated);
@@ -354,6 +376,66 @@ public final class NativePages {
             label.setPadding(attention ? ui.dp(8) : 0, ui.dp(4), attention ? ui.dp(8) : 0, ui.dp(4));
             label.setBackground(attention ? ui.rounded(fill, 8) : null); label.setTag(state);
         }
+    }
+    private static void bindContinuation(NativeUi ui, TextView label, String mode) {
+        String text = NativeListPresentation.continuationLabel(mode);
+        if (text.isEmpty()) {
+            label.setVisibility(View.GONE);
+            label.setTag("");
+            return;
+        }
+        label.setVisibility(View.VISIBLE);
+        setText(label, text);
+        boolean continuable = "continuable".equals(mode);
+        label.setTextColor(continuable ? ui.accent : ui.muted);
+        label.setTypeface(continuable ? ui.medium : ui.regular);
+        if (!mode.equals(label.getTag())) {
+            label.setPadding(ui.dp(8), ui.dp(4), ui.dp(8), ui.dp(4));
+            label.setBackground(ui.rounded(continuable ? ui.soft : (ui.dark ? 0xFF283442 : 0xFFF0F4F7), 8));
+            label.setTag(mode);
+        }
+    }
+    public static View pendingTaskRow(NativeUi ui, JSONObject task, JSONObject computer, Runnable onOpen) {
+        LinearLayout row = ui.column();
+        row.setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14));
+        row.setMinimumHeight(ui.dp(56));
+        row.setBackground(ui.borderedRipple(ui.surface, 18));
+        row.setFocusable(true);
+        row.setClickable(true);
+        ui.pressFeedback(row, .99f);
+        String deviceName = value(computer, "name", "未知电脑");
+        String titleValue = value(task, "title", "未命名任务");
+        String kind = NativeListPresentation.pendingKind(task);
+        String waitText = NativeListPresentation.waitingLabel(kind);
+        LinearLayout identity = ui.taskIdentity(task.optString("tool"), deviceName);
+        identity.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(identity, matchWrap());
+        row.addView(ui.space(8));
+        TextView title = ui.text(titleValue, 16, true);
+        title.setMaxLines(2);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        title.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(title, matchWrap());
+        row.addView(ui.space(10));
+        LinearLayout bottom = ui.row();
+        TextView badge = ui.text(waitText, 12, true);
+        badge.setTextColor(ui.warning);
+        badge.setPadding(ui.dp(8), ui.dp(4), ui.dp(8), ui.dp(4));
+        badge.setBackground(ui.rounded(ui.dark ? 0xFF423B2C : 0xFFF3EBDC, 8));
+        badge.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        bottom.addView(badge, new LinearLayout.LayoutParams(-2, -2));
+        TextView updated = ui.text(relative(task.optString("updated_at")), 12, false);
+        updated.setTextColor(ui.muted);
+        updated.setGravity(Gravity.END);
+        updated.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams timeParams = new LinearLayout.LayoutParams(0, -2, 1);
+        timeParams.setMarginStart(ui.dp(8));
+        bottom.addView(updated, timeParams);
+        row.addView(bottom, matchWrap());
+        row.setContentDescription(titleValue + "，" + toolName(task.optString("tool")) + "，" + deviceName + "，" + waitText);
+        row.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        row.setOnClickListener(v -> { if (onOpen != null) onOpen.run(); });
+        return row;
     }
     private static void setText(TextView view, String value) { if (!TextUtils.equals(view.getText(), value)) view.setText(value); }
     private static String rawValue(JSONObject object, String name) { return object == null || object.isNull(name) ? "" : object.optString(name, ""); }

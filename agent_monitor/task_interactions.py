@@ -127,6 +127,7 @@ class PollInput(Input):
 
 class ResolveInput(PollInput):
     state: Literal["forwarded", "acknowledged", "cancelled"]
+    outcome: Literal["", "adopted", "rejected", "handled_on_desktop"] = ""
 
 
 def _canonical(value):
@@ -134,6 +135,8 @@ def _canonical(value):
 
 
 class LocalHandler:
+    supports_adoption_upgrade = True
+
     def __init__(self, service):
         self.service = service
 
@@ -161,13 +164,13 @@ class LocalHandler:
         self.resolve(published["id"], published["revision"], "cancelled")
         return None
 
-    def resolve(self, request_id, revision, state):
+    def resolve(self, request_id, revision, state, *, outcome=""):
         service = self.service
         with service.store.lock:
             rows = service.store.db.execute("SELECT i.device_id FROM task_interactions i JOIN devices d ON i.device_id=d.id WHERE i.id=? AND i.revision=? AND d.local=1", (request_id, revision)).fetchall()
             if len(rows) != 1:
                 raise ValueError("ambiguous local request")
-        return service.resolve(rows[0]["device_id"], request_id, revision, state)
+        return service.resolve(rows[0]["device_id"], request_id, revision, state, outcome=outcome)
 
 
 class TaskInteractions:
@@ -195,10 +198,19 @@ class TaskInteractions:
                 CREATE INDEX IF NOT EXISTS task_interaction_pending_reader ON task_interactions(reader_id,expires_at) WHERE state='pending';
                 CREATE TABLE IF NOT EXISTS claude_question_host (singleton INTEGER PRIMARY KEY CHECK(singleton=1), owner TEXT NOT NULL);
             """)
-            if 'decision_hash' not in {row['name'] for row in store.db.execute('PRAGMA table_info(task_interactions)')}:
+            cols = {row['name'] for row in store.db.execute('PRAGMA table_info(task_interactions)')}
+            if 'decision_hash' not in cols:
                 store.db.execute("ALTER TABLE task_interactions ADD COLUMN decision_hash TEXT NOT NULL DEFAULT ''")
-            if 'hook_seen_at' not in {row['name'] for row in store.db.execute('PRAGMA table_info(task_interactions)')}:
+            if 'hook_seen_at' not in cols:
                 store.db.execute("ALTER TABLE task_interactions ADD COLUMN hook_seen_at REAL")
+            if 'decision_kind' not in cols:
+                store.db.execute("ALTER TABLE task_interactions ADD COLUMN decision_kind TEXT NOT NULL DEFAULT ''")
+            if 'outcome' not in cols:
+                store.db.execute("ALTER TABLE task_interactions ADD COLUMN outcome TEXT NOT NULL DEFAULT ''")
+            if 'submitted_at' not in cols:
+                store.db.execute("ALTER TABLE task_interactions ADD COLUMN submitted_at REAL")
+            if 'delivered_at' not in cols:
+                store.db.execute("ALTER TABLE task_interactions ADD COLUMN delivered_at REAL")
             from .claude_question_hook import local_principal
             store.db.execute("DELETE FROM claude_question_host")
             if replies.local_enabled:
@@ -364,10 +376,22 @@ class TaskInteractions:
     @staticmethod
     def _public(row):
         payload = json.loads(row["payload"]) if row["payload"] else {}
-        return {"id": row["id"], "revision": row["revision"], "kind": row["kind"], "provider": row["provider"],
+        keys = row.keys()
+        result = {"id": row["id"], "revision": row["revision"], "kind": row["kind"], "provider": row["provider"],
             "title": payload.get("title", "请求已结束"), "detail": payload.get("detail", ""), "operation": payload.get("operation", ""),
             "questions": payload.get("questions", []), "expires_at": row["expires_at"], "state": row["state"],
-            "turn_id": row["turn_id"], "decision_id": row["decision_id"]}
+            "turn_id": row["turn_id"], "decision_id": row["decision_id"], "delivered": bool(row["delivered"])}
+        if "decision_kind" in keys and row["decision_kind"]:
+            result["decision_kind"] = row["decision_kind"]
+        if "outcome" in keys and row["outcome"]:
+            result["outcome"] = row["outcome"]
+        if "submitted_at" in keys and row["submitted_at"] is not None:
+            result["submitted_at"] = row["submitted_at"]
+        if "delivered_at" in keys and row["delivered_at"] is not None:
+            result["delivered_at"] = row["delivered_at"]
+        if row["finished_at"] is not None:
+            result["resolved_at"] = row["finished_at"]
+        return result
 
     def publish_request(self, device_id, command_id, source_id, value):
         try:
@@ -469,7 +493,7 @@ class TaskInteractions:
                 raise ValueError()
         except (ValueError, TypeError):
             raise HTTPException(422, "答案与当前请求不匹配") from None
-        self.store.db.execute("UPDATE task_interactions SET state='submitted',decision_id=?,decision=?,decision_hash=? WHERE device_id=? AND id=? AND state='pending'", (data.decision_id, encoded, digest, device_id, row["id"]))
+        self.store.db.execute("UPDATE task_interactions SET state='submitted',decision_id=?,decision=?,decision_hash=?,decision_kind=?,submitted_at=? WHERE device_id=? AND id=? AND state='pending'", (data.decision_id, encoded, digest, data.decision, time.time(), device_id, row["id"]))
         return self._public(self._row(device_id, row["id"], row["revision"]))
 
     def poll_decision(self, device_id, request_id, revision):
@@ -477,20 +501,22 @@ class TaskInteractions:
             row = self._refresh(self._row(device_id, request_id, revision))
             decision = None
             if row["state"] == "submitted" and not row["delivered"]:
-                self.store.db.execute("UPDATE task_interactions SET delivered=1 WHERE device_id=? AND id=?", (device_id, request_id))
+                self.store.db.execute("UPDATE task_interactions SET delivered=1,delivered_at=? WHERE device_id=? AND id=?", (time.time(), device_id, request_id))
                 decision = json.loads(row["decision"])
             return {"state": row["state"], "decision": decision}
 
-    def resolve(self, device_id, request_id, revision, state):
-        if state not in ("forwarded", "acknowledged", "cancelled"):
+    def resolve(self, device_id, request_id, revision, state, outcome=""):
+        if state not in ("forwarded", "acknowledged", "cancelled") or outcome not in ("", "adopted", "rejected", "handled_on_desktop"):
             raise HTTPException(422, "交互回执格式无效")
         with self.store.lock, self.store.db:
             row = self._refresh(self._row(device_id, request_id, revision))
-            if row["state"] not in OPEN:
+            upgrading_forwarded = row["state"] == "forwarded" and state == "acknowledged" and bool(row["delivered"])
+            if row["state"] not in OPEN and not upgrading_forwarded:
                 return self._public(row)
-            if state in ("forwarded", "acknowledged") and (row["state"] != "submitted" or not row["delivered"]):
+            if state in ("forwarded", "acknowledged") and not upgrading_forwarded and (row["state"] != "submitted" or not row["delivered"]):
                 raise HTTPException(409, "尚未向原会话交付这个决定")
-            self.store.db.execute("UPDATE task_interactions SET state=?,payload='',decision='',finished_at=? WHERE device_id=? AND id=?", (state, time.time(), device_id, request_id))
+            next_outcome = outcome or (row["outcome"] if "outcome" in row.keys() else "")
+            self.store.db.execute("UPDATE task_interactions SET state=?,outcome=?,payload='',decision='',finished_at=? WHERE device_id=? AND id=?", (state, next_outcome, time.time(), device_id, request_id))
             return self._public(self._row(device_id, request_id, revision))
 
     def cancel_command(self, command_id):
@@ -529,4 +555,4 @@ def install_control_routes(app, store, perform):
 
     @app.post("/api/agent/controls/resolve")
     def resolve(data: ResolveInput, request: Request):
-        return app.state.agent_operation(request, lambda device: service.resolve(device, data.request_id, data.revision, data.state))
+        return app.state.agent_operation(request, lambda device: service.resolve(device, data.request_id, data.revision, data.state, outcome=data.outcome))
