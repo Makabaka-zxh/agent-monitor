@@ -60,6 +60,8 @@ public static class UiKit
     public static Brush GlassRimBrush { get; private set; } = null!;
     public static Brush GlassSubtleRimBrush { get; private set; } = null!;
     public static Brush GlassTrackBrush { get; private set; } = null!;
+    public static Brush GlassChromeCapsuleBrush { get; private set; } = null!;
+    public static Brush GlassChromeCapsuleRimBrush { get; private set; } = null!;
     public static Brush GlassTrayBrush { get; private set; } = null!;
     public static Brush GlassTrayRimBrush { get; private set; } = null!;
     public static Brush GlassButtonBrush { get; private set; } = null!;
@@ -170,8 +172,8 @@ public static class UiKit
                 (0.5, Color.FromArgb(0xD6, cMid.R, cMid.G, cMid.B)),
                 (1.0, Color.FromArgb(0xC6, cBot.R, cBot.G, cBot.B)));
             GlassHeaderBrush = VerticalGradient(
-                Color.FromArgb(hasWp ? (byte)0x58 : (byte)0x78, 0x18, 0x21, 0x2B),
-                Color.FromArgb(0x08, 0x16, 0x1F, 0x28));
+                Color.FromArgb(hasWp ? (byte)0x86 : (byte)0x90, 0x16, 0x1F, 0x29),
+                Color.FromArgb(0x18, 0x16, 0x1F, 0x28));
             GlassRailBrush = VerticalGradient(
                 Color.FromArgb(ScaleAlpha(0xCC), 0x26, 0x34, 0x43),
                 Color.FromArgb(ScaleAlpha(0xDA), 0x1A, 0x24, 0x2F));
@@ -195,6 +197,14 @@ public static class UiKit
             GlassTrackBrush = VerticalGradient(
                 Color.FromArgb(ScaleAlpha(0xA6), 0x15, 0x1E, 0x27),
                 Color.FromArgb(ScaleAlpha(0xBA), 0x1B, 0x25, 0x30));
+            GlassChromeCapsuleBrush = VerticalGradient(
+                (0.0, Color.FromArgb(0xEA, 0x2C, 0x3C, 0x4D)),
+                (0.55, Color.FromArgb(0xDC, 0x21, 0x2E, 0x3B)),
+                (1.0, Color.FromArgb(0xE4, 0x1B, 0x26, 0x32)));
+            GlassChromeCapsuleRimBrush = DiagonalGradient(
+                (0.0, Color.FromArgb(0x9C, 0xAE, 0xC6, 0xDE)),
+                (0.5, Color.FromArgb(0x48, 0x66, 0x7D, 0x94)),
+                (1.0, Color.FromArgb(0x6E, 0x80, 0x98, 0xB0)));
             GlassTrayBrush = VerticalGradient(
                 Color.FromArgb(0xEA, 0x4E, 0x65, 0x7C),
                 Color.FromArgb(0xD2, 0x38, 0x4A, 0x5D));
@@ -259,8 +269,8 @@ public static class UiKit
                 (0.5, Color.FromArgb(0xD8, cMid.R, cMid.G, cMid.B)),
                 (1.0, Color.FromArgb(0xCA, cBot.R, cBot.G, cBot.B)));
             GlassHeaderBrush = VerticalGradient(
-                Color.FromArgb(hasWp ? (byte)0x5C : (byte)0x84, 0xFF, 0xFF, 0xFF),
-                Color.FromArgb(0x06, 0xF1, 0xF6, 0xFB));
+                Color.FromArgb(hasWp ? (byte)0x8A : (byte)0x94, 0xFF, 0xFF, 0xFF),
+                Color.FromArgb(0x1C, 0xF1, 0xF6, 0xFB));
             GlassRailBrush = VerticalGradient(
                 Color.FromArgb(ScaleAlpha(0xCE), 0xFF, 0xFF, 0xFF),
                 Color.FromArgb(ScaleAlpha(0xB8), 0xEE, 0xF4, 0xFA));
@@ -284,6 +294,14 @@ public static class UiKit
             GlassTrackBrush = VerticalGradient(
                 Color.FromArgb(ScaleAlpha(0x9C), 0xDB, 0xE5, 0xEF),
                 Color.FromArgb(ScaleAlpha(0x86), 0xE6, 0xEE, 0xF7));
+            GlassChromeCapsuleBrush = VerticalGradient(
+                (0.0, Color.FromArgb(0xF2, 0xFF, 0xFF, 0xFF)),
+                (0.55, Color.FromArgb(0xE2, 0xF5, 0xF9, 0xFE)),
+                (1.0, Color.FromArgb(0xEA, 0xEB, 0xF2, 0xFA)));
+            GlassChromeCapsuleRimBrush = DiagonalGradient(
+                (0.0, Color.FromArgb(0xFC, 0xFF, 0xFF, 0xFF)),
+                (0.5, Color.FromArgb(0xA8, 0xFF, 0xFF, 0xFF)),
+                (1.0, Color.FromArgb(0xC8, 0xBD, 0xCE, 0xDF)));
             GlassTrayBrush = VerticalGradient(
                 Color.FromArgb(0xFC, 0xFF, 0xFF, 0xFF),
                 Color.FromArgb(0xE6, 0xE5, 0xEE, 0xF7));
@@ -768,10 +786,46 @@ public static class UiKit
         return btn;
     }
 
-    public static Button IconButton(string glyph, string tooltip, Action onClick, bool selected = false, bool enabled = true, double boxSize = 32, double iconSize = 16.5)
+    /// <summary>
+    /// Centers child vertically when it fits within available height, and anchors safely at Y=0 if taller so top headers never clip.
+    /// </summary>
+    private sealed class SafeVerticalCenterDecorator : Decorator
     {
-        var ink = selected ? AccentBrush : MutedBrush;
-        var icon = new MonitorIcon(glyph, ink, iconSize);
+        protected override Size MeasureOverride(Size constraint)
+        {
+            if (Child is null) return new Size(0, 0);
+            Child.Measure(new Size(constraint.Width, double.PositiveInfinity));
+            var desiredH = double.IsInfinity(constraint.Height)
+                ? Child.DesiredSize.Height
+                : Math.Min(constraint.Height, Child.DesiredSize.Height);
+            return new Size(
+                double.IsInfinity(constraint.Width) ? Child.DesiredSize.Width : constraint.Width,
+                desiredH);
+        }
+
+        protected override Size ArrangeOverride(Size arrangeSize)
+        {
+            if (Child is null) return arrangeSize;
+            var childH = Child.DesiredSize.Height;
+            var y = childH <= arrangeSize.Height ? Math.Round((arrangeSize.Height - childH) / 2.0) : 0.0;
+            Child.Arrange(new Rect(0, y, arrangeSize.Width, Math.Max(childH, 0.0)));
+            return arrangeSize;
+        }
+    }
+
+    public static UIElement SafeVerticalCenterHost(UIElement child) => new SafeVerticalCenterDecorator
+    {
+        ClipToBounds = true,
+        Child = child
+    };
+
+    public static Button IconButton(string glyph, string tooltip, Action onClick, bool selected = false, bool enabled = true, double boxSize = 32, double iconSize = 16.5, bool highContrast = false)
+    {
+        var ink = selected ? AccentBrush : (highContrast ? TextBrush : MutedBrush);
+        var icon = new MonitorIcon(glyph, ink, iconSize)
+        {
+            Opacity = !selected && highContrast ? 0.86 : 1.0
+        };
         var bg = selected ? GlassTrayBrush : Brushes.Transparent;
         var rim = selected ? GlassTrayRimBrush : Brushes.Transparent;
         var hover = GlassButtonHoverBrush;
@@ -798,6 +852,7 @@ public static class UiKit
                 if (!selected)
                 {
                     icon.Ink = TextBrush;
+                    icon.Opacity = 1.0;
                     icon.InvalidateVisual();
                 }
             };
@@ -808,11 +863,324 @@ public static class UiKit
                 if (!selected)
                 {
                     icon.Ink = ink;
+                    icon.Opacity = highContrast ? 0.86 : 1.0;
                     icon.InvalidateVisual();
                 }
             };
         }
         return btn;
+    }
+
+    private static (Button Button, Action<bool> SetClusterHover) BuildMacGlassJewel(
+        string glyph,
+        string tooltip,
+        Action onClick,
+        Brush idleFill,
+        Brush hoverFill,
+        Brush rimBrush,
+        Brush idleInk,
+        Brush hoverInk,
+        bool compact)
+    {
+        var hitW = compact ? 21.0 : 24.0;
+        var hitH = compact ? 22.0 : 25.0;
+        var diameter = compact ? 15.0 : 16.5;
+        var iconSize = compact ? 9.4 : 10.4;
+
+        var scale = new ScaleTransform(1.0, 1.0);
+        var icon = new MonitorIcon(glyph, idleInk, iconSize, 2.05)
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Opacity = 0.72
+        };
+
+        var innerLens = new Grid();
+        // Top liquid-droplet specular highlight
+        innerLens.Children.Add(new Border
+        {
+            Width = diameter * 0.56,
+            Height = diameter * 0.28,
+            CornerRadius = new CornerRadius(diameter * 0.14),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 1.1, 0, 0),
+            Background = VerticalGradient(Color.FromArgb(0x8A, 0xFF, 0xFF, 0xFF), Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF)),
+            IsHitTestVisible = false
+        });
+        // Bottom subtle glass caustics
+        innerLens.Children.Add(new Border
+        {
+            Width = diameter * 0.48,
+            Height = diameter * 0.18,
+            CornerRadius = new CornerRadius(diameter * 0.09),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 0, 1.1),
+            Background = VerticalGradient(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), Color.FromArgb(0x36, 0xFF, 0xFF, 0xFF)),
+            IsHitTestVisible = false
+        });
+        innerLens.Children.Add(icon);
+
+        var jewel = new Border
+        {
+            Width = diameter,
+            Height = diameter,
+            CornerRadius = new CornerRadius(diameter / 2.0),
+            Background = idleFill,
+            BorderBrush = rimBrush,
+            BorderThickness = new Thickness(1),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = scale,
+            SnapsToDevicePixels = true,
+            Child = innerLens
+        };
+
+        var hitHost = new Grid
+        {
+            Width = hitW,
+            Height = hitH,
+            Background = Brushes.Transparent
+        };
+        hitHost.Children.Add(jewel);
+
+        var btn = BareButton(hitHost, onClick, true);
+        btn.ToolTip = tooltip;
+
+        var selfHover = false;
+        var clusterHover = false;
+
+        void SyncGlyph()
+        {
+            icon.Ink = selfHover ? hoverInk : idleInk;
+            icon.Opacity = selfHover ? 1.0 : (clusterHover ? 0.94 : 0.72);
+            icon.InvalidateVisual();
+        }
+
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        btn.MouseEnter += (_, _) =>
+        {
+            selfHover = true;
+            jewel.Background = hoverFill;
+            SyncGlyph();
+            var anim = new DoubleAnimation(1.10, TimeSpan.FromMilliseconds(110)) { EasingFunction = ease };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
+        };
+        btn.MouseLeave += (_, _) =>
+        {
+            selfHover = false;
+            jewel.Background = idleFill;
+            SyncGlyph();
+            var anim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(120)) { EasingFunction = ease };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
+        };
+
+        void OnClusterHover(bool hovered)
+        {
+            clusterHover = hovered;
+            SyncGlyph();
+        }
+
+        return (btn, OnClusterHover);
+    }
+
+    private static Grid WrapChromeCapsule(UIElement inner, double height, double padX)
+    {
+        var radius = height / 2.0;
+        var wrapper = new Grid
+        {
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        wrapper.Children.Add(new Border
+        {
+            IsHitTestVisible = false,
+            CacheMode = new BitmapCache(),
+            CornerRadius = new CornerRadius(radius),
+            Background = IsDark ? HexA(0x52, 0x06, 0x0C, 0x12) : HexA(0x34, 0xCC, 0xDA, 0xE8),
+            Margin = new Thickness(1),
+            Effect = new DropShadowEffect
+            {
+                Color = IsDark ? Colors.Black : Color.FromRgb(0x16, 0x32, 0x4E),
+                BlurRadius = 10,
+                ShadowDepth = 2,
+                Direction = 270,
+                Opacity = IsDark ? 0.34 : 0.10
+            }
+        });
+
+        var innerGrid = new Grid();
+        innerGrid.Children.Add(inner);
+        innerGrid.Children.Add(new Border
+        {
+            Height = 1,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(Math.Max(4, radius * 0.55) - padX, 0, Math.Max(4, radius * 0.55) - padX, 0),
+            Background = TopSpecularSheenBrush,
+            IsHitTestVisible = false
+        });
+
+        wrapper.Children.Add(new Border
+        {
+            Height = height,
+            CornerRadius = new CornerRadius(radius),
+            Background = GlassChromeCapsuleBrush,
+            BorderBrush = GlassChromeCapsuleRimBrush,
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(padX, 0, padX, 0),
+            SnapsToDevicePixels = true,
+            Child = innerGrid
+        });
+        return wrapper;
+    }
+
+    /// <summary>
+    /// Mac-inspired 3-button Liquid Glass window controls capsule:
+    /// Amber Gold (Minimize) · Emerald Green (Maximize / Restore / Expand) · Coral Crimson (Close),
+    /// wrapped in a frosted Liquid Glass stadium pill so controls stay vivid and unmistakable over any wallpaper.
+    /// </summary>
+    public static FrameworkElement MacWindowControlsCapsule(
+        Action onMinimize,
+        Action onZoomOrRestore,
+        Action onClose,
+        bool isMaximized = false,
+        bool compact = false,
+        string? zoomTooltip = null)
+    {
+        var amberIdle = VerticalGradient(
+            (0.0, Color.FromRgb(0xFF, 0xDA, 0x72)),
+            (0.48, Color.FromRgb(0xF7, 0xBA, 0x2A)),
+            (1.0, Color.FromRgb(0xDF, 0x95, 0x0C)));
+        var amberHover = VerticalGradient(
+            (0.0, Color.FromRgb(0xFF, 0xE5, 0x90)),
+            (0.5, Color.FromRgb(0xFF, 0xC6, 0x3E)),
+            (1.0, Color.FromRgb(0xEC, 0xA1, 0x12)));
+        var amberRim = DiagonalGradient(
+            (0.0, Color.FromArgb(0xD8, 0xFF, 0xF4, 0xC6)),
+            (1.0, Color.FromArgb(0xCC, 0xAC, 0x6E, 0x04)));
+
+        var greenIdle = VerticalGradient(
+            (0.0, Color.FromRgb(0x68, 0xE8, 0x7D)),
+            (0.48, Color.FromRgb(0x32, 0xC9, 0x4E)),
+            (1.0, Color.FromRgb(0x1D, 0xA4, 0x38)));
+        var greenHover = VerticalGradient(
+            (0.0, Color.FromRgb(0x84, 0xF2, 0x96)),
+            (0.5, Color.FromRgb(0x3D, 0xD7, 0x5A)),
+            (1.0, Color.FromRgb(0x24, 0xB8, 0x41)));
+        var greenRim = DiagonalGradient(
+            (0.0, Color.FromArgb(0xD8, 0xDE, 0xFF, 0xE4)),
+            (1.0, Color.FromArgb(0xCC, 0x12, 0x79, 0x26)));
+
+        var redIdle = VerticalGradient(
+            (0.0, Color.FromRgb(0xFF, 0x82, 0x7A)),
+            (0.48, Color.FromRgb(0xF5, 0x54, 0x4A)),
+            (1.0, Color.FromRgb(0xD8, 0x33, 0x2A)));
+        var redHover = VerticalGradient(
+            (0.0, Color.FromRgb(0xFF, 0x99, 0x92)),
+            (0.5, Color.FromRgb(0xFF, 0x62, 0x58)),
+            (1.0, Color.FromRgb(0xE8, 0x3C, 0x33)));
+        var redRim = DiagonalGradient(
+            (0.0, Color.FromArgb(0xD8, 0xFF, 0xDD, 0xDA)),
+            (1.0, Color.FromArgb(0xCC, 0xA2, 0x1C, 0x15)));
+
+        var gap = compact ? 2.5 : 3.5;
+
+        var (minBtn, minCluster) = BuildMacGlassJewel(
+            "mac-minimize",
+            "最小化",
+            onMinimize,
+            amberIdle,
+            amberHover,
+            amberRim,
+            Hex(0x4E, 0x30, 0x00),
+            Hex(0x33, 0x1E, 0x00),
+            compact);
+        minBtn.Margin = new Thickness(0, 0, gap, 0);
+
+        var resolvedZoomTip = zoomTooltip ?? (isMaximized ? "向下还原" : "最大化");
+        var (zoomBtn, zoomCluster) = BuildMacGlassJewel(
+            isMaximized ? "mac-restore" : "mac-zoom",
+            resolvedZoomTip,
+            onZoomOrRestore,
+            greenIdle,
+            greenHover,
+            greenRim,
+            Hex(0x08, 0x3D, 0x14),
+            Hex(0x03, 0x24, 0x0A),
+            compact);
+        zoomBtn.Margin = new Thickness(0, 0, gap, 0);
+
+        var (closeBtn, closeCluster) = BuildMacGlassJewel(
+            "mac-close",
+            "关闭",
+            onClose,
+            redIdle,
+            redHover,
+            redRim,
+            Hex(0x52, 0x0A, 0x06),
+            Hex(0x33, 0x04, 0x02),
+            compact);
+
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        row.Children.Add(minBtn);
+        row.Children.Add(zoomBtn);
+        row.Children.Add(closeBtn);
+
+        var capsule = WrapChromeCapsule(row, height: compact ? 26.0 : 29.0, padX: compact ? 4.5 : 5.5);
+        capsule.MouseEnter += (_, _) =>
+        {
+            minCluster(true);
+            zoomCluster(true);
+            closeCluster(true);
+        };
+        capsule.MouseLeave += (_, _) =>
+        {
+            minCluster(false);
+            zoomCluster(false);
+            closeCluster(false);
+        };
+        return capsule;
+    }
+
+    /// <summary>
+    /// Matching single-jewel Coral Crimson Liquid Glass close capsule for modal dialogs.
+    /// </summary>
+    public static FrameworkElement MacCloseCapsule(Action onClose, string tooltip = "关闭 (Esc)")
+    {
+        var redIdle = VerticalGradient(
+            (0.0, Color.FromRgb(0xFF, 0x82, 0x7A)),
+            (0.48, Color.FromRgb(0xF5, 0x54, 0x4A)),
+            (1.0, Color.FromRgb(0xD8, 0x33, 0x2A)));
+        var redHover = VerticalGradient(
+            (0.0, Color.FromRgb(0xFF, 0x99, 0x92)),
+            (0.5, Color.FromRgb(0xFF, 0x62, 0x58)),
+            (1.0, Color.FromRgb(0xE8, 0x3C, 0x33)));
+        var redRim = DiagonalGradient(
+            (0.0, Color.FromArgb(0xD8, 0xFF, 0xDD, 0xDA)),
+            (1.0, Color.FromArgb(0xCC, 0xA2, 0x1C, 0x15)));
+
+        var (closeBtn, closeCluster) = BuildMacGlassJewel(
+            "mac-close",
+            tooltip,
+            onClose,
+            redIdle,
+            redHover,
+            redRim,
+            Hex(0x52, 0x0A, 0x06),
+            Hex(0x33, 0x04, 0x02),
+            compact: false);
+
+        var capsule = WrapChromeCapsule(closeBtn, height: 28.0, padX: 2.0);
+        capsule.MouseEnter += (_, _) => closeCluster(true);
+        capsule.MouseLeave += (_, _) => closeCluster(false);
+        return capsule;
     }
 
     private static UIElement ButtonLabelRow(string label, Brush fg, FontWeight weight, string? glyph)

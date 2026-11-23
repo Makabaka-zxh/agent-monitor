@@ -181,6 +181,23 @@ public sealed class MonitorIcon : FrameworkElement
                 dc.DrawRoundedRectangle(null, pen, new Rect(6, 6, 12, 12), 1.5, 1.5);
                 break;
 
+            case "mac-minimize":
+                Line(dc, pen, 6.2, 12, 17.8, 12);
+                break;
+
+            case "mac-zoom":
+                DrawGeometry(dc, pen, "M 13.0,6.5 L 17.5,6.5 L 17.5,11.0 M 11.0,17.5 L 6.5,17.5 L 6.5,13.0");
+                break;
+
+            case "mac-restore":
+                DrawGeometry(dc, pen, "M 13.2,6.2 L 13.2,10.8 L 17.8,10.8 M 10.8,17.8 L 10.8,13.2 L 6.2,13.2");
+                break;
+
+            case "mac-close":
+                Line(dc, pen, 7.2, 7.2, 16.8, 16.8);
+                Line(dc, pen, 16.8, 7.2, 7.2, 16.8);
+                break;
+
             default:
                 dc.DrawRoundedRectangle(null, pen, new Rect(4, 4, 16, 16), 4, 4);
                 break;

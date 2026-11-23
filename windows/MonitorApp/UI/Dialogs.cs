@@ -63,10 +63,10 @@ public static class Dialogs
     {
         var shell = new Grid();
         shell.Children.Add(body);
-        var closeBtn = UiKit.IconButton("close", "关闭 (Esc)", win.Close, boxSize: 28, iconSize: 13.5);
+        var closeBtn = UiKit.MacCloseCapsule(win.Close, "关闭 (Esc)");
         closeBtn.HorizontalAlignment = HorizontalAlignment.Right;
         closeBtn.VerticalAlignment = VerticalAlignment.Top;
-        closeBtn.Margin = new Thickness(0, 14, 14, 0);
+        closeBtn.Margin = new Thickness(0, 13, 14, 0);
         shell.Children.Add(closeBtn);
 
         win.Content = new Border

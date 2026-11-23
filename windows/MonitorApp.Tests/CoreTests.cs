@@ -214,9 +214,13 @@ public class CoreTests
         UiKit.ApplyTheme(false);
         Assert.Equal("#FF466987", UiKit.AccentBrush.Color.ToString());
         Assert.Equal("#FF96664F", UiKit.ClaudeInkBrush.Color.ToString());
+        Assert.NotNull(UiKit.GlassChromeCapsuleBrush);
+        Assert.NotNull(UiKit.GlassChromeCapsuleRimBrush);
 
         UiKit.ApplyTheme(true);
         Assert.Equal("#FFAFC8DF", UiKit.AccentBrush.Color.ToString());
+        Assert.NotNull(UiKit.GlassChromeCapsuleBrush);
+        Assert.NotNull(UiKit.GlassChromeCapsuleRimBrush);
         UiKit.ApplyTheme(false);
     }
 

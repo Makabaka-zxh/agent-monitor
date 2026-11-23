@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
@@ -31,6 +32,8 @@ public partial class MainWindow : Window
     private int _compactSlideDirection;
     private DateTimeOffset _lastCompactWheelAt = DateTimeOffset.MinValue;
     private bool _dwmBackdropActive;
+    private double _savedLeft = double.NaN;
+    private double _savedTop = double.NaN;
     private double _savedWidth = 1180;
     private double _savedHeight = 768;
 
@@ -311,11 +314,12 @@ public partial class MainWindow : Window
         barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var effectiveW = ActualWidth > 180 ? ActualWidth : Width;
+        var compactSideInset = effectiveW < 330 ? 10.0 : 12.0;
 
         var leftGrid = new Grid
         {
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(_compactMode ? 11 : 18, 0, 6, 0),
+            Margin = new Thickness(_compactMode ? compactSideInset : 16, 0, 6, 0),
             ClipToBounds = true
         };
         leftGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -344,18 +348,19 @@ public partial class MainWindow : Window
             var online = _controller.IsFresh && _controller.OnlineDeviceCount > 0;
             var statusTip = _controller.IsFresh ? $"{_controller.OnlineDeviceCount} 台电脑在线" : "等待同步";
 
-            if (effectiveW >= 368)
+            if (effectiveW >= 376)
             {
                 var badge = new Border
                 {
-                    Background = UiKit.GlassTrackBrush,
-                    BorderBrush = UiKit.GlassSubtleRimBrush,
+                    Background = UiKit.GlassChromeCapsuleBrush,
+                    BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
                     BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(9),
-                    Padding = new Thickness(6.5, 1.5, 6.5, 1.5),
+                    CornerRadius = new CornerRadius(9.5),
+                    Padding = new Thickness(7, 2, 7, 2),
                     Margin = new Thickness(7, 0, 0, 0),
                     HorizontalAlignment = HorizontalAlignment.Left,
                     VerticalAlignment = VerticalAlignment.Center,
+                    SnapsToDevicePixels = true,
                     ToolTip = statusTip
                 };
                 WindowChrome.SetIsHitTestVisibleInChrome(badge, true);
@@ -369,7 +374,7 @@ public partial class MainWindow : Window
                     CornerRadius = new CornerRadius(3),
                     Background = online ? UiKit.GreenBrush : UiKit.MutedBrush,
                     VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(0, 0, 4, 0)
+                    Margin = new Thickness(0, 0, 4.5, 0)
                 };
                 Grid.SetColumn(dot, 0);
                 badgeGrid.Children.Add(dot);
@@ -380,7 +385,8 @@ public partial class MainWindow : Window
                     FontFamily = UiKit.AppFont,
                     FontSize = 10.5,
                     FontWeight = FontWeights.Medium,
-                    Foreground = UiKit.MutedBrush,
+                    Foreground = UiKit.TextBrush,
+                    Opacity = 0.88,
                     TextWrapping = TextWrapping.NoWrap,
                     TextTrimming = TextTrimming.CharacterEllipsis,
                     VerticalAlignment = VerticalAlignment.Center
@@ -393,20 +399,23 @@ public partial class MainWindow : Window
             }
             else
             {
-                // Ultra-clean status jewel dot on compact widths (< 368px) so titlebar stays airy with zero crowding
+                // Ultra-clean status jewel dot on compact widths (< 376px) so titlebar stays airy with zero crowding
                 var dotHost = new Border
                 {
-                    Background = Brushes.Transparent,
-                    Padding = new Thickness(6, 6, 6, 6),
-                    Margin = new Thickness(2, 0, 0, 0),
+                    Background = UiKit.GlassChromeCapsuleBrush,
+                    BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(8),
+                    Padding = new Thickness(5, 5, 5, 5),
+                    Margin = new Thickness(6, 0, 0, 0),
                     HorizontalAlignment = HorizontalAlignment.Left,
                     VerticalAlignment = VerticalAlignment.Center,
                     ToolTip = statusTip,
                     Child = new Border
                     {
-                        Width = 6.5,
-                        Height = 6.5,
-                        CornerRadius = new CornerRadius(3.5),
+                        Width = 6,
+                        Height = 6,
+                        CornerRadius = new CornerRadius(3),
                         Background = online ? UiKit.GreenBrush : UiKit.MutedBrush
                     }
                 };
@@ -419,12 +428,13 @@ public partial class MainWindow : Window
         Grid.SetColumn(leftGrid, 0);
         barGrid.Children.Add(leftGrid);
 
-        // Right: Cohesive Glass Pill Action Cluster + Native Caption Buttons
+        // Right: Cohesive Liquid Glass Action Capsule + Mac-Inspired 3-Color Liquid Glass Window Controls
         var right = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Stretch
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, _compactMode ? compactSideInset : 14, 0)
         };
         WindowChrome.SetIsHitTestVisibleInChrome(right, true);
 
@@ -442,12 +452,12 @@ public partial class MainWindow : Window
                 {
                     Topmost = !Topmost;
                     RebuildTitleBar();
-                }, selected: Topmost, boxSize: 24, iconSize: 13.5);
+                }, selected: Topmost, boxSize: 22, iconSize: 13.0, highContrast: true);
                 pinBtn.Margin = new Thickness(0, 0, 1, 0);
                 quickRow.Children.Add(pinBtn);
 
                 var cfgBtn = UiKit.IconButton("settings", "调整小窗尺寸与显示内容", () =>
-                    Dialogs.ShowCompactWindowSettings(this, _controller, ApplyCompactSettingsLive), boxSize: 24, iconSize: 13.5);
+                    Dialogs.ShowCompactWindowSettings(this, _controller, ApplyCompactSettingsLive), boxSize: 22, iconSize: 13.0, highContrast: true);
                 cfgBtn.Margin = new Thickness(0, 0, 1, 0);
                 quickRow.Children.Add(cfgBtn);
 
@@ -455,16 +465,16 @@ public partial class MainWindow : Window
                 {
                     await _controller.RefreshWorkbenchAsync();
                     await _controller.RefreshUsageAsync();
-                }, boxSize: 24, iconSize: 13.5);
+                }, boxSize: 22, iconSize: 13.0, highContrast: true);
                 refBtn.Margin = new Thickness(0, 0, 1, 0);
                 quickRow.Children.Add(refBtn);
 
-                var expandBtn = UiKit.IconButton("mini", "展开完整工作台", ToggleCompactMode, boxSize: 24, iconSize: 13.5);
+                var expandBtn = UiKit.IconButton("mini", "展开完整工作台", ToggleCompactMode, boxSize: 22, iconSize: 13.0, highContrast: true);
                 quickRow.Children.Add(expandBtn);
             }
             else
             {
-                var miniBtn = UiKit.IconButton("mini", "切换桌面精简小窗", ToggleCompactMode, boxSize: 27, iconSize: 14.5);
+                var miniBtn = UiKit.IconButton("mini", "切换桌面精简小窗", ToggleCompactMode, boxSize: 25, iconSize: 14.0, highContrast: true);
                 miniBtn.Margin = new Thickness(0, 0, 2, 0);
                 quickRow.Children.Add(miniBtn);
 
@@ -473,69 +483,44 @@ public partial class MainWindow : Window
                     await _controller.RefreshWorkbenchAsync();
                     if (_page == NavPage.Usage) await _controller.RefreshUsageAsync();
                     if (_page == NavPage.Account) await _controller.RefreshAccountAsync();
-                }, boxSize: 27, iconSize: 14.5);
+                }, boxSize: 25, iconSize: 14.0, highContrast: true);
                 refBtn.Margin = new Thickness(0, 0, 2, 0);
                 quickRow.Children.Add(refBtn);
 
-                quickRow.Children.Add(UiKit.IconButton("help", "查看当前页面说明", ShowCurrentPageHelp, boxSize: 27, iconSize: 14.5));
+                quickRow.Children.Add(UiKit.IconButton("help", "查看当前页面说明", ShowCurrentPageHelp, boxSize: 25, iconSize: 14.0, highContrast: true));
             }
 
             var quickCapsule = new Border
             {
-                Background = UiKit.GlassTrackBrush,
-                BorderBrush = UiKit.GlassSubtleRimBrush,
+                Height = _compactMode ? 26.0 : 29.0,
+                Background = UiKit.GlassChromeCapsuleBrush,
+                BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(_compactMode ? 8.5 : 9.5),
-                Padding = new Thickness(2, 1.5, 2, 1.5),
+                CornerRadius = new CornerRadius(_compactMode ? 9.5 : 10.5),
+                Padding = new Thickness(2.5, 0, 2.5, 0),
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, _compactMode ? 2 : 8, 0),
+                Margin = new Thickness(0, 0, _compactMode ? 6 : 8, 0),
                 SnapsToDevicePixels = true,
                 Child = quickRow
             };
             right.Children.Add(quickCapsule);
         }
 
-        var capWidth = _compactMode ? 31.0 : 44.0;
-        right.Children.Add(CaptionButton("minimize", "最小化", () => WindowState = WindowState.Minimized, isClose: false, width: capWidth));
-        if (!_compactMode)
-        {
-            right.Children.Add(CaptionButton("maximize", WindowState == WindowState.Maximized ? "向下还原" : "最大化", () =>
-                WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized, isClose: false, width: capWidth));
-        }
-        right.Children.Add(CaptionButton("close", "关闭", Close, isClose: true, width: _compactMode ? 33.0 : 44.0));
+        var macControls = UiKit.MacWindowControlsCapsule(
+            onMinimize: () => WindowState = WindowState.Minimized,
+            onZoomOrRestore: _compactMode
+                ? ToggleCompactMode
+                : () => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized,
+            onClose: Close,
+            isMaximized: !_compactMode && WindowState == WindowState.Maximized,
+            compact: _compactMode,
+            zoomTooltip: _compactMode ? "展开完整工作台" : null);
+        right.Children.Add(macControls);
 
         Grid.SetColumn(right, 1);
         barGrid.Children.Add(right);
 
         TitleBarHost.Child = barGrid;
-    }
-
-    private static Button CaptionButton(string glyph, string tooltip, Action onClick, bool isClose, double width = 44)
-    {
-        var icon = new MonitorIcon(glyph, UiKit.MutedBrush, 13.5, 1.5);
-        var border = new Border
-        {
-            Width = width,
-            Background = Brushes.Transparent,
-            Child = icon
-        };
-        var btn = UiKit.BareButton(border, onClick, true);
-        btn.ToolTip = tooltip;
-        var closeBg = new SolidColorBrush(Color.FromRgb(0xC4, 0x2B, 0x1C));
-        closeBg.Freeze();
-        btn.MouseEnter += (_, _) =>
-        {
-            border.Background = isClose ? closeBg : UiKit.HoverBrush;
-            icon.Ink = isClose ? Brushes.White : UiKit.TextBrush;
-            icon.InvalidateVisual();
-        };
-        btn.MouseLeave += (_, _) =>
-        {
-            border.Background = Brushes.Transparent;
-            icon.Ink = UiKit.MutedBrush;
-            icon.InvalidateVisual();
-        };
-        return btn;
     }
 
     private void ShowCurrentPageHelp()
@@ -680,14 +665,40 @@ public partial class MainWindow : Window
             _ = _controller.RefreshAccountAsync();
     }
 
+    private Rect GetCurrentMonitorWorkAreaDip()
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                var screen = System.Windows.Forms.Screen.FromHandle(hwnd);
+                var dpi = VisualTreeHelper.GetDpi(this);
+                var sx = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+                var sy = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+                var wa = screen.WorkingArea;
+                return new Rect(wa.Left / sx, wa.Top / sy, wa.Width / sx, wa.Height / sy);
+            }
+        }
+        catch { }
+        return SystemParameters.WorkArea;
+    }
+
     private void ApplyCompactSettingsLive()
     {
         var ui = _controller.ReadUiSettings();
         if (_compactMode)
         {
             var (targetW, targetH) = ui.GetCompactDimensions();
+            var work = GetCurrentMonitorWorkAreaDip();
+            var curW = ActualWidth > 120 ? ActualWidth : Width;
+            var curH = ActualHeight > 100 ? ActualHeight : Height;
+            var cx = Left + curW / 2.0;
+            var cy = Top + curH / 2.0;
             Width = targetW;
             Height = targetH;
+            Left = Math.Round(Math.Clamp(cx - targetW / 2.0, work.Left + 8, Math.Max(work.Left + 8, work.Right - targetW - 8)));
+            Top = Math.Round(Math.Clamp(cy - targetH / 2.0, work.Top + 8, Math.Max(work.Top + 8, work.Bottom - targetH - 8)));
         }
         RenderAll(forceShell: true);
     }
@@ -695,16 +706,25 @@ public partial class MainWindow : Window
     private void ToggleCompactMode()
     {
         _compactMode = !_compactMode;
+        var work = GetCurrentMonitorWorkAreaDip();
         if (_compactMode)
         {
+            var normalBounds = WindowState == WindowState.Maximized ? RestoreBounds : new Rect(Left, Top, Width, Height);
+            if (normalBounds.Width >= 600 && normalBounds.Height >= 400)
+            {
+                _savedLeft = normalBounds.Left;
+                _savedTop = normalBounds.Top;
+                _savedWidth = normalBounds.Width;
+                _savedHeight = normalBounds.Height;
+            }
             if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
-            _savedWidth = Width;
-            _savedHeight = Height;
             MinWidth = 280;
             MinHeight = 175;
             var (targetW, targetH) = _controller.ReadUiSettings().GetCompactDimensions();
             Width = targetW;
             Height = targetH;
+            Left = Math.Round(work.Left + (work.Width - targetW) / 2.0);
+            Top = Math.Round(work.Top + (work.Height - targetH) / 2.0);
             Topmost = true;
             if (_controller.Usage is null)
                 _ = _controller.RefreshUsageAsync();
@@ -712,10 +732,16 @@ public partial class MainWindow : Window
         else
         {
             Topmost = false;
-            Width = Math.Max(1040, _savedWidth);
-            Height = Math.Max(700, _savedHeight);
+            var targetW = Math.Min(Math.Max(1040, _savedWidth), Math.Max(660, work.Width));
+            var targetH = Math.Min(Math.Max(700, _savedHeight), Math.Max(480, work.Height));
+            Width = targetW;
+            Height = targetH;
             MinWidth = 660;
             MinHeight = 480;
+            var restoredLeft = !double.IsNaN(_savedLeft) ? _savedLeft : work.Left + (work.Width - targetW) / 2.0;
+            var restoredTop = !double.IsNaN(_savedTop) ? _savedTop : work.Top + (work.Height - targetH) / 2.0;
+            Left = Math.Round(Math.Clamp(restoredLeft, work.Left, Math.Max(work.Left, work.Right - targetW)));
+            Top = Math.Round(Math.Clamp(restoredTop, work.Top, Math.Max(work.Top, work.Bottom - targetH)));
         }
         SyncTheme(applyDwm: true);
         RenderAll(forceShell: true);
@@ -1060,9 +1086,9 @@ public partial class MainWindow : Window
 
         var plan = ResponsiveLayoutPolicy.PlanCompact(winW, winH, ui.CompactShowTaskMeta);
         var isNano = plan.Kind is CompactLayoutKind.MicroCapsule or CompactLayoutKind.WideRibbon;
-        var sidePad = isNano ? 9.0 : 12.0;
-        var cardPad = isNano ? 10.0 : 13.5;
-        var bottomBarH = isNano ? 25.0 : 28.0;
+        var sidePad = winW < 330 ? 10.0 : 12.0;
+        var cardPad = isNano ? 10.5 : 14.0;
+        var bottomBarH = isNano ? 26.0 : 29.0;
 
         var now = DateTimeOffset.UtcNow;
         var providers = _controller.Usage?.Providers ?? [];
@@ -1790,7 +1816,7 @@ public partial class MainWindow : Window
                 var bentoRoot = new Grid { ClipToBounds = true };
                 bentoRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                 bentoRoot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10) });
-                bentoRoot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                bentoRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
                 // Top Bento Row: [Lowest Quota Pod | Today Tokens & Live Status Pod]
                 var topBento = new Grid();
@@ -2209,19 +2235,14 @@ public partial class MainWindow : Window
             e.Handled = true;
         };
 
+        // Strictly symmetric left & right margins (sidePad == sidePad) so the Liquid Glass card is 100% horizontally centered
         var stageRow = new Grid
         {
-            Margin = new Thickness(sidePad, isNano ? 3 : 5, totalCards > 1 ? Math.Max(6, sidePad - 3) : sidePad, isNano ? 4 : 6)
+            Margin = new Thickness(sidePad, isNano ? 3 : 4, sidePad, isNano ? 4 : 6)
         };
-        stageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        stageRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var boundedContentHost = new Border
-        {
-            ClipToBounds = true,
-            Child = activeCard.Content
-        };
-        var glassCard = UiKit.ElevatedGlass(boundedContentHost, padding: cardPad, radius: isNano ? 14 : 17);
+        var centeredContentHost = UiKit.SafeVerticalCenterHost(activeCard.Content);
+        var glassCard = UiKit.ElevatedGlass(centeredContentHost, padding: cardPad, radius: isNano ? 14 : 17);
 
         if (_compactSlideDirection != 0)
         {
@@ -2233,17 +2254,74 @@ public partial class MainWindow : Window
             glassCard.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(155)) { EasingFunction = ease });
         }
 
-        Grid.SetColumn(glassCard, 0);
         stageRow.Children.Add(glassCard);
+        Grid.SetRow(stageRow, 0);
+        hudGrid.Children.Add(stageRow);
 
+        var showCenterDots = totalCards > 1 && winW >= 368;
+        var bottomBarGrid = new Grid();
+        if (showCenterDots)
+        {
+            bottomBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            bottomBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            bottomBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        }
+        else
+        {
+            bottomBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            bottomBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        }
+
+        var pageText = new TextBlock
+        {
+            FontFamily = UiKit.AppFont,
+            FontSize = 11,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0)
+        };
         if (totalCards > 1)
         {
-            var dotsStack = new StackPanel
+            pageText.Inlines.Add(new System.Windows.Documents.Run($"{_compactCardIndex + 1} / {totalCards}")
             {
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.AccentBrush
+            });
+            pageText.Inlines.Add(new System.Windows.Documents.Run($" · {activeCard.Title}")
+            {
+                FontWeight = FontWeights.Medium,
+                Foreground = UiKit.TextBrush
+            });
+        }
+        else
+        {
+            pageText.Text = activeCard.Title;
+            pageText.FontWeight = FontWeights.Medium;
+            pageText.Foreground = UiKit.TextBrush;
+        }
+
+        var pageLabelBtn = UiKit.BareButton(pageText, () =>
+        {
+            if (totalCards > 1) StepCompactCard(1);
+        });
+        pageLabelBtn.HorizontalAlignment = HorizontalAlignment.Left;
+        pageLabelBtn.VerticalAlignment = VerticalAlignment.Center;
+        if (totalCards > 1)
+            pageLabelBtn.ToolTip = "滚轮上下滑动或点右侧 ▲ / ▼ 切换卡片；拖动小窗边缘可智能重排单栏/双栏布局";
+        Grid.SetColumn(pageLabelBtn, 0);
+        bottomBarGrid.Children.Add(pageLabelBtn);
+
+        if (showCenterDots)
+        {
+            var dotsRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(6, 0, 0, 0)
+                Margin = new Thickness(4, 0, 4, 0)
             };
-            var maxDots = Math.Min(totalCards, 9);
+            var maxDots = Math.Min(totalCards, 7);
             var startDot = totalCards <= maxDots
                 ? 0
                 : Math.Clamp(_compactCardIndex - maxDots / 2, 0, totalCards - maxDots);
@@ -2254,82 +2332,62 @@ public partial class MainWindow : Window
                 var isCurrent = di == _compactCardIndex;
                 var dotVisual = new Border
                 {
-                    Width = 5.5,
-                    Height = isCurrent ? 15.0 : 5.5,
+                    Width = isCurrent ? 13.0 : 5.5,
+                    Height = 5.5,
                     CornerRadius = new CornerRadius(2.75),
                     Background = isCurrent ? UiKit.AccentBrush : UiKit.MutedBrush,
-                    Opacity = isCurrent ? 1.0 : 0.38
+                    Opacity = isCurrent ? 1.0 : 0.42
                 };
                 var dotHit = new Border
                 {
                     Background = Brushes.Transparent,
-                    Padding = new Thickness(3, 2.5, 2, 2.5),
+                    Padding = new Thickness(2.2, 4, 2.2, 4),
                     Child = dotVisual
                 };
                 var dotBtn = UiKit.BareButton(dotHit, () => JumpCompactCard(capturedIdx));
                 dotBtn.ToolTip = $"{di + 1} / {totalCards} · {cards[di].Title}";
                 if (!isCurrent)
                 {
-                    dotBtn.MouseEnter += (_, _) => dotVisual.Opacity = 0.85;
-                    dotBtn.MouseLeave += (_, _) => dotVisual.Opacity = 0.38;
+                    dotBtn.MouseEnter += (_, _) => dotVisual.Opacity = 0.88;
+                    dotBtn.MouseLeave += (_, _) => dotVisual.Opacity = 0.42;
                 }
-                dotsStack.Children.Add(dotBtn);
+                dotsRow.Children.Add(dotBtn);
             }
-            Grid.SetColumn(dotsStack, 1);
-            stageRow.Children.Add(dotsStack);
+            Grid.SetColumn(dotsRow, 1);
+            bottomBarGrid.Children.Add(dotsRow);
         }
-
-        Grid.SetRow(stageRow, 0);
-        hudGrid.Children.Add(stageRow);
-
-        var bottomBar = new Grid
-        {
-            Height = bottomBarH,
-            Margin = new Thickness(sidePad + 2, 0, sidePad, isNano ? 5 : 8)
-        };
-        bottomBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        bottomBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var pageText = new TextBlock
-        {
-            Text = totalCards > 1 ? $"{_compactCardIndex + 1} / {totalCards} · {activeCard.Title}" : activeCard.Title,
-            FontFamily = UiKit.AppFont,
-            FontSize = 11,
-            FontWeight = FontWeights.Medium,
-            Foreground = UiKit.MutedBrush,
-            TextWrapping = TextWrapping.NoWrap,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 8, 0)
-        };
-        var pageLabelBtn = UiKit.BareButton(pageText, () =>
-        {
-            if (totalCards > 1) StepCompactCard(1);
-        });
-        pageLabelBtn.HorizontalAlignment = HorizontalAlignment.Left;
-        pageLabelBtn.VerticalAlignment = VerticalAlignment.Center;
-        if (totalCards > 1)
-            pageLabelBtn.ToolTip = "滚轮上下滑动或点右侧 ▲ / ▼ 切换卡片；拖动小窗边缘可智能重排单栏/双栏布局";
-        Grid.SetColumn(pageLabelBtn, 0);
-        bottomBar.Children.Add(pageLabelBtn);
 
         var navCluster = new StackPanel
         {
             Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center
         };
-        var stepBtnSize = isNano ? 22.0 : 24.0;
-        var upBtn = UiKit.IconButton("chevron-up", "上一张卡片 (滚轮向上 / ↑)", () => StepCompactCard(-1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 13);
-        upBtn.Margin = new Thickness(0, 0, 3, 0);
-        var downBtn = UiKit.IconButton("chevron-down", "下一张卡片 (滚轮向下 / ↓)", () => StepCompactCard(1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 13);
+        var stepBtnSize = isNano ? 20.0 : 22.0;
+        var upBtn = UiKit.IconButton("chevron-up", "上一张卡片 (滚轮向上 / ↑)", () => StepCompactCard(-1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 12.5, highContrast: true);
+        upBtn.Margin = new Thickness(0, 0, 2, 0);
+        var downBtn = UiKit.IconButton("chevron-down", "下一张卡片 (滚轮向下 / ↓)", () => StepCompactCard(1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 12.5, highContrast: true);
         navCluster.Children.Add(upBtn);
         navCluster.Children.Add(downBtn);
 
-        Grid.SetColumn(navCluster, 1);
-        bottomBar.Children.Add(navCluster);
+        Grid.SetColumn(navCluster, showCenterDots ? 2 : 1);
+        bottomBarGrid.Children.Add(navCluster);
 
-        Grid.SetRow(bottomBar, 1);
-        hudGrid.Children.Add(bottomBar);
+        var bottomCapsule = new Border
+        {
+            Height = bottomBarH,
+            Margin = new Thickness(sidePad, 0, sidePad, isNano ? 6 : 8),
+            Background = UiKit.GlassChromeCapsuleBrush,
+            BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(isNano ? 10 : 11.5),
+            Padding = new Thickness(10, 0, 4, 0),
+            SnapsToDevicePixels = true,
+            Child = bottomBarGrid
+        };
+
+        Grid.SetRow(bottomCapsule, 1);
+        hudGrid.Children.Add(bottomCapsule);
 
         return hudGrid;
     }
