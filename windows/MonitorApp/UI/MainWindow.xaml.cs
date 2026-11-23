@@ -305,8 +305,12 @@ public partial class MainWindow : Window
 
     private void RebuildTitleBar()
     {
+        var barH = _compactMode ? 34.0 : 40.0;
+        TitleBarHost.Height = barH;
         TitleBarHost.Background = UiKit.GlassHeaderBrush;
         TitleBarHost.BorderThickness = new Thickness(0);
+        if (WindowChrome.GetWindowChrome(this) is { } chrome && Math.Abs(chrome.CaptionHeight - barH) > 0.5)
+            chrome.CaptionHeight = barH;
 
         // Strict 2-column [*, Auto] Grid guarantees left identity and right controls NEVER collide or overlap at any width
         var barGrid = new Grid();
@@ -314,19 +318,19 @@ public partial class MainWindow : Window
         barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var effectiveW = ActualWidth > 180 ? ActualWidth : Width;
-        var compactSideInset = effectiveW < 330 ? 10.0 : 12.0;
+        var compactSideInset = effectiveW < 340 ? 10.0 : 12.0;
 
         var leftGrid = new Grid
         {
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(_compactMode ? compactSideInset : 16, 0, 6, 0),
+            Margin = new Thickness(_compactMode ? compactSideInset : 16, 0, 8, 0),
             ClipToBounds = true
         };
         leftGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         leftGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         leftGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-        var appIcon = UiKit.BrandImage("app", _compactMode ? 17 : 19);
+        var appIcon = UiKit.BrandImage("app", _compactMode ? 15.5 : 19);
         Grid.SetColumn(appIcon, 0);
         leftGrid.Children.Add(appIcon);
 
@@ -334,11 +338,11 @@ public partial class MainWindow : Window
         {
             Text = "Monitor",
             FontFamily = UiKit.AppFont,
-            FontSize = _compactMode ? 12.5 : 13,
+            FontSize = _compactMode ? 12.2 : 13,
             FontWeight = FontWeights.SemiBold,
             Foreground = UiKit.TextBrush,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(6.5, 0, 0, 0)
+            Margin = new Thickness(6, 0, 0, 0)
         };
         Grid.SetColumn(appTitle, 1);
         leftGrid.Children.Add(appTitle);
@@ -348,81 +352,39 @@ public partial class MainWindow : Window
             var online = _controller.IsFresh && _controller.OnlineDeviceCount > 0;
             var statusTip = _controller.IsFresh ? $"{_controller.OnlineDeviceCount} 台电脑在线" : "等待同步";
 
-            if (effectiveW >= 376)
+            var statusRow = new StackPanel
             {
-                var badge = new Border
-                {
-                    Background = UiKit.GlassChromeCapsuleBrush,
-                    BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(9.5),
-                    Padding = new Thickness(7, 2, 7, 2),
-                    Margin = new Thickness(7, 0, 0, 0),
-                    HorizontalAlignment = HorizontalAlignment.Left,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    SnapsToDevicePixels = true,
-                    ToolTip = statusTip
-                };
-                WindowChrome.SetIsHitTestVisibleInChrome(badge, true);
-                var badgeGrid = new Grid();
-                badgeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                badgeGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                var dot = new Border
-                {
-                    Width = 5.5,
-                    Height = 5.5,
-                    CornerRadius = new CornerRadius(3),
-                    Background = online ? UiKit.GreenBrush : UiKit.MutedBrush,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(0, 0, 4.5, 0)
-                };
-                Grid.SetColumn(dot, 0);
-                badgeGrid.Children.Add(dot);
-
-                var badgeTxt = new TextBlock
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(7, 0, 0, 0),
+                Background = Brushes.Transparent,
+                ToolTip = statusTip
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(statusRow, true);
+            statusRow.Children.Add(new Border
+            {
+                Width = 6,
+                Height = 6,
+                CornerRadius = new CornerRadius(3),
+                Background = online ? UiKit.GreenBrush : UiKit.MutedBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            if (effectiveW >= 348)
+            {
+                statusRow.Children.Add(new TextBlock
                 {
                     Text = _controller.IsFresh ? $"{_controller.OnlineDeviceCount} 在线" : "待同步",
                     FontFamily = UiKit.AppFont,
-                    FontSize = 10.5,
+                    FontSize = 10.8,
                     FontWeight = FontWeights.Medium,
-                    Foreground = UiKit.TextBrush,
-                    Opacity = 0.88,
-                    TextWrapping = TextWrapping.NoWrap,
-                    TextTrimming = TextTrimming.CharacterEllipsis,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                Grid.SetColumn(badgeTxt, 1);
-                badgeGrid.Children.Add(badgeTxt);
-                badge.Child = badgeGrid;
-                Grid.SetColumn(badge, 2);
-                leftGrid.Children.Add(badge);
-            }
-            else
-            {
-                // Ultra-clean status jewel dot on compact widths (< 376px) so titlebar stays airy with zero crowding
-                var dotHost = new Border
-                {
-                    Background = UiKit.GlassChromeCapsuleBrush,
-                    BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(8),
-                    Padding = new Thickness(5, 5, 5, 5),
-                    Margin = new Thickness(6, 0, 0, 0),
-                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Foreground = UiKit.MutedBrush,
                     VerticalAlignment = VerticalAlignment.Center,
-                    ToolTip = statusTip,
-                    Child = new Border
-                    {
-                        Width = 6,
-                        Height = 6,
-                        CornerRadius = new CornerRadius(3),
-                        Background = online ? UiKit.GreenBrush : UiKit.MutedBrush
-                    }
-                };
-                WindowChrome.SetIsHitTestVisibleInChrome(dotHost, true);
-                Grid.SetColumn(dotHost, 2);
-                leftGrid.Children.Add(dotHost);
+                    Margin = new Thickness(4.5, 0, 0, 0)
+                });
             }
+            Grid.SetColumn(statusRow, 2);
+            leftGrid.Children.Add(statusRow);
         }
 
         Grid.SetColumn(leftGrid, 0);
@@ -452,29 +414,25 @@ public partial class MainWindow : Window
                 {
                     Topmost = !Topmost;
                     RebuildTitleBar();
-                }, selected: Topmost, boxSize: 22, iconSize: 13.0, highContrast: true);
-                pinBtn.Margin = new Thickness(0, 0, 1, 0);
+                }, selected: Topmost, boxSize: 20, iconSize: 12.2, highContrast: true, inCapsule: true);
+                pinBtn.Margin = new Thickness(0, 0, 1.5, 0);
                 quickRow.Children.Add(pinBtn);
 
                 var cfgBtn = UiKit.IconButton("settings", "调整小窗尺寸与显示内容", () =>
-                    Dialogs.ShowCompactWindowSettings(this, _controller, ApplyCompactSettingsLive), boxSize: 22, iconSize: 13.0, highContrast: true);
-                cfgBtn.Margin = new Thickness(0, 0, 1, 0);
+                    Dialogs.ShowCompactWindowSettings(this, _controller, ApplyCompactSettingsLive), boxSize: 20, iconSize: 12.2, highContrast: true, inCapsule: true);
+                cfgBtn.Margin = new Thickness(0, 0, 1.5, 0);
                 quickRow.Children.Add(cfgBtn);
 
                 var refBtn = UiKit.IconButton("refresh", "立即同步刷新", async () =>
                 {
                     await _controller.RefreshWorkbenchAsync();
                     await _controller.RefreshUsageAsync();
-                }, boxSize: 22, iconSize: 13.0, highContrast: true);
-                refBtn.Margin = new Thickness(0, 0, 1, 0);
+                }, boxSize: 20, iconSize: 12.2, highContrast: true, inCapsule: true);
                 quickRow.Children.Add(refBtn);
-
-                var expandBtn = UiKit.IconButton("mini", "展开完整工作台", ToggleCompactMode, boxSize: 22, iconSize: 13.0, highContrast: true);
-                quickRow.Children.Add(expandBtn);
             }
             else
             {
-                var miniBtn = UiKit.IconButton("mini", "切换桌面精简小窗", ToggleCompactMode, boxSize: 25, iconSize: 14.0, highContrast: true);
+                var miniBtn = UiKit.IconButton("mini", "切换桌面精简小窗", ToggleCompactMode, boxSize: 24, iconSize: 13.8, highContrast: true, inCapsule: true);
                 miniBtn.Margin = new Thickness(0, 0, 2, 0);
                 quickRow.Children.Add(miniBtn);
 
@@ -483,23 +441,23 @@ public partial class MainWindow : Window
                     await _controller.RefreshWorkbenchAsync();
                     if (_page == NavPage.Usage) await _controller.RefreshUsageAsync();
                     if (_page == NavPage.Account) await _controller.RefreshAccountAsync();
-                }, boxSize: 25, iconSize: 14.0, highContrast: true);
+                }, boxSize: 24, iconSize: 13.8, highContrast: true, inCapsule: true);
                 refBtn.Margin = new Thickness(0, 0, 2, 0);
                 quickRow.Children.Add(refBtn);
 
-                quickRow.Children.Add(UiKit.IconButton("help", "查看当前页面说明", ShowCurrentPageHelp, boxSize: 25, iconSize: 14.0, highContrast: true));
+                quickRow.Children.Add(UiKit.IconButton("help", "查看当前页面说明", ShowCurrentPageHelp, boxSize: 24, iconSize: 13.8, highContrast: true, inCapsule: true));
             }
 
             var quickCapsule = new Border
             {
-                Height = _compactMode ? 26.0 : 29.0,
+                Height = _compactMode ? 24.0 : 28.0,
                 Background = UiKit.GlassChromeCapsuleBrush,
                 BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(_compactMode ? 9.5 : 10.5),
-                Padding = new Thickness(2.5, 0, 2.5, 0),
+                CornerRadius = new CornerRadius(_compactMode ? 8.5 : 9.5),
+                Padding = new Thickness(_compactMode ? 2.5 : 3.0, 0, _compactMode ? 2.5 : 3.0, 0),
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, _compactMode ? 6 : 8, 0),
+                Margin = new Thickness(0, 0, _compactMode ? 5.5 : 8, 0),
                 SnapsToDevicePixels = true,
                 Child = quickRow
             };
@@ -1086,9 +1044,8 @@ public partial class MainWindow : Window
 
         var plan = ResponsiveLayoutPolicy.PlanCompact(winW, winH, ui.CompactShowTaskMeta);
         var isNano = plan.Kind is CompactLayoutKind.MicroCapsule or CompactLayoutKind.WideRibbon;
-        var sidePad = winW < 330 ? 10.0 : 12.0;
-        var cardPad = isNano ? 10.5 : 14.0;
-        var bottomBarH = isNano ? 26.0 : 29.0;
+        var sidePad = winW < 340 ? 10.0 : 12.0;
+        var cardPad = isNano ? 11.5 : 14.0;
 
         var now = DateTimeOffset.UtcNow;
         var providers = _controller.Usage?.Providers ?? [];
@@ -1266,25 +1223,24 @@ public partial class MainWindow : Window
             return btn;
         }
 
-        UIElement BuildProgressBar(double remPercent, Brush fillBrush, double height = 5.5)
+        UIElement BuildProgressBar(double remPercent, Brush fillBrush, double height = 5.0)
         {
             var track = new Grid { Height = height };
             track.Children.Add(new Border
             {
                 Background = UiKit.GlassTrackBrush,
-                BorderBrush = UiKit.GlassSubtleRimBrush,
-                BorderThickness = new Thickness(0.5),
-                CornerRadius = new CornerRadius(height / 2.0)
+                BorderBrush = remPercent <= 0.5 ? fillBrush : UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(0.6),
+                CornerRadius = new CornerRadius(height / 2.0),
+                Opacity = remPercent <= 0.5 ? 0.65 : 1.0
             });
             if (remPercent <= 0.5)
             {
                 track.Children.Add(new Border
                 {
-                    Width = 7,
-                    HorizontalAlignment = HorizontalAlignment.Left,
                     Background = fillBrush,
                     CornerRadius = new CornerRadius(height / 2.0),
-                    Opacity = 0.9
+                    Opacity = 0.14
                 });
             }
             else
@@ -1705,15 +1661,15 @@ public partial class MainWindow : Window
                     {
                         Background = UiKit.GlassTrackBrush,
                         BorderBrush = isLow ? meterBrush : UiKit.GlassSubtleRimBrush,
-                        BorderThickness = new Thickness(1),
-                        CornerRadius = new CornerRadius(7),
-                        Padding = new Thickness(6.5, 1.5, 6.5, 1.5),
+                        BorderThickness = new Thickness(0.8),
+                        CornerRadius = new CornerRadius(6),
+                        Padding = new Thickness(6, 1, 6, 1),
                         VerticalAlignment = VerticalAlignment.Center,
                         Child = new TextBlock
                         {
                             Text = $"剩余 {UsageFormatting.Percentage(rem)}",
                             FontFamily = UiKit.AppFont,
-                            FontSize = 11.0,
+                            FontSize = 10.6,
                             FontWeight = FontWeights.SemiBold,
                             Foreground = isLow ? meterBrush : UiKit.TextBrush
                         }
@@ -1722,9 +1678,9 @@ public partial class MainWindow : Window
                     topGrid.Children.Add(pctBadge);
                     block.Children.Add(topGrid);
 
-                    var bar = BuildProgressBar(rem, meterBrush, 5.8);
+                    var bar = BuildProgressBar(rem, meterBrush, 5.0);
                     if (bar is FrameworkElement bfe)
-                        bfe.Margin = new Thickness(0, isNano ? 5 : 7, 0, isNano ? 4 : 6);
+                        bfe.Margin = new Thickness(0, isNano ? 5.5 : 7, 0, isNano ? 4.5 : 6);
                     block.Children.Add(bar);
 
                     var metaGrid = new Grid();
@@ -2105,48 +2061,68 @@ public partial class MainWindow : Window
                         }
                         else
                         {
-                            var stripGrid = new UniformGrid { Columns = toolSummaries.Count };
-                            foreach (var item in toolSummaries)
+                            // Clean anchored glass pill chips so tools sit proportionally instead of floating bare in empty space
+                            var chipList = toolSummaries.Select(item =>
                             {
                                 var capturedTool = item.Tool;
-                                var cellGrid = new Grid
-                                {
-                                    HorizontalAlignment = HorizontalAlignment.Center,
-                                    VerticalAlignment = VerticalAlignment.Center,
-                                    Margin = new Thickness(2, 0, 2, 0)
-                                };
+                                var cellGrid = new Grid { VerticalAlignment = VerticalAlignment.Center };
                                 cellGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
                                 cellGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                                cellGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-                                var ico = UiKit.BrandImage(item.Tool, 12);
-                                ico.Margin = new Thickness(0, 0, 4, 0);
+                                var ico = UiKit.BrandImage(item.Tool, 12.5);
+                                ico.Margin = new Thickness(0, 0, 4.5, 0);
                                 ico.VerticalAlignment = VerticalAlignment.Center;
                                 Grid.SetColumn(ico, 0);
                                 cellGrid.Children.Add(ico);
 
-                                var txt = new TextBlock
+                                var nameTxt = new TextBlock
                                 {
-                                    Text = $"{item.ShortLabel} {item.Metric}",
+                                    Text = item.ShortLabel,
                                     FontFamily = UiKit.AppFont,
-                                    FontSize = 11,
-                                    FontWeight = FontWeights.SemiBold,
-                                    Foreground = item.Low ? UiKit.WarningBrush : UiKit.TextBrush,
+                                    FontSize = 10.8,
+                                    Foreground = UiKit.MutedBrush,
                                     TextWrapping = TextWrapping.NoWrap,
                                     TextTrimming = TextTrimming.CharacterEllipsis,
                                     VerticalAlignment = VerticalAlignment.Center
                                 };
-                                Grid.SetColumn(txt, 1);
-                                cellGrid.Children.Add(txt);
+                                Grid.SetColumn(nameTxt, 1);
+                                cellGrid.Children.Add(nameTxt);
 
-                                var microBtn = UiKit.BareButton(cellGrid, () =>
+                                var valTxt = new TextBlock
+                                {
+                                    Text = item.Metric,
+                                    FontFamily = UiKit.AppFont,
+                                    FontSize = 11,
+                                    FontWeight = FontWeights.SemiBold,
+                                    Foreground = item.Low ? UiKit.WarningBrush : UiKit.TextBrush,
+                                    VerticalAlignment = VerticalAlignment.Center,
+                                    Margin = new Thickness(4, 0, 0, 0)
+                                };
+                                Grid.SetColumn(valTxt, 2);
+                                cellGrid.Children.Add(valTxt);
+
+                                var chipBd = new Border
+                                {
+                                    Background = UiKit.GlassTrackBrush,
+                                    BorderBrush = UiKit.GlassSubtleRimBrush,
+                                    BorderThickness = new Thickness(0.8),
+                                    CornerRadius = new CornerRadius(7.5),
+                                    Padding = new Thickness(7.5, 4.5, 7.5, 4.5),
+                                    SnapsToDevicePixels = true,
+                                    Child = cellGrid
+                                };
+
+                                var microBtn = UiKit.BareButton(chipBd, () =>
                                 {
                                     if (toolFirstQuotaCardIndex.TryGetValue(capturedTool, out var targetIdx))
                                         JumpCompactCard(targetIdx);
                                 });
                                 microBtn.ToolTip = $"点击跳转至 {MonitorTask.BrandFor(item.Tool)} 额度卡片";
-                                stripGrid.Children.Add(microBtn);
-                            }
-                            heroCol.Children.Add(stripGrid);
+                                return (FrameworkElement)microBtn;
+                            }).ToList();
+
+                            heroCol.Children.Add(BuildResponsiveCardGrid(chipList, Math.Min(3, chipList.Count), gap: 6.0));
                         }
                     }
                 }
@@ -2218,8 +2194,6 @@ public partial class MainWindow : Window
             Background = Brushes.Transparent,
             ClipToBounds = true
         };
-        hudGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        hudGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         hudGrid.PreviewMouseWheel += (_, e) =>
         {
@@ -2235,31 +2209,39 @@ public partial class MainWindow : Window
             e.Handled = true;
         };
 
-        // Strictly symmetric left & right margins (sidePad == sidePad) so the Liquid Glass card is 100% horizontally centered
-        var stageRow = new Grid
-        {
-            Margin = new Thickness(sidePad, isNano ? 3 : 4, sidePad, isNano ? 4 : 6)
-        };
-
-        var centeredContentHost = UiKit.SafeVerticalCenterHost(activeCard.Content);
-        var glassCard = UiKit.ElevatedGlass(centeredContentHost, padding: cardPad, radius: isNano ? 14 : 17);
-
+        var centeredBodyHost = UiKit.SafeVerticalCenterHost(activeCard.Content);
         if (_compactSlideDirection != 0)
         {
-            var slideTransform = new TranslateTransform(0, _compactSlideDirection * 14.0);
-            glassCard.RenderTransform = slideTransform;
-            glassCard.Opacity = 0.35;
+            var slideTransform = new TranslateTransform(0, _compactSlideDirection * 10.0);
+            centeredBodyHost.RenderTransform = slideTransform;
+            centeredBodyHost.Opacity = 0.38;
             var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-            slideTransform.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(155)) { EasingFunction = ease });
-            glassCard.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(155)) { EasingFunction = ease });
+            slideTransform.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(145)) { EasingFunction = ease });
+            centeredBodyHost.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(145)) { EasingFunction = ease });
         }
 
-        stageRow.Children.Add(glassCard);
-        Grid.SetRow(stageRow, 0);
-        hudGrid.Children.Add(stageRow);
+        // Single unified sculpted Liquid Glass card with integrated slim footer (no detached sausage bar below!)
+        var unifiedCardGrid = new Grid();
+        unifiedCardGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        unifiedCardGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var showCenterDots = totalCards > 1 && winW >= 368;
-        var bottomBarGrid = new Grid();
+        Grid.SetRow(centeredBodyHost, 0);
+        unifiedCardGrid.Children.Add(centeredBodyHost);
+
+        var footerStack = new StackPanel
+        {
+            Margin = new Thickness(0, isNano ? 6 : 8, 0, -2)
+        };
+        footerStack.Children.Add(new Border
+        {
+            Height = 1,
+            Background = UiKit.GlassSubtleRimBrush,
+            Opacity = 0.48,
+            Margin = new Thickness(0, 0, 0, isNano ? 3.5 : 4.5)
+        });
+
+        var showCenterDots = totalCards > 1 && winW >= 372;
+        var bottomBarGrid = new Grid { Height = isNano ? 19.0 : 21.0 };
         if (showCenterDots)
         {
             bottomBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -2275,7 +2257,7 @@ public partial class MainWindow : Window
         var pageText = new TextBlock
         {
             FontFamily = UiKit.AppFont,
-            FontSize = 11,
+            FontSize = 10.6,
             TextWrapping = TextWrapping.NoWrap,
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
@@ -2283,22 +2265,21 @@ public partial class MainWindow : Window
         };
         if (totalCards > 1)
         {
-            pageText.Inlines.Add(new System.Windows.Documents.Run($"{_compactCardIndex + 1} / {totalCards}")
+            pageText.Inlines.Add(new System.Windows.Documents.Run($"{_compactCardIndex + 1}/{totalCards}")
             {
                 FontWeight = FontWeights.SemiBold,
                 Foreground = UiKit.AccentBrush
             });
             pageText.Inlines.Add(new System.Windows.Documents.Run($" · {activeCard.Title}")
             {
-                FontWeight = FontWeights.Medium,
-                Foreground = UiKit.TextBrush
+                FontWeight = FontWeights.Normal,
+                Foreground = UiKit.MutedBrush
             });
         }
         else
         {
             pageText.Text = activeCard.Title;
-            pageText.FontWeight = FontWeights.Medium;
-            pageText.Foreground = UiKit.TextBrush;
+            pageText.Foreground = UiKit.MutedBrush;
         }
 
         var pageLabelBtn = UiKit.BareButton(pageText, () =>
@@ -2332,24 +2313,24 @@ public partial class MainWindow : Window
                 var isCurrent = di == _compactCardIndex;
                 var dotVisual = new Border
                 {
-                    Width = isCurrent ? 13.0 : 5.5,
-                    Height = 5.5,
-                    CornerRadius = new CornerRadius(2.75),
+                    Width = isCurrent ? 11.0 : 4.5,
+                    Height = 4.5,
+                    CornerRadius = new CornerRadius(2.25),
                     Background = isCurrent ? UiKit.AccentBrush : UiKit.MutedBrush,
-                    Opacity = isCurrent ? 1.0 : 0.42
+                    Opacity = isCurrent ? 0.95 : 0.36
                 };
                 var dotHit = new Border
                 {
                     Background = Brushes.Transparent,
-                    Padding = new Thickness(2.2, 4, 2.2, 4),
+                    Padding = new Thickness(2, 4, 2, 4),
                     Child = dotVisual
                 };
                 var dotBtn = UiKit.BareButton(dotHit, () => JumpCompactCard(capturedIdx));
                 dotBtn.ToolTip = $"{di + 1} / {totalCards} · {cards[di].Title}";
                 if (!isCurrent)
                 {
-                    dotBtn.MouseEnter += (_, _) => dotVisual.Opacity = 0.88;
-                    dotBtn.MouseLeave += (_, _) => dotVisual.Opacity = 0.42;
+                    dotBtn.MouseEnter += (_, _) => dotVisual.Opacity = 0.85;
+                    dotBtn.MouseLeave += (_, _) => dotVisual.Opacity = 0.36;
                 }
                 dotsRow.Children.Add(dotBtn);
             }
@@ -2363,31 +2344,23 @@ public partial class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center
         };
-        var stepBtnSize = isNano ? 20.0 : 22.0;
-        var upBtn = UiKit.IconButton("chevron-up", "上一张卡片 (滚轮向上 / ↑)", () => StepCompactCard(-1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 12.5, highContrast: true);
-        upBtn.Margin = new Thickness(0, 0, 2, 0);
-        var downBtn = UiKit.IconButton("chevron-down", "下一张卡片 (滚轮向下 / ↓)", () => StepCompactCard(1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 12.5, highContrast: true);
+        var stepBtnSize = 19.0;
+        var upBtn = UiKit.IconButton("chevron-up", "上一张卡片 (滚轮向上 / ↑)", () => StepCompactCard(-1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 11.5, highContrast: true, inCapsule: true);
+        upBtn.Margin = new Thickness(0, 0, 1.5, 0);
+        var downBtn = UiKit.IconButton("chevron-down", "下一张卡片 (滚轮向下 / ↓)", () => StepCompactCard(1), enabled: totalCards > 1, boxSize: stepBtnSize, iconSize: 11.5, highContrast: true, inCapsule: true);
         navCluster.Children.Add(upBtn);
         navCluster.Children.Add(downBtn);
 
         Grid.SetColumn(navCluster, showCenterDots ? 2 : 1);
         bottomBarGrid.Children.Add(navCluster);
 
-        var bottomCapsule = new Border
-        {
-            Height = bottomBarH,
-            Margin = new Thickness(sidePad, 0, sidePad, isNano ? 6 : 8),
-            Background = UiKit.GlassChromeCapsuleBrush,
-            BorderBrush = UiKit.GlassChromeCapsuleRimBrush,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(isNano ? 10 : 11.5),
-            Padding = new Thickness(10, 0, 4, 0),
-            SnapsToDevicePixels = true,
-            Child = bottomBarGrid
-        };
+        footerStack.Children.Add(bottomBarGrid);
+        Grid.SetRow(footerStack, 1);
+        unifiedCardGrid.Children.Add(footerStack);
 
-        Grid.SetRow(bottomCapsule, 1);
-        hudGrid.Children.Add(bottomCapsule);
+        var glassCard = UiKit.ElevatedGlass(unifiedCardGrid, padding: cardPad, radius: isNano ? 15 : 18);
+        glassCard.Margin = new Thickness(sidePad, 2, sidePad, sidePad);
+        hudGrid.Children.Add(glassCard);
 
         return hudGrid;
     }
@@ -5153,10 +5126,10 @@ public partial class MainWindow : Window
         var miniSizeSeg = UiKit.SegmentedControl(
             new[]
             {
-                ("nano", bento ? "胶囊微窗" : "胶囊微窗 (308×196)"),
-                ("small", bento ? "紧凑小窗" : "紧凑小窗 (336×356)"),
-                ("medium", bento ? "标准小窗" : "标准小窗 (384×504)"),
-                ("large", bento ? "双栏看板" : "双栏看板 (560×480)")
+                ("nano", bento ? "灵动胶囊" : "灵动胶囊 (360×216)"),
+                ("small", bento ? "紧凑方卡" : "紧凑方卡 (376×332)"),
+                ("medium", bento ? "标准小窗" : "标准小窗 (412×468)"),
+                ("large", bento ? "双栏看板" : "双栏看板 (640×420)")
             }.Select(opt =>
             {
                 var k = opt.Item1;

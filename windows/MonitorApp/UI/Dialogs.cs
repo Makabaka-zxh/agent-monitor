@@ -24,6 +24,7 @@ public static class Dialogs
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize,
             ShowInTaskbar = false,
+            UseLayoutRounding = true,
             Background = UiKit.CanvasBrush,
             Foreground = UiKit.TextBrush,
             FontFamily = UiKit.AppFont
@@ -537,10 +538,10 @@ public static class Dialogs
             var sizeSeg = UiKit.SegmentedControl(
                 new[]
                 {
-                    ("nano", "胶囊微窗"),
-                    ("small", "紧凑小窗"),
+                    ("nano", "灵动胶囊"),
+                    ("small", "紧凑方卡"),
                     ("medium", "标准小窗"),
-                    ("large", "宽展看板")
+                    ("large", "双栏看板")
                 }.Select(opt =>
                 {
                     var key = opt.Item1;

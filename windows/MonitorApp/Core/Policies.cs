@@ -626,20 +626,20 @@ public sealed class LocalUiSettings
 
     public (double Width, double Height) GetCompactDimensions() => CompactSizePreset switch
     {
-        "nano" => (308, 196),
-        "small" => (336, 356),
-        "large" => (560, 480),
-        _ => (384, 504)
+        "nano" => (360, 216),
+        "small" => (376, 332),
+        "large" => (640, 420),
+        _ => (412, 468)
     };
 }
 
 public enum CompactLayoutKind
 {
-    MicroCapsule,   // Narrow & short (< 430w, < 245h): single focused metric or single task
-    WideRibbon,     // Wide & short (>= 430w, < 245h): 2-column horizontal split [Quota | Focus Task]
-    CompactTile,    // Single-column balanced tile (< 470w, 245..430h): Hero + strip + focus task
-    StandardStack,  // Single-column rich stack (< 470w, >= 430h): visual tool tiles + task live previews
-    WideBento       // 2-column Bento dashboard (>= 470w, >= 245h): [Quota + Stats] + [All Quotas | Active Tasks]
+    MicroCapsule,   // Narrow & short (< 450w, < 250h): focused quota + anchored tool chips
+    WideRibbon,     // Wide & short (>= 450w, < 250h): 2-column horizontal split [Quota | Focus Tasks]
+    CompactTile,    // Balanced widget (< 500w, 250..415h): Hero + tool chips + 2 focus tasks
+    StandardStack,  // Rich portrait stack (< 500w, >= 415h): visual tool tiles + 3-4 focus tasks
+    WideBento       // Widescreen 2-column Bento dashboard (>= 500w, >= 250h): [Quota + Stats] + [All Quotas | Active Tasks]
 }
 
 public readonly record struct CompactViewportPlan(
@@ -665,20 +665,19 @@ public static class ResponsiveLayoutPolicy
 {
     public static CompactViewportPlan PlanCompact(double width, double height, bool userWantsTaskMeta = true)
     {
-        var w = Math.Max(260.0, width);
-        var h = Math.Max(165.0, height);
-        var isMicroH = h < 245.0;
-        var bottomBarH = isMicroH ? 25.0 : 28.0;
-        var cardPad = isMicroH ? 10.0 : 13.5;
-        var innerH = Math.Max(70.0, h - 40.0 - bottomBarH - (isMicroH ? 14.0 : 18.0) - cardPad * 2.0);
+        var w = Math.Max(280.0, width);
+        var h = Math.Max(175.0, height);
+        var isMicroH = h < 250.0;
+        var cardPad = isMicroH ? 11.5 : 14.0;
+        var innerH = Math.Max(72.0, h - 34.0 - 12.0 - cardPad * 2.0 - 26.0);
 
         if (isMicroH)
         {
-            if (w >= 430.0)
+            if (w >= 450.0)
             {
-                // Horizontal Ribbon: 2 columns side-by-side!
-                var canMeta = userWantsTaskMeta && innerH >= 96.0;
-                var rowsPerCol = Math.Clamp((int)Math.Floor((innerH - 22.0) / (canMeta ? 52.0 : 38.0)), 1, 2);
+                // Horizontal Ribbon: 2 columns side-by-side
+                var canMeta = userWantsTaskMeta && innerH >= 104.0;
+                var rowsPerCol = Math.Clamp((int)Math.Floor((innerH - 18.0) / (canMeta ? 50.0 : 38.0)), 1, 2);
                 return new CompactViewportPlan(
                     Kind: CompactLayoutKind.WideRibbon,
                     Columns: 2,
@@ -692,52 +691,53 @@ public static class ResponsiveLayoutPolicy
             }
             else
             {
-                // Micro Capsule: ultra-focused 1 metric or 1 task
-                var canMeta = userWantsTaskMeta && innerH >= 88.0;
+                // Sleek 5:3 Capsule: 2 compact tasks/quotas per page when height >= 205, 1 when ultra-short
+                var canTwoRows = innerH >= 102.0;
+                var canMeta = userWantsTaskMeta && !canTwoRows && innerH >= 84.0;
                 return new CompactViewportPlan(
                     Kind: CompactLayoutKind.MicroCapsule,
                     Columns: 1,
                     ShowTaskMeta: canMeta,
                     ShowTaskPreview: false,
                     ShowVisualToolTiles: false,
-                    TasksPerPage: 1,
-                    QuotasPerPage: 1,
+                    TasksPerPage: canTwoRows ? 2 : 1,
+                    QuotasPerPage: canTwoRows ? 2 : 1,
                     OverviewTaskCount: 0,
                     OverviewQuotaCount: 1);
             }
         }
 
-        if (w >= 470.0)
+        if (w >= 500.0)
         {
-            // 2-Column Bento Dashboard!
-            var showPreview = w >= 520.0 && innerH >= 320.0;
-            var taskRowH = showPreview ? 74.0 : (userWantsTaskMeta ? 56.0 : 42.0);
-            var splitBodyH = Math.Max(90.0, innerH - 118.0);
-            var bentoOverviewTasks = Math.Clamp((int)Math.Floor((splitBodyH - 26.0) / taskRowH), 1, 5);
-            var bentoOverviewQuotas = Math.Clamp((int)Math.Floor((splitBodyH - 26.0) / 52.0), 1, 5);
-            var fullPageTaskRows = Math.Clamp((int)Math.Floor((innerH - 30.0) / taskRowH), 2, 5);
-            var fullPageQuotaRows = Math.Clamp((int)Math.Floor((innerH - 32.0) / 54.0), 2, 5);
+            // Widescreen 2-Column Bento Dashboard
+            var showPreview = w >= 580.0 && innerH >= 340.0;
+            var taskRowH = showPreview ? 72.0 : (userWantsTaskMeta ? 54.0 : 40.0);
+            var splitBodyH = Math.Max(96.0, innerH - 92.0);
+            var bentoOverviewTasks = Math.Clamp((int)Math.Floor((splitBodyH - 22.0) / taskRowH), 2, 5);
+            var bentoOverviewQuotas = Math.Clamp((int)Math.Floor((splitBodyH - 22.0) / 50.0), 2, 5);
+            var fullPageTaskRows = Math.Clamp((int)Math.Floor((innerH - 28.0) / taskRowH), 2, 5);
+            var fullPageQuotaRows = Math.Clamp((int)Math.Floor((innerH - 28.0) / 52.0), 2, 5);
 
             return new CompactViewportPlan(
                 Kind: CompactLayoutKind.WideBento,
                 Columns: 2,
                 ShowTaskMeta: userWantsTaskMeta,
                 ShowTaskPreview: showPreview,
-                ShowVisualToolTiles: w >= 620.0,
+                ShowVisualToolTiles: w >= 660.0,
                 TasksPerPage: fullPageTaskRows * 2,
                 QuotasPerPage: fullPageQuotaRows * 2,
                 OverviewTaskCount: bentoOverviewTasks,
                 OverviewQuotaCount: bentoOverviewQuotas);
         }
 
-        if (h >= 430.0)
+        if (h >= 415.0)
         {
-            // Standard Rich Vertical Stack: unlocks visual tool progress tiles + 1-line live task preview!
-            var showPreview = innerH >= 330.0;
-            var taskRowH = showPreview ? 76.0 : (userWantsTaskMeta ? 60.0 : 44.0);
-            var overviewTasks = Math.Clamp((int)Math.Floor((innerH - 175.0) / (userWantsTaskMeta ? 58.0 : 44.0)), 1, 4);
-            var tasksPerPage = Math.Clamp((int)Math.Floor((innerH - 32.0) / taskRowH), 2, 6);
-            var quotasPerPage = Math.Clamp((int)Math.Floor((innerH - 36.0) / 58.0), 2, 6);
+            // Standard Rich Portrait Stack: visual tool progress tiles + 3-4 focus tasks
+            var showPreview = innerH >= 320.0;
+            var taskRowH = showPreview ? 72.0 : (userWantsTaskMeta ? 56.0 : 42.0);
+            var overviewTasks = Math.Clamp((int)Math.Floor((innerH - 160.0) / (userWantsTaskMeta ? 56.0 : 42.0)), 2, 4);
+            var tasksPerPage = Math.Clamp((int)Math.Floor((innerH - 28.0) / taskRowH), 3, 6);
+            var quotasPerPage = Math.Clamp((int)Math.Floor((innerH - 30.0) / 54.0), 3, 6);
 
             return new CompactViewportPlan(
                 Kind: CompactLayoutKind.StandardStack,
@@ -752,10 +752,10 @@ public static class ResponsiveLayoutPolicy
         }
         else
         {
-            // Compact Square/Tile (245 <= h < 430, w < 470)
-            var overviewTasks = innerH >= 190.0 ? Math.Clamp((int)Math.Floor((innerH - 135.0) / 58.0), 1, 2) : 0;
-            var tasksPerPage = Math.Clamp((int)Math.Floor((innerH - 32.0) / (userWantsTaskMeta ? 62.0 : 45.0)), 2, 4);
-            var quotasPerPage = Math.Clamp((int)Math.Floor((innerH - 36.0) / 58.0), 2, 4);
+            // Balanced Medium Widget (250 <= h < 415, w < 500)
+            var overviewTasks = innerH >= 185.0 ? Math.Clamp((int)Math.Floor((innerH - 118.0) / (userWantsTaskMeta ? 54.0 : 42.0)), 1, 3) : 0;
+            var tasksPerPage = Math.Clamp((int)Math.Floor((innerH - 28.0) / (userWantsTaskMeta ? 56.0 : 42.0)), 2, 4);
+            var quotasPerPage = Math.Clamp((int)Math.Floor((innerH - 30.0) / 54.0), 2, 4);
 
             return new CompactViewportPlan(
                 Kind: CompactLayoutKind.CompactTile,

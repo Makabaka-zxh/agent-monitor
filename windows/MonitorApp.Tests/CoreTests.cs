@@ -270,38 +270,44 @@ public class CoreTests
     [Fact]
     public void CompactSizePresets_ReturnDistinctDimensions()
     {
-        Assert.Equal((308, 196), new LocalUiSettings { CompactSizePreset = "nano" }.GetCompactDimensions());
-        Assert.Equal((336, 356), new LocalUiSettings { CompactSizePreset = "small" }.GetCompactDimensions());
-        Assert.Equal((384, 504), new LocalUiSettings { CompactSizePreset = "medium" }.GetCompactDimensions());
-        Assert.Equal((560, 480), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
+        Assert.Equal((360, 216), new LocalUiSettings { CompactSizePreset = "nano" }.GetCompactDimensions());
+        Assert.Equal((376, 332), new LocalUiSettings { CompactSizePreset = "small" }.GetCompactDimensions());
+        Assert.Equal((412, 468), new LocalUiSettings { CompactSizePreset = "medium" }.GetCompactDimensions());
+        Assert.Equal((640, 420), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
     }
 
     [Fact]
     public void ResponsiveLayoutPolicy_AdaptsCompactAndMainLayoutsAcrossWindowSizes()
     {
-        var micro = ResponsiveLayoutPolicy.PlanCompact(308, 196);
+        var microTiny = ResponsiveLayoutPolicy.PlanCompact(308, 185);
+        Assert.Equal(CompactLayoutKind.MicroCapsule, microTiny.Kind);
+        Assert.Equal(1, microTiny.Columns);
+        Assert.Equal(1, microTiny.TasksPerPage);
+        Assert.Equal(1, microTiny.QuotasPerPage);
+
+        var micro = ResponsiveLayoutPolicy.PlanCompact(360, 216);
         Assert.Equal(CompactLayoutKind.MicroCapsule, micro.Kind);
         Assert.Equal(1, micro.Columns);
-        Assert.Equal(1, micro.TasksPerPage);
-        Assert.Equal(1, micro.QuotasPerPage);
+        Assert.Equal(2, micro.TasksPerPage);
+        Assert.Equal(2, micro.QuotasPerPage);
 
-        var ribbon = ResponsiveLayoutPolicy.PlanCompact(520, 196);
+        var ribbon = ResponsiveLayoutPolicy.PlanCompact(520, 216);
         Assert.Equal(CompactLayoutKind.WideRibbon, ribbon.Kind);
         Assert.Equal(2, ribbon.Columns);
         Assert.True(ribbon.TasksPerPage >= 2);
 
-        var tile = ResponsiveLayoutPolicy.PlanCompact(336, 356);
+        var tile = ResponsiveLayoutPolicy.PlanCompact(376, 332);
         Assert.Equal(CompactLayoutKind.CompactTile, tile.Kind);
         Assert.Equal(1, tile.Columns);
         Assert.False(tile.ShowVisualToolTiles);
 
-        var standard = ResponsiveLayoutPolicy.PlanCompact(384, 504);
+        var standard = ResponsiveLayoutPolicy.PlanCompact(412, 468);
         Assert.Equal(CompactLayoutKind.StandardStack, standard.Kind);
         Assert.Equal(1, standard.Columns);
         Assert.True(standard.ShowVisualToolTiles);
         Assert.True(standard.ShowTaskPreview);
 
-        var bento = ResponsiveLayoutPolicy.PlanCompact(560, 480);
+        var bento = ResponsiveLayoutPolicy.PlanCompact(640, 420);
         Assert.Equal(CompactLayoutKind.WideBento, bento.Kind);
         Assert.Equal(2, bento.Columns);
         Assert.True(bento.TasksPerPage >= 4);
