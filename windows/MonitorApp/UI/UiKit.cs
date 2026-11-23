@@ -531,12 +531,47 @@ public static class UiKit
     }
 
     /// <summary>
-    /// Wraps a layout root in an atmospheric Liquid Glass light field (or Custom / Bing Daily Wallpaper with stepless live opacity &amp; blur)
-    /// while keeping foreground ClearType text 100% vector-sharp.
+    /// Stage panel whose desired size is determined strictly by its foreground content,
+    /// preventing high-resolution wallpaper images from inflating SizeToContent modal dialogs.
     /// </summary>
-    public static Grid AmbientStage(UIElement content, bool compact = false)
+    private sealed class BackdropStagePanel : Panel
     {
-        var stage = new Grid();
+        protected override Size MeasureOverride(Size availableSize)
+        {
+            if (InternalChildren.Count < 2)
+                return new Size(0, 0);
+
+            var backdrop = InternalChildren[0];
+            var foreground = InternalChildren[1];
+
+            foreground.Measure(availableSize);
+            var w = double.IsInfinity(availableSize.Width)
+                ? foreground.DesiredSize.Width
+                : Math.Max(foreground.DesiredSize.Width, availableSize.Width);
+            var h = double.IsInfinity(availableSize.Height)
+                ? foreground.DesiredSize.Height
+                : Math.Max(foreground.DesiredSize.Height, availableSize.Height);
+
+            backdrop.Measure(new Size(Math.Max(1.0, w), Math.Max(1.0, h)));
+            return new Size(w, h);
+        }
+
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            var rect = new Rect(0, 0, finalSize.Width, finalSize.Height);
+            for (var i = 0; i < InternalChildren.Count; i++)
+                InternalChildren[i].Arrange(rect);
+            return finalSize;
+        }
+    }
+
+    /// <summary>
+    /// Wraps a layout root in an atmospheric Liquid Glass light field (or Custom / Bing Daily Wallpaper with stepless live opacity &amp; blur)
+    /// while keeping foreground ClearType text 100% vector-sharp and never inflating SizeToContent dialogs.
+    /// </summary>
+    public static Panel AmbientStage(UIElement content, bool compact = false)
+    {
+        var stage = new BackdropStagePanel { ClipToBounds = true };
         var backdropLayer = new Grid { IsHitTestVisible = false, ClipToBounds = true };
         PopulateBackdrop(backdropLayer, compact);
         stage.Children.Add(backdropLayer);

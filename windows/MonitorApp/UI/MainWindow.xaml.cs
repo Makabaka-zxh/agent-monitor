@@ -1046,6 +1046,7 @@ public partial class MainWindow : Window
         var isNano = plan.Kind is CompactLayoutKind.MicroCapsule or CompactLayoutKind.WideRibbon;
         var sidePad = winW < 340 ? 10.0 : 12.0;
         var cardPad = isNano ? 11.5 : 14.0;
+        var innerH = Math.Max(72.0, winH - 34.0 - (sidePad + 2.0) - cardPad * 2.0 - 26.0);
 
         var now = DateTimeOffset.UtcNow;
         var providers = _controller.Usage?.Providers ?? [];
@@ -1060,7 +1061,7 @@ public partial class MainWindow : Window
             .Take(24)
             .ToList();
 
-        FrameworkElement BuildCompactTaskPod(MonitorTask task, bool showMetaRow, bool showPreviewRow)
+        FrameworkElement BuildCompactTaskPod(MonitorTask task, bool showMetaRow, bool showPreviewRow, bool expandedDetail = false, bool tightPad = false)
         {
             var captured = task;
             var statusColor = TaskStatusColor(task);
@@ -1071,8 +1072,9 @@ public partial class MainWindow : Window
             row1.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row1.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row1.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row1.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            var tIcon = UiKit.BrandImage(task.Tool, 14);
+            var tIcon = UiKit.BrandImage(task.Tool, expandedDetail ? 15 : 14);
             tIcon.Margin = new Thickness(0, 0, 6, 0);
             tIcon.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(tIcon, 0);
@@ -1082,7 +1084,7 @@ public partial class MainWindow : Window
             {
                 Text = task.Title,
                 FontFamily = UiKit.AppFont,
-                FontSize = isNano ? 12.0 : 12.8,
+                FontSize = isNano ? 12.0 : (expandedDetail ? 13.2 : 12.6),
                 FontWeight = FontWeights.SemiBold,
                 Foreground = UiKit.TextBrush,
                 TextWrapping = TextWrapping.NoWrap,
@@ -1092,6 +1094,36 @@ public partial class MainWindow : Window
             };
             Grid.SetColumn(titleBlock, 1);
             row1.Children.Add(titleBlock);
+
+            if (expandedDetail)
+            {
+                var devOnline = _controller.Devices.Any(d => d.Id == task.DeviceId && d.Online);
+                var contState = task.EffectiveContinuation(_controller.IsFresh, devOnline);
+                var contLabel = MonitorTask.ContinuationTitleFor(contState);
+                if (!string.IsNullOrEmpty(contLabel))
+                {
+                    var contBadge = new Border
+                    {
+                        Background = UiKit.SurfaceBrush,
+                        BorderBrush = UiKit.GlassSubtleRimBrush,
+                        BorderThickness = new Thickness(0.8),
+                        CornerRadius = new CornerRadius(5.5),
+                        Padding = new Thickness(5.5, 1, 5.5, 1),
+                        Margin = new Thickness(0, 0, 7, 0),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Opacity = 0.88,
+                        Child = new TextBlock
+                        {
+                            Text = contLabel,
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 10.0,
+                            Foreground = contState == "continuable" ? UiKit.AccentBrush : UiKit.MutedBrush
+                        }
+                    };
+                    Grid.SetColumn(contBadge, 2);
+                    row1.Children.Add(contBadge);
+                }
+            }
 
             var statusChip = new Grid { VerticalAlignment = VerticalAlignment.Center };
             statusChip.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1119,13 +1151,13 @@ public partial class MainWindow : Window
             };
             Grid.SetColumn(sTxt, 1);
             statusChip.Children.Add(sTxt);
-            Grid.SetColumn(statusChip, 2);
+            Grid.SetColumn(statusChip, 3);
             row1.Children.Add(statusChip);
 
             var podCol = new StackPanel();
             podCol.Children.Add(row1);
 
-            if (showPreviewRow && !string.IsNullOrWhiteSpace(task.Preview))
+            if ((showPreviewRow || expandedDetail) && !string.IsNullOrWhiteSpace(task.Preview))
             {
                 var cleanPreview = task.Preview!.Replace("\r", " ").Replace("\n", " ").Trim();
                 podCol.Children.Add(new TextBlock
@@ -1134,22 +1166,23 @@ public partial class MainWindow : Window
                     FontFamily = UiKit.AppFont,
                     FontSize = 11.2,
                     Foreground = UiKit.TextBrush,
-                    Opacity = 0.78,
-                    TextWrapping = TextWrapping.NoWrap,
+                    Opacity = 0.80,
+                    TextWrapping = expandedDetail ? TextWrapping.Wrap : TextWrapping.NoWrap,
+                    MaxHeight = expandedDetail ? 32.0 : 18.0,
                     TextTrimming = TextTrimming.CharacterEllipsis,
-                    Margin = new Thickness(20, 2.5, 0, 0)
+                    Margin = new Thickness(20, 3, 0, 0)
                 });
             }
 
-            if (showMetaRow)
+            if (showMetaRow || expandedDetail)
             {
-                var row2 = new Grid { Margin = new Thickness(20, 2.5, 0, 0) };
+                var row2 = new Grid { Margin = new Thickness(20, expandedDetail ? 4 : 2, 0, 0) };
                 row2.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 row2.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
                 var projShort = string.IsNullOrWhiteSpace(task.Project)
                     ? ""
-                    : Path.GetFileName(task.Project!.TrimEnd('/', '\\'));
+                    : (expandedDetail ? task.Project!.Trim() : Path.GetFileName(task.Project!.TrimEnd('/', '\\')));
                 if (string.IsNullOrWhiteSpace(projShort) && !string.IsNullOrWhiteSpace(task.Project))
                     projShort = task.Project!.Trim();
 
@@ -1171,8 +1204,17 @@ public partial class MainWindow : Window
                 row2.Children.Add(leftSubBlock);
 
                 var rightMetaParts = new List<string>();
-                if (task.Usage?.TotalTokens is > 0)
+                if (expandedDetail && task.Usage is { TotalTokens: > 0 } tu)
+                {
+                    if (tu.InputTokens is > 0 && tu.OutputTokens is > 0)
+                        rightMetaParts.Add($"入 {UsageFormatting.CompactTokens(tu.InputTokens)} · 出 {UsageFormatting.CompactTokens(tu.OutputTokens)}");
+                    else
+                        rightMetaParts.Add($"{UsageFormatting.CompactTokens(tu.TotalTokens)} Token");
+                }
+                else if (task.Usage?.TotalTokens is > 0)
+                {
                     rightMetaParts.Add(UsageFormatting.CompactTokens(task.Usage.TotalTokens));
+                }
                 if (!string.IsNullOrEmpty(task.UpdatedAt))
                     rightMetaParts.Add(UsageFormatting.RelativeTime(task.UpdatedAt));
                 if (rightMetaParts.Count > 0)
@@ -1193,13 +1235,21 @@ public partial class MainWindow : Window
             }
 
             var defaultRim = isWaiting ? UiKit.WarningBrush : UiKit.GlassSubtleRimBrush;
+            var pad = isNano
+                ? new Thickness(9, 5, 9, 5)
+                : expandedDetail
+                ? new Thickness(11.5, 9.5, 11.5, 9.5)
+                : tightPad
+                ? new Thickness(9.5, 5.2, 9.5, 5.2)
+                : new Thickness(10, 6.5, 10, 6.5);
+
             var podBorder = new Border
             {
                 Background = UiKit.GlassTrackBrush,
                 BorderBrush = defaultRim,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10.5),
-                Padding = isNano ? new Thickness(9, 5.5, 9, 5.5) : new Thickness(10, 7, 10, 7),
+                CornerRadius = new CornerRadius(10),
+                Padding = pad,
                 SnapsToDevicePixels = true,
                 Child = podCol
             };
@@ -1353,7 +1403,215 @@ public partial class MainWindow : Window
             cards.Add(("总览", new Border()));
         var firstTaskCardIdx = cards.Count;
 
-        // 1. Adaptive Paginated Active Task Cards (1-column on narrow, 2-column Bento grid on WideRibbon / WideBento!)
+        string? GetProviderTopModelsLine(UsageProviderDto? p)
+        {
+            if (p?.History?.Days is not { Count: > 0 } days) return null;
+            var todayStr = UsageCalendar.FormatDay(UsageCalendar.TodayBeijing(now));
+            var targetDay = days.FirstOrDefault(d => d.Day == todayStr && (d.Tokens ?? 0) > 0)
+                            ?? days.LastOrDefault(d => (d.Tokens ?? 0) > 0);
+            if (targetDay is null) return null;
+            var shares = UsageFormatting.ComputeModelShares(targetDay);
+            if (shares.Count == 0) return null;
+            var topParts = shares.Take(2)
+                .Select(s => $"{s.DisplayName} {UsageFormatting.Percentage(s.Percent)}")
+                .ToList();
+            return string.Join(" · ", topParts);
+        }
+
+        FrameworkElement BuildSevenDayTrendPod(double barHeight = 44.0, bool stretchVertical = false)
+        {
+            var bjToday = UsageCalendar.TodayBeijing(now);
+            var dates = Enumerable.Range(0, 7).Select(i => bjToday.AddDays(i - 6)).ToList();
+            var dayTotals = new long[7];
+            for (var i = 0; i < 7; i++)
+            {
+                var ds = UsageCalendar.FormatDay(dates[i]);
+                long sum = 0;
+                foreach (var p in providers)
+                {
+                    var match = p.History?.Days?.FirstOrDefault(x => x.Day == ds);
+                    if (match?.Tokens is > 0) sum += match.Tokens.Value;
+                }
+                if (i == 6 && sum == 0 && todayTotal > 0)
+                    sum = todayTotal;
+                dayTotals[i] = sum;
+            }
+
+            var maxTok = Math.Max(1L, dayTotals.Max());
+            var weekSum = dayTotals.Sum();
+            string WeekdayShort(DayOfWeek dow) => dow switch
+            {
+                DayOfWeek.Monday => "一",
+                DayOfWeek.Tuesday => "二",
+                DayOfWeek.Wednesday => "三",
+                DayOfWeek.Thursday => "四",
+                DayOfWeek.Friday => "五",
+                DayOfWeek.Saturday => "六",
+                _ => "日"
+            };
+
+            var rootGrid = new Grid();
+            rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            rootGrid.RowDefinitions.Add(new RowDefinition { Height = stretchVertical ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+
+            var head = new Grid { Margin = new Thickness(0, 0, 0, 6) };
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.Children.Add(new TextBlock
+            {
+                Text = "近 7 日总 Token 趋势",
+                FontFamily = UiKit.AppFont,
+                FontSize = 11.8,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.TextBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            var sumTxt = new TextBlock
+            {
+                Text = $"7 日 {UsageFormatting.CompactTokens(weekSum)}",
+                FontFamily = UiKit.AppFont,
+                FontSize = 10.8,
+                FontWeight = FontWeights.Medium,
+                Foreground = UiKit.AccentBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(sumTxt, 1);
+            head.Children.Add(sumTxt);
+            Grid.SetRow(head, 0);
+            rootGrid.Children.Add(head);
+
+            var chartGrid = new UniformGrid
+            {
+                Columns = 7,
+                VerticalAlignment = stretchVertical ? VerticalAlignment.Bottom : VerticalAlignment.Top
+            };
+            for (var i = 0; i < 7; i++)
+            {
+                var isToday = i == 6;
+                var tok = dayTotals[i];
+                var hRatio = tok > 0 ? Math.Max(0.12, tok / (double)maxTok) : 0.06;
+                var fillH = Math.Round(barHeight * hRatio, 1);
+
+                var slot = new Grid { Height = barHeight, Margin = new Thickness(2.5, 0, 2.5, 0) };
+                slot.Children.Add(new Border
+                {
+                    Background = UiKit.SurfaceBrush,
+                    CornerRadius = new CornerRadius(4),
+                    Opacity = 0.42
+                });
+                slot.Children.Add(new Border
+                {
+                    Height = fillH,
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                    Background = isToday ? UiKit.AccentBrush : (tok > 0 ? UiKit.MutedBrush : UiKit.LineBrush),
+                    CornerRadius = new CornerRadius(4),
+                    Opacity = isToday ? 0.96 : (tok > 0 ? 0.48 : 0.35)
+                });
+
+                var col = new StackPanel
+                {
+                    Background = Brushes.Transparent,
+                    ToolTip = $"{UsageCalendar.ShortDay(dates[i])}：{UsageFormatting.ExactTokens(tok)} Token"
+                };
+                col.Children.Add(slot);
+                col.Children.Add(new TextBlock
+                {
+                    Text = WeekdayShort(dates[i].DayOfWeek),
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 10.0,
+                    FontWeight = isToday ? FontWeights.SemiBold : FontWeights.Normal,
+                    Foreground = isToday ? UiKit.AccentBrush : UiKit.MutedBrush,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 3.5, 0, 0)
+                });
+                chartGrid.Children.Add(col);
+            }
+            Grid.SetRow(chartGrid, 1);
+            rootGrid.Children.Add(chartGrid);
+
+            return new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10.5),
+                Padding = new Thickness(10.5, 8, 10.5, 7.5),
+                SnapsToDevicePixels = true,
+                Child = rootGrid
+            };
+        }
+
+        FrameworkElement BuildClusterSummaryFillerTile()
+        {
+            var waitingCnt = activeTasks.Count(t => t.EffectiveStatus == "waiting");
+            var runningCnt = activeTasks.Count(t => t.EffectiveStatus == "running");
+            var col = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            var top = new Grid();
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var dot = new Border
+            {
+                Width = 6,
+                Height = 6,
+                CornerRadius = new CornerRadius(3),
+                Background = _controller.OnlineDeviceCount > 0 ? UiKit.GreenBrush : UiKit.MutedBrush,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 6, 0)
+            };
+            Grid.SetColumn(dot, 0);
+            top.Children.Add(dot);
+            var title = new TextBlock
+            {
+                Text = $"在线电脑 {_controller.OnlineDeviceCount} 台",
+                FontFamily = UiKit.AppFont,
+                FontSize = 12.0,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.TextBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(title, 1);
+            top.Children.Add(title);
+            var tok = new TextBlock
+            {
+                Text = $"今日 {UsageFormatting.CompactTokens(todayTotal)}",
+                FontFamily = UiKit.AppFont,
+                FontSize = 10.8,
+                Foreground = UiKit.AccentBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(tok, 2);
+            top.Children.Add(tok);
+            col.Children.Add(top);
+
+            var sub = waitingCnt > 0
+                ? $"待处理 {waitingCnt} 项 · 运行中 {runningCnt} 项 · 点击任一任务展开处理"
+                : $"运行中 {runningCnt} 项 · 点击任一任务直达详情或继续对话";
+            col.Children.Add(new TextBlock
+            {
+                Text = sub,
+                FontFamily = UiKit.AppFont,
+                FontSize = 10.5,
+                Foreground = UiKit.MutedBrush,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(12, 3, 0, 0)
+            });
+
+            return new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(0.8),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 6.5, 10, 6.5),
+                Opacity = 0.88,
+                SnapsToDevicePixels = true,
+                Child = col
+            };
+        }
+
+        // 1. Adaptive Height-Packed Active Task Cards (Zero half-empty pages or 1-item orphans!)
         if (wantTasks)
         {
             if (activeTasks.Count == 0)
@@ -1381,40 +1639,48 @@ public partial class MainWindow : Window
                     cards.Add(("活跃任务 (0)", emptyCol));
                 }
             }
-            else
+            else if (plan.Columns >= 2)
             {
-                var perPage = Math.Max(1, plan.TasksPerPage);
-                var totalPages = (int)Math.Ceiling(activeTasks.Count / (double)perPage);
-                for (var pIdx = 0; pIdx < totalPages; pIdx++)
+                var availTaskH = Math.Max(70.0, innerH - (isNano ? 4.0 : 26.0));
+                var maxRows = isNano
+                    ? Math.Clamp((int)Math.Floor((availTaskH + 5.0) / (plan.ShowTaskMeta ? 48.0 : 36.0)), 1, 2)
+                    : Math.Clamp((int)Math.Floor((availTaskH + 6.0) / (plan.ShowTaskMeta ? 52.0 : 40.0)), 2, 5);
+                var perPage = Math.Max(2, maxRows * 2);
+                var taskSlices = new List<List<MonitorTask>>();
+                for (var idx = 0; idx < activeTasks.Count; idx += perPage)
+                    taskSlices.Add(activeTasks.Skip(idx).Take(perPage).ToList());
+
+                var startOffset = 0;
+                for (var pIdx = 0; pIdx < taskSlices.Count; pIdx++)
                 {
-                    var slice = activeTasks.Skip(pIdx * perPage).Take(perPage).ToList();
-                    var startNo = pIdx * perPage + 1;
-                    var endNo = startNo + slice.Count - 1;
-                    var rangeLabel = activeTasks.Count <= perPage
+                    var slice = taskSlices[pIdx];
+                    var startNo = startOffset + 1;
+                    var endNo = startOffset + slice.Count;
+                    startOffset = endNo;
+                    var rangeLabel = taskSlices.Count == 1
                         ? $"共 {activeTasks.Count} 项"
                         : $"{startNo}–{endNo} / {activeTasks.Count}";
 
+                    var useRich = !isNano && slice.Count <= 4 && availTaskH >= 220.0;
+                    var pods = slice.Select(t => BuildCompactTaskPod(t, plan.ShowTaskMeta, plan.ShowTaskPreview, expandedDetail: useRich)).ToList();
+                    if (!isNano && pods.Count % 2 == 1 && pods.Count >= 3)
+                        pods.Add(BuildClusterSummaryFillerTile());
+
                     var pageCol = new StackPanel { ClipToBounds = true };
-                    if (plan.Kind != CompactLayoutKind.MicroCapsule)
+                    if (!isNano)
                     {
                         var headGrid = new Grid { Margin = new Thickness(0, 0, 0, 7) };
                         headGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                         headGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-                        var hLeft = new TextBlock
+                        headGrid.Children.Add(new TextBlock
                         {
-                            Text = plan.Columns >= 2 ? "活跃任务双栏看板" : "活跃任务",
+                            Text = "活跃任务双栏看板",
                             FontFamily = UiKit.AppFont,
                             FontSize = 12.8,
                             FontWeight = FontWeights.SemiBold,
                             Foreground = UiKit.TextBrush,
-                            TextWrapping = TextWrapping.NoWrap,
-                            TextTrimming = TextTrimming.CharacterEllipsis,
                             VerticalAlignment = VerticalAlignment.Center
-                        };
-                        Grid.SetColumn(hLeft, 0);
-                        headGrid.Children.Add(hLeft);
-
+                        });
                         var hRight = new TextBlock
                         {
                             Text = rangeLabel,
@@ -1428,10 +1694,123 @@ public partial class MainWindow : Window
                         pageCol.Children.Add(headGrid);
                     }
 
-                    var pods = slice.Select(t => BuildCompactTaskPod(t, plan.ShowTaskMeta, plan.ShowTaskPreview)).ToList();
-                    pageCol.Children.Add(BuildResponsiveCardGrid(pods, plan.Columns, gap: isNano ? 5.0 : 6.5));
+                    pageCol.Children.Add(BuildResponsiveCardGrid(pods, 2, gap: isNano ? 5.0 : 6.5));
+                    if (useRich && slice.Count <= 2 && availTaskH >= 260.0)
+                    {
+                        var trend = BuildSevenDayTrendPod(barHeight: 36.0);
+                        if (trend is FrameworkElement tfe) tfe.Margin = new Thickness(0, 8, 0, 0);
+                        pageCol.Children.Add(trend);
+                    }
 
-                    var pageTitle = totalPages > 1
+                    var pageTitle = taskSlices.Count > 1
+                        ? $"活跃任务 ({startNo}–{endNo}/{activeTasks.Count})"
+                        : $"活跃任务 ({activeTasks.Count})";
+                    cards.Add((pageTitle, pageCol));
+                }
+            }
+            else
+            {
+                // 1-Column Greedy Pixel-Height Bin Packer (packs actual task heights instead of worst-case assumptions!)
+                var showHeader = plan.Kind != CompactLayoutKind.MicroCapsule;
+                var availTaskH = Math.Max(68.0, innerH - (showHeader ? 24.0 : 0.0));
+                var rowGap = isNano ? 5.0 : 5.5;
+
+                double EstimatePodHeight(MonitorTask t, bool tight = false)
+                {
+                    var hasPrev = plan.ShowTaskPreview && !string.IsNullOrWhiteSpace(t.Preview);
+                    if (isNano) return plan.ShowTaskMeta ? 45.0 : 33.0;
+                    if (hasPrev) return tight ? 60.0 : 64.0;
+                    if (plan.ShowTaskMeta) return tight ? 43.0 : 47.0;
+                    return 34.0;
+                }
+
+                var taskSlices = new List<(List<MonitorTask> Items, bool TightPad)>();
+                var curSlice = new List<MonitorTask>();
+                double curH = 0;
+                foreach (var t in activeTasks)
+                {
+                    var th = EstimatePodHeight(t);
+                    var needed = curSlice.Count == 0 ? th : th + rowGap;
+                    if (curSlice.Count > 0 && curH + needed > availTaskH)
+                    {
+                        taskSlices.Add((curSlice, false));
+                        curSlice = [t];
+                        curH = th;
+                    }
+                    else
+                    {
+                        curSlice.Add(t);
+                        curH += needed;
+                    }
+                }
+                if (curSlice.Count > 0)
+                    taskSlices.Add((curSlice, false));
+
+                // Absorb 1-item orphan tail page if slight padding tightening fits all onto the previous page!
+                if (!isNano && taskSlices.Count >= 2 && taskSlices[^1].Items.Count == 1)
+                {
+                    var merged = taskSlices[^2].Items.Concat(taskSlices[^1].Items).ToList();
+                    var tightSum = merged.Sum(t => EstimatePodHeight(t, tight: true)) + Math.Max(0, merged.Count - 1) * 4.5;
+                    if (tightSum <= availTaskH + 4.0)
+                    {
+                        taskSlices.RemoveAt(taskSlices.Count - 1);
+                        taskSlices[^1] = (merged, true);
+                    }
+                }
+
+                var startOffset = 0;
+                for (var pIdx = 0; pIdx < taskSlices.Count; pIdx++)
+                {
+                    var (slice, useTight) = taskSlices[pIdx];
+                    var startNo = startOffset + 1;
+                    var endNo = startOffset + slice.Count;
+                    startOffset = endNo;
+                    var rangeLabel = taskSlices.Count == 1
+                        ? $"共 {activeTasks.Count} 项"
+                        : $"{startNo}–{endNo} / {activeTasks.Count}";
+
+                    var naturalH = slice.Sum(t => EstimatePodHeight(t, useTight)) + Math.Max(0, slice.Count - 1) * (useTight ? 4.5 : rowGap);
+                    var expandSparse = !isNano && !useTight && slice.Count <= 4 && naturalH < availTaskH * 0.68 && availTaskH >= 240.0;
+
+                    var pageCol = new StackPanel { ClipToBounds = true };
+                    if (showHeader)
+                    {
+                        var headGrid = new Grid { Margin = new Thickness(0, 0, 0, useTight ? 5 : 7) };
+                        headGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                        headGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                        headGrid.Children.Add(new TextBlock
+                        {
+                            Text = "活跃任务",
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 12.8,
+                            FontWeight = FontWeights.SemiBold,
+                            Foreground = UiKit.TextBrush,
+                            VerticalAlignment = VerticalAlignment.Center
+                        });
+                        var hRight = new TextBlock
+                        {
+                            Text = rangeLabel,
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 11,
+                            Foreground = UiKit.MutedBrush,
+                            VerticalAlignment = VerticalAlignment.Center
+                        };
+                        Grid.SetColumn(hRight, 1);
+                        headGrid.Children.Add(hRight);
+                        pageCol.Children.Add(headGrid);
+                    }
+
+                    var pods = slice.Select(t => BuildCompactTaskPod(t, plan.ShowTaskMeta, plan.ShowTaskPreview, expandedDetail: expandSparse, tightPad: useTight)).ToList();
+                    pageCol.Children.Add(BuildResponsiveCardGrid(pods, 1, gap: useTight ? 4.5 : (expandSparse ? 7.5 : rowGap)));
+
+                    if (expandSparse && slice.Count <= 3 && availTaskH >= 295.0)
+                    {
+                        var filler = BuildClusterSummaryFillerTile();
+                        if (filler is FrameworkElement ffe) ffe.Margin = new Thickness(0, 7.5, 0, 0);
+                        pageCol.Children.Add(filler);
+                    }
+
+                    var pageTitle = taskSlices.Count > 1
                         ? $"活跃任务 ({startNo}–{endNo}/{activeTasks.Count})"
                         : $"活跃任务 ({activeTasks.Count})";
                     cards.Add((pageTitle, pageCol));
@@ -1441,177 +1820,299 @@ public partial class MainWindow : Window
 
         var firstQuotaCardIdx = cards.Count;
 
-        // 2. Adaptive Official Quota Cards (2-Column Bento Grid when WideBento / WideRibbon, Per-Provider Cards when 1-Column!)
+        // 2. High-Utilization Quota & Local Usage Cards (2×2 Full Bento Matrix on WideBento; Packed Multi-Provider Pods on Standard/Compact!)
         if (wantQuotas)
         {
-            if (plan.Columns >= 2 && allFlatQuotas.Count > 1)
+            (FrameworkElement Element, double EstimatedHeight) BuildProviderSummaryPod(string tool, int maxQuotasInPod = 6, bool stretchForBento = false)
             {
-                // Multi-column Bento Quota Matrix: pairs quota windows in 2 crisp side-by-side columns without stretching!
-                var perPage = Math.Max(2, plan.QuotasPerPage);
-                var qPages = (int)Math.Ceiling(allFlatQuotas.Count / (double)perPage);
-                for (var qp = 0; qp < qPages; qp++)
+                var p = providers.FirstOrDefault(x => x.Tool == tool);
+                var brand = MonitorTask.BrandFor(tool);
+                var sources = UsageFormatting.VisibleSources(p, now);
+                var flatQuotas = new List<(string? SourceLabel, UsageQuotaDto Quota)>();
+                foreach (var src in sources)
                 {
-                    var qSlice = allFlatQuotas.Skip(qp * perPage).Take(perPage).ToList();
-                    foreach (var item in qSlice)
-                        toolFirstQuotaCardIndex.TryAdd(item.Tool, cards.Count);
+                    var srcLabel = sources.Count > 1 ? src.Name : null;
+                    foreach (var q in src.Quotas)
+                        flatQuotas.Add((srcLabel, q));
+                }
 
-                    var qPageCol = new StackPanel { ClipToBounds = true };
-                    if (!isNano)
+                var col = new StackPanel { VerticalAlignment = stretchForBento ? VerticalAlignment.Center : VerticalAlignment.Top };
+                var hGrid = new Grid { Margin = new Thickness(0, 0, 0, isNano ? 4 : 6) };
+                hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var icon = UiKit.BrandImage(tool, 14.5);
+                icon.Margin = new Thickness(0, 0, 6, 0);
+                icon.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(icon, 0);
+                hGrid.Children.Add(icon);
+
+                var bTxt = new TextBlock
+                {
+                    Text = brand,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 12.5,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = UiKit.TextBrush,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                Grid.SetColumn(bTxt, 1);
+                hGrid.Children.Add(bTxt);
+
+                var tokRight = p?.TodayTokens is > 0
+                    ? $"今日 {UsageFormatting.CompactTokens(p.TodayTokens)}"
+                    : "今日 0";
+                var tokTxt = new TextBlock
+                {
+                    Text = tokRight,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 10.8,
+                    FontWeight = FontWeights.Medium,
+                    Foreground = p?.TodayTokens is > 0 ? UiKit.AccentBrush : UiKit.MutedBrush,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                Grid.SetColumn(tokTxt, 2);
+                hGrid.Children.Add(tokTxt);
+                col.Children.Add(hGrid);
+
+                double estH = 36.0;
+                var shownQuotas = flatQuotas.Take(maxQuotasInPod).ToList();
+                if (shownQuotas.Count == 0)
+                {
+                    var chk = checks.FirstOrDefault(c => c.Tool == tool);
+                    var toolActiveCnt = activeTasks.Count(t => t.Tool == tool);
+                    var fallbackMsg = chk is not null
+                        ? UsageFormatting.QuotaCheckText(chk.EffectiveState)
+                        : (toolActiveCnt > 0 ? $"当前 {toolActiveCnt} 个活跃会话 · 暂无官方窗口读数" : "暂未收到官方额度窗口读数");
+                    col.Children.Add(new TextBlock
                     {
-                        var hGrid = new Grid { Margin = new Thickness(0, 0, 0, 8) };
-                        hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                        hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-                        var hLeft = new TextBlock
-                        {
-                            Text = "官方额度双栏矩阵",
-                            FontFamily = UiKit.AppFont,
-                            FontSize = 12.8,
-                            FontWeight = FontWeights.SemiBold,
-                            Foreground = UiKit.TextBrush,
-                            VerticalAlignment = VerticalAlignment.Center
-                        };
-                        Grid.SetColumn(hLeft, 0);
-                        hGrid.Children.Add(hLeft);
-
-                        var hRight = new TextBlock
-                        {
-                            Text = $"今日合计 {UsageFormatting.CompactTokens(todayTotal)} Token",
-                            FontFamily = UiKit.AppFont,
-                            FontSize = 11,
-                            Foreground = UiKit.AccentBrush,
-                            VerticalAlignment = VerticalAlignment.Center
-                        };
-                        Grid.SetColumn(hRight, 1);
-                        hGrid.Children.Add(hRight);
-                        qPageCol.Children.Add(hGrid);
+                        Text = fallbackMsg,
+                        FontFamily = UiKit.AppFont,
+                        FontSize = 10.8,
+                        Foreground = UiKit.MutedBrush,
+                        TextWrapping = TextWrapping.NoWrap,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        Margin = new Thickness(0, 1, 0, 2)
+                    });
+                    estH += 20.0;
+                }
+                else
+                {
+                    for (var qi = 0; qi < shownQuotas.Count; qi++)
+                    {
+                        var (srcLbl, q) = shownQuotas[qi];
+                        var rawTitle = UsageFormatting.QuotaDisplayTitle(q);
+                        var fullTitle = string.IsNullOrEmpty(srcLbl) ? rawTitle : $"{srcLbl} · {rawTitle}";
+                        var row = BuildQuotaItemRow(null, fullTitle, q);
+                        if (qi < shownQuotas.Count - 1)
+                            row.Margin = new Thickness(0, 0, 0, isNano ? 4.5 : 6.0);
+                        col.Children.Add(row);
+                        estH += 44.0;
                     }
+                }
 
-                    var tiles = qSlice.Select(entry =>
+                var topModels = !isNano && shownQuotas.Count <= 2 ? GetProviderTopModelsLine(p) : null;
+                if (!string.IsNullOrEmpty(topModels))
+                {
+                    col.Children.Add(new TextBlock
+                    {
+                        Text = $"今日模型：{topModels}",
+                        FontFamily = UiKit.AppFont,
+                        FontSize = 10.3,
+                        Foreground = UiKit.MutedBrush,
+                        TextWrapping = TextWrapping.NoWrap,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        Margin = new Thickness(0, 5, 0, 0)
+                    });
+                    estH += 19.0;
+                }
+
+                var podBd = new Border
+                {
+                    Background = UiKit.GlassTrackBrush,
+                    BorderBrush = UiKit.GlassSubtleRimBrush,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(10.5),
+                    Padding = new Thickness(10.5, 8, 10.5, 8),
+                    SnapsToDevicePixels = true,
+                    Child = col
+                };
+                return (podBd, estH);
+            }
+
+            if (plan.Kind == CompactLayoutKind.WideBento)
+            {
+                // Full-Bleed 2×2 Executive Bento Matrix: [Codex | Antigravity] over [Claude Code | 7-Day Trend]
+                var matrixCardIdx = cards.Count;
+                foreach (var t in new[] { "codex", "claude", "antigravity" })
+                    toolFirstQuotaCardIndex[t] = matrixCardIdx;
+
+                var matrixGrid = new Grid
+                {
+                    Height = Math.Max(210.0, innerH - 2.0),
+                    ClipToBounds = true
+                };
+                matrixGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                matrixGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(9) });
+                matrixGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                matrixGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                matrixGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(9) });
+                matrixGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+                var (codexTile, _) = BuildProviderSummaryPod("codex", maxQuotasInPod: 2, stretchForBento: true);
+                Grid.SetRow(codexTile, 0);
+                Grid.SetColumn(codexTile, 0);
+                matrixGrid.Children.Add(codexTile);
+
+                var secondRightTool = providers.Any(p => p.Tool == "antigravity") || checks.Any(c => c.Tool == "antigravity")
+                    ? "antigravity"
+                    : "claude";
+                var (trTile, _) = BuildProviderSummaryPod(secondRightTool, maxQuotasInPod: 2, stretchForBento: true);
+                Grid.SetRow(trTile, 0);
+                Grid.SetColumn(trTile, 2);
+                matrixGrid.Children.Add(trTile);
+
+                var bottomLeftTool = secondRightTool == "antigravity" ? "claude" : "antigravity";
+                var (blTile, _) = BuildProviderSummaryPod(bottomLeftTool, maxQuotasInPod: 2, stretchForBento: true);
+                Grid.SetRow(blTile, 2);
+                Grid.SetColumn(blTile, 0);
+                matrixGrid.Children.Add(blTile);
+
+                var brTrend = BuildSevenDayTrendPod(barHeight: Math.Clamp((innerH - 96.0) * 0.42, 34.0, 62.0), stretchVertical: true);
+                Grid.SetRow(brTrend, 2);
+                Grid.SetColumn(brTrend, 2);
+                matrixGrid.Children.Add(brTrend);
+
+                cards.Add(("额度与今日用量", matrixGrid));
+
+                // If any provider has > 2 quota windows, append an overflow Bento page so zero windows are omitted
+                var overflowQuotas = new List<(string Tool, string Brand, string? SourceLabel, UsageQuotaDto Quota)>();
+                foreach (var tool in displayedTools)
+                {
+                    var p = providers.FirstOrDefault(x => x.Tool == tool);
+                    var brand = MonitorTask.BrandFor(tool);
+                    var sources = UsageFormatting.VisibleSources(p, now);
+                    var list = new List<(string? SourceLabel, UsageQuotaDto Quota)>();
+                    foreach (var src in sources)
+                    {
+                        var sl = sources.Count > 1 ? src.Name : null;
+                        foreach (var q in src.Quotas) list.Add((sl, q));
+                    }
+                    foreach (var extra in list.Skip(2))
+                        overflowQuotas.Add((tool, brand, extra.SourceLabel, extra.Quota));
+                }
+                if (overflowQuotas.Count > 0)
+                {
+                    var extraTiles = overflowQuotas.Take(6).Select(entry =>
                     {
                         var raw = UsageFormatting.QuotaDisplayTitle(entry.Quota);
-                        var lbl = string.IsNullOrEmpty(entry.SourceLabel)
-                            ? $"{entry.Brand} · {raw}"
-                            : $"{entry.Brand} ({entry.SourceLabel}) · {raw}";
-                        var row = BuildQuotaItemRow(entry.Tool, lbl, entry.Quota);
+                        var lbl = string.IsNullOrEmpty(entry.SourceLabel) ? $"{entry.Brand} · {raw}" : $"{entry.Brand} ({entry.SourceLabel}) · {raw}";
                         return (FrameworkElement)new Border
                         {
                             Background = UiKit.GlassTrackBrush,
                             BorderBrush = UiKit.GlassSubtleRimBrush,
                             BorderThickness = new Thickness(1),
                             CornerRadius = new CornerRadius(10),
-                            Padding = new Thickness(9.5, 7, 9.5, 7),
-                            SnapsToDevicePixels = true,
-                            Child = row
+                            Padding = new Thickness(10, 7.5, 10, 7.5),
+                            Child = BuildQuotaItemRow(entry.Tool, lbl, entry.Quota)
                         };
                     }).ToList();
+                    cards.Add(("更多额度窗口", BuildResponsiveCardGrid(extraTiles, 2, gap: 7.5)));
+                }
+            }
+            else if (plan.Columns >= 2 && allFlatQuotas.Count > 0)
+            {
+                // WideRibbon (< 250h, >= 450w): 2 side-by-side quota tiles per page
+                var qPages = (int)Math.Ceiling(allFlatQuotas.Count / 2.0);
+                for (var qp = 0; qp < qPages; qp++)
+                {
+                    var qSlice = allFlatQuotas.Skip(qp * 2).Take(2).ToList();
+                    foreach (var item in qSlice)
+                        toolFirstQuotaCardIndex.TryAdd(item.Tool, cards.Count);
 
-                    qPageCol.Children.Add(BuildResponsiveCardGrid(tiles, 2, gap: 7.0));
-                    var title = qPages > 1 ? $"官方额度 ({qp + 1}/{qPages})" : "官方额度矩阵";
-                    cards.Add((title, qPageCol));
+                    var tiles = qSlice.Select(entry =>
+                    {
+                        var raw = UsageFormatting.QuotaDisplayTitle(entry.Quota);
+                        var lbl = string.IsNullOrEmpty(entry.SourceLabel) ? $"{entry.Brand} · {raw}" : $"{entry.Brand} ({entry.SourceLabel}) · {raw}";
+                        return (FrameworkElement)new Border
+                        {
+                            Background = UiKit.GlassTrackBrush,
+                            BorderBrush = UiKit.GlassSubtleRimBrush,
+                            BorderThickness = new Thickness(1),
+                            CornerRadius = new CornerRadius(10),
+                            Padding = new Thickness(9.5, 6.5, 9.5, 6.5),
+                            Child = BuildQuotaItemRow(entry.Tool, lbl, entry.Quota)
+                        };
+                    }).ToList();
+                    cards.Add((qPages > 1 ? $"官方额度 ({qp + 1}/{qPages})" : "官方额度", BuildResponsiveCardGrid(tiles, 2, gap: 7.0)));
                 }
             }
             else
             {
-                var quotasPerCard = Math.Max(1, plan.QuotasPerPage);
+                // 1-Column Packed Provider Pods + 7-Day Trend (Packs Codex + Antigravity + Claude onto full-height pages instead of sparse 1-tool pages!)
+                var podEntries = new List<(List<string> Tools, FrameworkElement Element, double Height)>();
                 foreach (var tool in displayedTools)
                 {
                     var p = providers.FirstOrDefault(x => x.Tool == tool);
-                    var brand = MonitorTask.BrandFor(tool);
-                    var sources = UsageFormatting.VisibleSources(p, now);
-                    var flatQuotas = new List<(string? SourceLabel, UsageQuotaDto Quota)>();
-                    foreach (var src in sources)
+                    var hasData = (p?.Quotas?.Any(q => !q.Stale && !q.IsExpired(now)) == true)
+                                  || (p?.TodayTokens is > 0)
+                                  || checks.Any(c => c.Tool == tool)
+                                  || ui.CompactContentMode == "quotas";
+                    if (!hasData) continue;
+
+                    var maxQ = isNano ? 2 : 4;
+                    var (podEl, estH) = BuildProviderSummaryPod(tool, maxQuotasInPod: maxQ);
+                    podEntries.Add(([tool], podEl, estH));
+                }
+
+                if (!isNano && innerH >= 220.0 && (todayTotal > 0 || providers.Any(p => p.History?.Days?.Count > 0)))
+                {
+                    var trendPod = BuildSevenDayTrendPod(barHeight: 38.0);
+                    podEntries.Add(([], trendPod, 84.0));
+                }
+
+                var packedPages = new List<List<(List<string> Tools, FrameworkElement Element, double Height)>>();
+                var curPack = new List<(List<string> Tools, FrameworkElement Element, double Height)>();
+                double curPackH = 0;
+                var packGap = isNano ? 5.5 : 7.0;
+
+                foreach (var entry in podEntries)
+                {
+                    var needed = curPack.Count == 0 ? entry.Height : entry.Height + packGap;
+                    if (curPack.Count > 0 && curPackH + needed > innerH + 6.0)
                     {
-                        var srcLabel = sources.Count > 1 ? src.Name : null;
-                        foreach (var q in src.Quotas)
-                            flatQuotas.Add((srcLabel, q));
-                    }
-
-                    toolFirstQuotaCardIndex[tool] = cards.Count;
-
-                    Border BuildProviderHeader(string? pageSuffix = null)
-                    {
-                        var hGrid = new Grid { Margin = new Thickness(0, 0, 0, isNano ? 5 : 8) };
-                        hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                        hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                        hGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-                        var icon = UiKit.BrandImage(tool, 15);
-                        icon.Margin = new Thickness(0, 0, 6, 0);
-                        icon.VerticalAlignment = VerticalAlignment.Center;
-                        Grid.SetColumn(icon, 0);
-                        hGrid.Children.Add(icon);
-
-                        var bTxt = new TextBlock
-                        {
-                            Text = string.IsNullOrEmpty(pageSuffix) ? brand : $"{brand} · {pageSuffix}",
-                            FontFamily = UiKit.AppFont,
-                            FontSize = 13,
-                            FontWeight = FontWeights.SemiBold,
-                            Foreground = UiKit.TextBrush,
-                            TextWrapping = TextWrapping.NoWrap,
-                            TextTrimming = TextTrimming.CharacterEllipsis,
-                            VerticalAlignment = VerticalAlignment.Center,
-                            Margin = new Thickness(0, 0, 8, 0)
-                        };
-                        Grid.SetColumn(bTxt, 1);
-                        hGrid.Children.Add(bTxt);
-
-                        if (p?.TodayTokens is >= 0)
-                        {
-                            var tokTxt = new TextBlock
-                            {
-                                Text = $"今日 {UsageFormatting.CompactTokens(p.TodayTokens)}",
-                                FontFamily = UiKit.AppFont,
-                                FontSize = 11,
-                                Foreground = UiKit.MutedBrush,
-                                VerticalAlignment = VerticalAlignment.Center
-                            };
-                            Grid.SetColumn(tokTxt, 2);
-                            hGrid.Children.Add(tokTxt);
-                        }
-                        return new Border { Child = hGrid };
-                    }
-
-                    if (flatQuotas.Count == 0)
-                    {
-                        if (ui.CompactContentMode == "quotas" || p?.TodayTokens is > 0 || checks.Any(c => c.Tool == tool))
-                        {
-                            var emptyQCol = new StackPanel();
-                            emptyQCol.Children.Add(BuildProviderHeader());
-                            var chk = checks.FirstOrDefault(c => c.Tool == tool);
-                            var msg = chk is not null ? UsageFormatting.QuotaCheckText(chk.EffectiveState) : "暂未收到官方额度读数";
-                            var msgBlock = UiKit.Body(msg, 11.5, UiKit.MutedBrush);
-                            msgBlock.Margin = new Thickness(0, 4, 0, 0);
-                            emptyQCol.Children.Add(msgBlock);
-                            cards.Add(($"{brand} 官方额度", emptyQCol));
-                        }
+                        packedPages.Add(curPack);
+                        curPack = [entry];
+                        curPackH = entry.Height;
                     }
                     else
                     {
-                        var qPages = (int)Math.Ceiling(flatQuotas.Count / (double)quotasPerCard);
-                        for (var qp = 0; qp < qPages; qp++)
-                        {
-                            var qSlice = flatQuotas.Skip(qp * quotasPerCard).Take(quotasPerCard).ToList();
-                            var suffix = qPages > 1 ? $"{qp + 1}/{qPages}" : null;
-                            var qCol = new StackPanel { ClipToBounds = true };
-                            qCol.Children.Add(BuildProviderHeader(suffix));
-
-                            for (var qi = 0; qi < qSlice.Count; qi++)
-                            {
-                                var (srcLbl, q) = qSlice[qi];
-                                var rawTitle = UsageFormatting.QuotaDisplayTitle(q);
-                                var fullTitle = string.IsNullOrEmpty(srcLbl) ? rawTitle : $"{srcLbl} · {rawTitle}";
-                                var row = BuildQuotaItemRow(null, fullTitle, q);
-                                if (qi < qSlice.Count - 1)
-                                    row.Margin = new Thickness(0, 0, 0, isNano ? 5 : 8.5);
-                                qCol.Children.Add(row);
-                            }
-
-                            var cTitle = qPages > 1 ? $"{brand} 额度 ({qp + 1}/{qPages})" : $"{brand} 官方额度";
-                            cards.Add((cTitle, qCol));
-                        }
+                        curPack.Add(entry);
+                        curPackH += needed;
                     }
+                }
+                if (curPack.Count > 0)
+                    packedPages.Add(curPack);
+
+                for (var pi = 0; pi < packedPages.Count; pi++)
+                {
+                    var pack = packedPages[pi];
+                    var cardIdx = cards.Count;
+                    var pageCol = new StackPanel { ClipToBounds = true };
+                    for (var ei = 0; ei < pack.Count; ei++)
+                    {
+                        foreach (var t in pack[ei].Tools)
+                            toolFirstQuotaCardIndex.TryAdd(t, cardIdx);
+                        if (ei < pack.Count - 1)
+                            pack[ei].Element.Margin = new Thickness(0, 0, 0, packGap);
+                        pageCol.Children.Add(pack[ei].Element);
+                    }
+
+                    var title = packedPages.Count == 1
+                        ? "额度与今日用量"
+                        : $"额度与用量 ({pi + 1}/{packedPages.Count})";
+                    cards.Add((title, pageCol));
                 }
             }
         }
@@ -1871,7 +2372,7 @@ public partial class MainWindow : Window
 
                 if (allFlatQuotas.Count == 0)
                 {
-                    qCol.Children.Add(UiKit.Body("暂未收到官方额度读数", 11.5, UiKit.MutedBrush));
+                    qCol.Children.Add(BuildSevenDayTrendPod(barHeight: 46.0));
                 }
                 else
                 {
@@ -1892,6 +2393,13 @@ public partial class MainWindow : Window
                         };
                         qCol.Children.Add(qRowBox);
                     }
+                    // When only 1-2 quotas exist, fill remaining bottom-left space with the 7-day trend sparkline!
+                    if (qShow <= 2 && innerH >= 275.0)
+                    {
+                        var miniTrend = BuildSevenDayTrendPod(barHeight: qShow == 1 ? 42.0 : 28.0);
+                        if (miniTrend is FrameworkElement mt) mt.Margin = new Thickness(0, 6, 0, 0);
+                        qCol.Children.Add(miniTrend);
+                    }
                 }
                 Grid.SetColumn(qCol, 0);
                 bottomSplit.Children.Add(qCol);
@@ -1902,6 +2410,8 @@ public partial class MainWindow : Window
 
                 // Bottom-Right: Active Tasks Column
                 var tCol = new StackPanel { ClipToBounds = true };
+                var availRightH = Math.Max(90.0, innerH - 86.0);
+                var dynamicBentoTasks = Math.Clamp((int)Math.Floor((availRightH - 22.0) / (plan.ShowTaskMeta ? 50.0 : 38.0)), 2, 5);
                 var tHead = new Grid { Margin = new Thickness(2, 0, 2, 6) };
                 tHead.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                 tHead.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -1913,7 +2423,7 @@ public partial class MainWindow : Window
                     FontWeight = FontWeights.SemiBold,
                     Foreground = UiKit.MutedBrush
                 });
-                if (activeTasks.Count > plan.OverviewTaskCount && cards.Count > firstTaskCardIdx)
+                if (activeTasks.Count > dynamicBentoTasks && cards.Count > firstTaskCardIdx)
                 {
                     var moreT = UiKit.LinkButton("翻页 →", () => JumpCompactCard(firstTaskCardIdx));
                     Grid.SetColumn(moreT, 1);
@@ -1936,11 +2446,11 @@ public partial class MainWindow : Window
                 }
                 else
                 {
-                    var tShow = Math.Min(plan.OverviewTaskCount, activeTasks.Count);
+                    var tShow = Math.Min(dynamicBentoTasks, activeTasks.Count);
                     for (var ti = 0; ti < tShow; ti++)
                     {
-                        var pod = BuildCompactTaskPod(activeTasks[ti], plan.ShowTaskMeta, plan.ShowTaskPreview);
-                        if (ti < tShow - 1) pod.Margin = new Thickness(0, 0, 0, 5.5);
+                        var pod = BuildCompactTaskPod(activeTasks[ti], plan.ShowTaskMeta, showPreviewRow: false);
+                        if (ti < tShow - 1) pod.Margin = new Thickness(0, 0, 0, 5.0);
                         tCol.Children.Add(pod);
                     }
                 }
@@ -2133,11 +2643,11 @@ public partial class MainWindow : Window
                     {
                         Height = 1,
                         Background = UiKit.GlassSubtleRimBrush,
-                        Margin = new Thickness(0, 9, 0, 7),
+                        Margin = new Thickness(0, 8, 0, 6.5),
                         Opacity = 0.65
                     });
 
-                    var spotHeader = new Grid { Margin = new Thickness(0, 0, 0, 6) };
+                    var spotHeader = new Grid { Margin = new Thickness(0, 0, 0, 5.5) };
                     spotHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                     spotHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -2155,7 +2665,12 @@ public partial class MainWindow : Window
                     Grid.SetColumn(shLeft, 0);
                     spotHeader.Children.Add(shLeft);
 
-                    if (cards.Count > firstTaskCardIdx)
+                    var usedTopH = (hasPrimary ? 62.0 : 0.0) + (ui.CompactShowToolStrip ? (plan.ShowVisualToolTiles ? 58.0 : 40.0) : 0.0) + 34.0;
+                    var remForTasks = Math.Max(46.0, innerH - usedTopH);
+                    var dynamicSpotMax = Math.Clamp((int)Math.Floor((remForTasks + 5.0) / (plan.ShowTaskMeta ? 51.0 : 38.0)), 1, 5);
+                    var spotCount = Math.Min(dynamicSpotMax, activeTasks.Count);
+
+                    if (activeTasks.Count > spotCount && cards.Count > firstTaskCardIdx)
                     {
                         var jumpTasksBtn = UiKit.LinkButton("更多 ↓", () => JumpCompactCard(firstTaskCardIdx));
                         Grid.SetColumn(jumpTasksBtn, 1);
@@ -2163,14 +2678,20 @@ public partial class MainWindow : Window
                     }
                     heroCol.Children.Add(spotHeader);
 
-                    var spotCount = Math.Min(plan.OverviewTaskCount, activeTasks.Count);
+                    var enrichSingleSpot = spotCount <= 2 && remForTasks >= 165.0;
                     for (var si = 0; si < spotCount; si++)
                     {
-                        var pod = BuildCompactTaskPod(activeTasks[si], plan.ShowTaskMeta, showPreviewRow: false);
+                        var pod = BuildCompactTaskPod(activeTasks[si], plan.ShowTaskMeta, showPreviewRow: enrichSingleSpot, expandedDetail: enrichSingleSpot);
                         if (si < spotCount - 1)
-                            pod.Margin = new Thickness(0, 0, 0, 5.5);
+                            pod.Margin = new Thickness(0, 0, 0, 5.0);
                         heroCol.Children.Add(pod);
                     }
+                }
+                else if (ui.CompactContentMode == "overview" && activeTasks.Count == 0 && innerH >= 240.0)
+                {
+                    var idleTrend = BuildSevenDayTrendPod(barHeight: 42.0);
+                    if (idleTrend is FrameworkElement itf) itf.Margin = new Thickness(0, 10, 0, 0);
+                    heroCol.Children.Add(idleTrend);
                 }
 
                 cards[0] = ("今日额度总览", heroCol);

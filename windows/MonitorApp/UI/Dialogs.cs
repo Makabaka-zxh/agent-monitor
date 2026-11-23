@@ -15,11 +15,13 @@ public static class Dialogs
 {
     private static Window CreateModal(Window owner, string title, double width = 450)
     {
+        var maxModalH = Math.Max(480.0, SystemParameters.WorkArea.Height - 56.0);
         var win = new Window
         {
             Owner = owner,
             Title = title,
             Width = width,
+            MaxHeight = maxModalH,
             SizeToContent = SizeToContent.Height,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize,
@@ -41,6 +43,16 @@ public static class Dialogs
         {
             if (DwmInterop.ApplyWindowStyling(win, UiKit.IsDark, transientAcrylic: true))
                 win.Background = UiKit.MicaCanvasBrush;
+        };
+        win.Loaded += (_, _) =>
+        {
+            var wa = SystemParameters.WorkArea;
+            if (win.Top < wa.Top + 12) win.Top = wa.Top + 12;
+            if (win.Top + win.ActualHeight > wa.Bottom - 12)
+                win.Top = Math.Max(wa.Top + 12, wa.Bottom - win.ActualHeight - 12);
+            if (win.Left < wa.Left + 12) win.Left = wa.Left + 12;
+            if (win.Left + win.ActualWidth > wa.Right - 12)
+                win.Left = Math.Max(wa.Left + 12, wa.Right - win.ActualWidth - 12);
         };
         win.MouseLeftButtonDown += (_, e) =>
         {

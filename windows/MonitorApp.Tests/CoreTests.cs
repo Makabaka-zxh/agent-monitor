@@ -566,4 +566,37 @@ public class CoreTests
         Assert.Equal("4.25 秒 (4250 ms)", WorkbenchVisibilityPolicy.FormatLeg(sample.ServerReceivedAt, sample.ClientDisplayedAt));
         Assert.Contains("服务收到 → 本机显示", WorkbenchVisibilityPolicy.Diagnosis(sample));
     }
+
+    [Fact]
+    public void AmbientStage_DoesNotInflateHeightWhenWallpaperIsTallUnderSizeToContent()
+    {
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var tallWallpaper = new System.Windows.Media.Imaging.WriteableBitmap(
+                    1080, 2400, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null);
+                tallWallpaper.Freeze();
+
+                UiKit.ApplyTheme(false, backgroundMode: "custom", wallpaperStyle: "balanced", wallpaper: tallWallpaper);
+                var foreground = new System.Windows.Controls.Border { Width = 448, Height = 360 };
+                var stage = UiKit.AmbientStage(foreground, compact: true);
+                stage.Measure(new System.Windows.Size(448, double.PositiveInfinity));
+
+                Assert.Equal(360.0, stage.DesiredSize.Height, 1);
+                UiKit.ApplyTheme(false);
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        if (failure is not null)
+            throw new AggregateException(failure);
+    }
 }
