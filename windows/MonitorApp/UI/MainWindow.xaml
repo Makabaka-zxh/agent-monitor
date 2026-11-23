@@ -14,7 +14,7 @@
         <shell:WindowChrome CaptionHeight="40"
                             ResizeBorderThickness="6"
                             GlassFrameThickness="1"
-                            CornerRadius="12"
+                            CornerRadius="8"
                             UseAeroCaptionButtons="False" />
     </shell:WindowChrome.WindowChrome>
     <Border x:Name="OuterFrame" BorderThickness="0">

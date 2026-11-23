@@ -270,10 +270,10 @@ public class CoreTests
     [Fact]
     public void CompactSizePresets_ReturnDistinctDimensions()
     {
-        Assert.Equal((360, 216), new LocalUiSettings { CompactSizePreset = "nano" }.GetCompactDimensions());
-        Assert.Equal((376, 332), new LocalUiSettings { CompactSizePreset = "small" }.GetCompactDimensions());
-        Assert.Equal((412, 468), new LocalUiSettings { CompactSizePreset = "medium" }.GetCompactDimensions());
-        Assert.Equal((640, 420), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
+        Assert.Equal((368, 240), new LocalUiSettings { CompactSizePreset = "nano" }.GetCompactDimensions());
+        Assert.Equal((384, 356), new LocalUiSettings { CompactSizePreset = "small" }.GetCompactDimensions());
+        Assert.Equal((420, 484), new LocalUiSettings { CompactSizePreset = "medium" }.GetCompactDimensions());
+        Assert.Equal((648, 436), new LocalUiSettings { CompactSizePreset = "large" }.GetCompactDimensions());
     }
 
     [Fact]
@@ -285,29 +285,29 @@ public class CoreTests
         Assert.Equal(1, microTiny.TasksPerPage);
         Assert.Equal(1, microTiny.QuotasPerPage);
 
-        var micro = ResponsiveLayoutPolicy.PlanCompact(360, 216);
+        var micro = ResponsiveLayoutPolicy.PlanCompact(368, 240);
         Assert.Equal(CompactLayoutKind.MicroCapsule, micro.Kind);
         Assert.Equal(1, micro.Columns);
         Assert.Equal(2, micro.TasksPerPage);
         Assert.Equal(2, micro.QuotasPerPage);
 
-        var ribbon = ResponsiveLayoutPolicy.PlanCompact(520, 216);
+        var ribbon = ResponsiveLayoutPolicy.PlanCompact(520, 224);
         Assert.Equal(CompactLayoutKind.WideRibbon, ribbon.Kind);
         Assert.Equal(2, ribbon.Columns);
         Assert.True(ribbon.TasksPerPage >= 2);
 
-        var tile = ResponsiveLayoutPolicy.PlanCompact(376, 332);
+        var tile = ResponsiveLayoutPolicy.PlanCompact(384, 356);
         Assert.Equal(CompactLayoutKind.CompactTile, tile.Kind);
         Assert.Equal(1, tile.Columns);
         Assert.False(tile.ShowVisualToolTiles);
 
-        var standard = ResponsiveLayoutPolicy.PlanCompact(412, 468);
+        var standard = ResponsiveLayoutPolicy.PlanCompact(420, 484);
         Assert.Equal(CompactLayoutKind.StandardStack, standard.Kind);
         Assert.Equal(1, standard.Columns);
         Assert.True(standard.ShowVisualToolTiles);
         Assert.True(standard.ShowTaskPreview);
 
-        var bento = ResponsiveLayoutPolicy.PlanCompact(640, 420);
+        var bento = ResponsiveLayoutPolicy.PlanCompact(648, 436);
         Assert.Equal(CompactLayoutKind.WideBento, bento.Kind);
         Assert.Equal(2, bento.Columns);
         Assert.True(bento.TasksPerPage >= 4);
@@ -598,5 +598,45 @@ public class CoreTests
 
         if (failure is not null)
             throw new AggregateException(failure);
+    }
+
+    [Fact]
+    public void PartitionBalanced_EliminatesSparseOrphansAndNeverExceedsMaxPageHeight()
+    {
+        // Standard compact quota pods [Codex 102, Claude 62, Antigravity 154, 7-Day Trend 95] in 354px body:
+        // Greedy would pack [102, 62, 154] = 331px and leave [95] alone on page 2; PartitionBalanced splits 2 + 2!
+        var quotaPods = new List<(string Name, double H)>
+        {
+            ("codex", 102.0),
+            ("claude", 62.0),
+            ("antigravity", 154.0),
+            ("trend", 95.0)
+        };
+        var quotaPages = ResponsiveLayoutPolicy.PartitionBalanced(quotaPods, x => x.H, maxPageHeight: 354.0, itemGap: 6.5);
+        Assert.Equal(2, quotaPages.Count);
+        Assert.Equal(2, quotaPages[0].Count);
+        Assert.Equal(2, quotaPages[1].Count);
+        Assert.True(quotaPages.All(p => p.Sum(x => x.H) + (p.Count - 1) * 6.5 <= 354.0));
+
+        // Small compact 7 active tasks (50px each, gap 5.5px) in 202px body:
+        // 4 tasks = 216.5px > 202px (would clip!), and greedy 3-page split would be 3 + 3 + 1;
+        // PartitionBalanced splits cleanly into 3 + 2 + 2 with zero clipping!
+        var sevenTasks = Enumerable.Range(1, 7).Select(i => (Id: i, H: 50.0)).ToList();
+        var smallTaskPages = ResponsiveLayoutPolicy.PartitionBalanced(sevenTasks, x => x.H, maxPageHeight: 202.0, itemGap: 5.5);
+        Assert.Equal([3, 2, 2], smallTaskPages.Select(p => p.Count).ToArray());
+        Assert.True(smallTaskPages.All(p => p.Sum(x => x.H) + (p.Count - 1) * 5.5 <= 202.0));
+
+        // When 230px is available, 7 tasks split front-loaded into 4 + 3 (never 3 + 4 or 5 + 2 overflow)
+        var medTaskPages = ResponsiveLayoutPolicy.PartitionBalanced(sevenTasks, x => x.H, maxPageHeight: 230.0, itemGap: 5.5);
+        Assert.Equal([4, 3], medTaskPages.Select(p => p.Count).ToArray());
+        Assert.True(medTaskPages.All(p => p.Sum(x => x.H) + (p.Count - 1) * 5.5 <= 230.0));
+    }
+
+    [Fact]
+    public void UnifiedCurvatureTokens_MatchWindowsWindowCornerFamily()
+    {
+        Assert.Equal(8.5, UiKit.CardRadius, 2);
+        Assert.Equal(7.0, UiKit.PodRadius, 2);
+        Assert.Equal(6.5, UiKit.ControlRadius, 2);
     }
 }

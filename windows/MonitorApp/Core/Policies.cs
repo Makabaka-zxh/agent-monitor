@@ -626,10 +626,10 @@ public sealed class LocalUiSettings
 
     public (double Width, double Height) GetCompactDimensions() => CompactSizePreset switch
     {
-        "nano" => (360, 216),
-        "small" => (376, 332),
-        "large" => (640, 420),
-        _ => (412, 468)
+        "nano" => (368, 240),
+        "small" => (384, 356),
+        "large" => (648, 436),
+        _ => (420, 484)
     };
 }
 
@@ -788,6 +788,117 @@ public static class ResponsiveLayoutPolicy
             UsageColumns: usageCols,
             DevicesColumns: devCols,
             AccountTwoColumnBento: accountBento);
+    }
+
+    /// <summary>
+    /// Partitions ordered items into the minimum number of pages where every multi-item page fits within
+    /// <paramref name="maxPageHeight"/>, while balancing page heights via dynamic programming so pages split
+    /// evenly (e.g. 2+2, 4+3, 3+2+2) instead of leaving sparse 1-item orphan tail pages (e.g. 3+1, 3+3+1).
+    /// </summary>
+    public static List<List<T>> PartitionBalanced<T>(
+        IReadOnlyList<T> items,
+        Func<T, double> getHeight,
+        double maxPageHeight,
+        double itemGap)
+    {
+        if (items.Count == 0) return [];
+        if (items.Count == 1) return [[items[0]]];
+
+        var n = items.Count;
+        var cap = Math.Max(1.0, maxPageHeight);
+        var gap = Math.Max(0.0, itemGap);
+        var h = new double[n];
+        var prefix = new double[n + 1];
+        for (var i = 0; i < n; i++)
+        {
+            h[i] = Math.Max(0.0, getHeight(items[i]));
+            prefix[i + 1] = prefix[i] + h[i];
+        }
+
+        double RangeH(int start, int endInclusive) =>
+            (prefix[endInclusive + 1] - prefix[start]) + (endInclusive - start) * gap;
+
+        bool ValidRange(int start, int endInclusive) =>
+            start == endInclusive || RangeH(start, endInclusive) <= cap + 0.05;
+
+        // 1. Greedy interval scan determines the exact minimum valid page count K
+        var minPages = 0;
+        var idx = 0;
+        while (idx < n)
+        {
+            var end = idx;
+            while (end + 1 < n && ValidRange(idx, end + 1))
+                end++;
+            minPages++;
+            idx = end + 1;
+        }
+
+        if (minPages <= 1)
+            return [items.ToList()];
+
+        // 2. DP over (pageIndex 1..K, endItem 1..N) minimizing sum of squared page heights
+        //    (with a tiny front-loading bias so ties prefer 4+3 / 3+2+2 over 3+4 / 2+2+3).
+        var dp = new double[minPages + 1, n + 1];
+        var splitPrev = new int[minPages + 1, n + 1];
+        for (var p = 0; p <= minPages; p++)
+            for (var i = 0; i <= n; i++)
+                dp[p, i] = double.PositiveInfinity;
+        dp[0, 0] = 0.0;
+
+        for (var p = 1; p <= minPages; p++)
+        {
+            for (var end = p; end <= n - (minPages - p); end++)
+            {
+                for (var start = p - 1; start < end; start++)
+                {
+                    if (double.IsPositiveInfinity(dp[p - 1, start]))
+                        continue;
+                    if (!ValidRange(start, end - 1))
+                        continue;
+
+                    var rH = RangeH(start, end - 1);
+                    var frontBias = -(minPages - p + 1) * rH * 0.01;
+                    var cost = dp[p - 1, start] + rH * rH + frontBias;
+                    if (cost < dp[p, end])
+                    {
+                        dp[p, end] = cost;
+                        splitPrev[p, end] = start;
+                    }
+                }
+            }
+        }
+
+        if (double.IsPositiveInfinity(dp[minPages, n]))
+        {
+            // Defensive fallback to greedy if numeric edge case occurs
+            var fallback = new List<List<T>>();
+            var cur = 0;
+            while (cur < n)
+            {
+                var end = cur;
+                while (end + 1 < n && ValidRange(cur, end + 1))
+                    end++;
+                var page = new List<T>(end - cur + 1);
+                for (var k = cur; k <= end; k++) page.Add(items[k]);
+                fallback.Add(page);
+                cur = end + 1;
+            }
+            return fallback;
+        }
+
+        var pages = new List<List<T>>(minPages);
+        var curEnd = n;
+        for (var p = minPages; p >= 1; p--)
+        {
+            var start = splitPrev[p, curEnd];
+            var slice = new List<T>(curEnd - start);
+            for (var k = start; k < curEnd; k++)
+                slice.Add(items[k]);
+            pages.Add(slice);
+            curEnd = start;
+        }
+        pages.Reverse();
+        return pages;
     }
 }
 

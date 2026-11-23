@@ -18,8 +18,9 @@ namespace MonitorApp.UI;
 /// </summary>
 public static class UiKit
 {
-    public const double CardRadius = 20.0;
-    public const double ControlRadius = 10.0;
+    public const double CardRadius = 8.5;
+    public const double PodRadius = 7.0;
+    public const double ControlRadius = 6.5;
 
     public static readonly FontFamily AppFont = CreateMiSansFamily();
     public static readonly FontFamily MonoFont = new("Cascadia Mono, Consolas, Courier New");
@@ -880,7 +881,7 @@ public static class UiKit
         {
             Width = boxSize,
             Height = boxSize,
-            CornerRadius = new CornerRadius(Math.Round(boxSize * 0.28)),
+            CornerRadius = new CornerRadius(5.5),
             Background = bg,
             BorderBrush = rim,
             BorderThickness = new Thickness(inCapsule ? 0 : 1),
@@ -1208,7 +1209,7 @@ public static class UiKit
         var capsule = WrapChromeCapsule(
             row,
             height: compact ? 24.0 : 28.0,
-            radius: compact ? 8.5 : 9.5,
+            radius: compact ? 6.5 : 7.0,
             padX: compact ? 4.0 : 5.0);
         capsule.MouseEnter += (_, _) =>
         {
@@ -1245,7 +1246,7 @@ public static class UiKit
             Hex(0x45, 0x06, 0x04),
             compact: false);
 
-        var capsule = WrapChromeCapsule(closeBtn, height: 26.0, radius: 8.5, padX: 2.0);
+        var capsule = WrapChromeCapsule(closeBtn, height: 26.0, radius: 6.5, padX: 2.0);
         capsule.MouseEnter += (_, _) => closeCluster(true);
         capsule.MouseLeave += (_, _) => closeCluster(false);
         return capsule;
@@ -1369,8 +1370,8 @@ public static class UiKit
         bool equalColumns = false,
         bool compact = false)
     {
-        var outerRadius = compact ? 9.5 : 11.0;
-        var innerRadius = compact ? 7.0 : 8.0;
+        var outerRadius = compact ? 6.5 : 7.0;
+        var innerRadius = compact ? 5.0 : 5.5;
 
         Panel hostPanel;
         Grid? eqGrid = null;
@@ -1566,7 +1567,7 @@ public static class UiKit
         var itemTemplate = new ControlTemplate(typeof(ComboBoxItem));
         var itemBd = new FrameworkElementFactory(typeof(Border), "ItemBd");
         itemBd.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-        itemBd.SetValue(Border.CornerRadiusProperty, new CornerRadius(7));
+        itemBd.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
         itemBd.SetValue(Border.PaddingProperty, new Thickness(10, 7, 10, 7));
         itemBd.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 2, 4, 2));
         var itemPresenter = new FrameworkElementFactory(typeof(ContentPresenter));
@@ -1644,7 +1645,7 @@ public static class UiKit
         dropBorder.SetValue(Border.BackgroundProperty, SurfaceBrush);
         dropBorder.SetValue(Border.BorderBrushProperty, GlassRimBrush);
         dropBorder.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-        dropBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(11));
+        dropBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(PodRadius));
         dropBorder.SetValue(Border.PaddingProperty, new Thickness(0, 4, 0, 4));
         dropBorder.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 4, 0, 0));
         dropBorder.SetBinding(FrameworkElement.MinWidthProperty, new System.Windows.Data.Binding("ActualWidth")
@@ -1794,7 +1795,7 @@ public static class UiKit
             Background = GlassTrackBrush,
             BorderBrush = GlassSubtleRimBrush,
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(11),
+            CornerRadius = new CornerRadius(PodRadius),
             Padding = new Thickness(13, 9.5, 13, 9.5),
             Margin = new Thickness(0, 0, 0, 7),
             SnapsToDevicePixels = true,

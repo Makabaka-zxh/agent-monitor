@@ -29,7 +29,7 @@
                         <Border Background="{DynamicResource MonitorTooltipBgBrush}"
                                 BorderBrush="{DynamicResource MonitorTooltipBorderBrush}"
                                 BorderThickness="1"
-                                CornerRadius="8.5"
+                                CornerRadius="6"
                                 Padding="10,5.5"
                                 SnapsToDevicePixels="True">
                             <ContentPresenter RecognizesAccessKey="True" />
@@ -58,7 +58,7 @@
                                     Width="18"
                                     Height="18"
                                     Margin="0,1,9,1"
-                                    CornerRadius="5.5"
+                                    CornerRadius="4.5"
                                     VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                                     Background="{DynamicResource MonitorControlBgBrush}"
                                     BorderBrush="{DynamicResource MonitorControlBorderBrush}"

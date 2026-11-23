@@ -36,7 +36,7 @@ public static class Dialogs
             CaptionHeight = 0,
             ResizeBorderThickness = new Thickness(0),
             GlassFrameThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(8),
             UseAeroCaptionButtons = false
         });
         win.SourceInitialized += (_, _) =>
@@ -496,7 +496,7 @@ public static class Dialogs
             HorizontalAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 8, 0, 8)
         };
-        root.Children.Add(UiKit.Card(codeDisplay, 14, 14));
+        root.Children.Add(UiKit.Card(codeDisplay, 14, UiKit.PodRadius));
 
         string FormatCodeExpiry(ComputerPairingCodeDto? dto) =>
             dto is not null && MonitorDate.Parse(dto.ExpiresAt) is { } exp
@@ -656,7 +656,7 @@ public static class Dialogs
                 Background = UiKit.GlassTrackBrush,
                 BorderBrush = UiKit.WarningBrush,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(7),
+                CornerRadius = new CornerRadius(5),
                 Padding = new Thickness(8, 2, 8, 2),
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Child = new TextBlock
@@ -680,7 +680,7 @@ public static class Dialogs
             }
             cardCol.Children.Add(metaRow);
 
-            var itemBorder = UiKit.Card(cardCol, 14, 14);
+            var itemBorder = UiKit.Card(cardCol, 14, UiKit.PodRadius);
             itemBorder.BorderBrush = UiKit.WarningBrush;
             var btn = UiKit.BareButton(itemBorder, () =>
             {
