@@ -50,6 +50,8 @@ struct RootView: View {
     @State private var taskSelection: String?
     @State private var search = ""
     @State private var showingHelp = false
+    @State private var showingNewTask = false
+    @State private var newTaskPreferredDevice: String? = nil
     private var filteredTasks: [MonitorTask] {
         store.visibleTasks.filter { search.isEmpty || ($0.title + " " + ($0.project ?? "") + " " + ($0.deviceName ?? "")).localizedCaseInsensitiveContains(search) }
     }
@@ -99,11 +101,24 @@ struct RootView: View {
                         if let id = taskSelection, let task = store.task(id) {
                             TaskDetailView(task: task, store: store).id(store.tokenFingerprint + id)
                         } else {
-                            ContentUnavailableView("选择一个任务", systemImage: "square.stack.3d.up", description: Text("查看最终结果，或继续回复"))
+                            ContentUnavailableView {
+                                Label("选择一个任务", systemImage: "square.stack.3d.up")
+                            } description: {
+                                Text("查看最终结果、继续回复，或选择电脑与项目目录直接远程发起新任务")
+                            } actions: {
+                                Button("新建远程任务") {
+                                    newTaskPreferredDevice = nil
+                                    showingNewTask = true
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
                         }
                     }.frame(minWidth: 390, maxWidth: .infinity, maxHeight: .infinity)
                 }
-            case .devices: ComputersView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .devices: ComputersView(onStartNewTask: { deviceId in
+                newTaskPreferredDevice = deviceId
+                showingNewTask = true
+            }).frame(maxWidth: .infinity, maxHeight: .infinity)
             case .usage: UsageView(store: store).id(store.tokenFingerprint).frame(maxWidth: .infinity, maxHeight: .infinity)
             case .account: AccountView(onUsage: { page = .usage }).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -112,10 +127,21 @@ struct RootView: View {
         .toolbar {
             ToolbarItemGroup {
                 if page != .usage {
+                Button {
+                    newTaskPreferredDevice = nil
+                    showingNewTask = true
+                } label: { Image(systemName: "plus") }.help("新建远程任务")
                 if store.refreshing { ProgressView().controlSize(.small) }
                 Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }.help("刷新").disabled(store.refreshing)
                 Button { showingHelp = true } label: { Image(systemName: "info.circle") }.help("关于连接")
                 }
+            }
+        }
+        .sheet(isPresented: $showingNewTask) {
+            NewTaskSheet(store: store, preferredDeviceId: newTaskPreferredDevice) { createdId in
+                page = .tasks
+                store.scope = .active
+                taskSelection = createdId
             }
         }
         .sheet(isPresented: $showingHelp) {
@@ -419,6 +445,16 @@ private struct TaskDetailView: View {
                 if liveTask.supportsReply {
                     TaskAttentionSection(model: model, waiting: liveTask.effectiveStatus == "waiting")
                 }
+                let previewItems = DevPreviewPolicy.items(for: liveTask, computer: store.device(liveTask.deviceId), fresh: store.fresh)
+                if !previewItems.isEmpty, let owningComputer = store.device(liveTask.deviceId) {
+                    DevPreviewCardView(
+                        items: previewItems,
+                        computer: owningComputer,
+                        matchedTask: true,
+                        store: store,
+                        onPrefillPrompt: liveTask.supportsReply ? { prompt in model.draft = prompt } : nil
+                    )
+                }
                 if let usage = liveTask.usage, let total = usage.totalTokens {
                     GlassCard {
                         HStack(spacing: 14) {
@@ -508,8 +544,9 @@ private struct TaskDetailView: View {
 @MainActor
 private struct ComputersView: View {
     @EnvironmentObject var store: MonitorStore
+    let onStartNewTask: (String) -> Void
     var body: some View {
-        ComputersContentView(collector: store.localCollector)
+        ComputersContentView(collector: store.localCollector, onStartNewTask: onStartNewTask)
     }
 }
 
@@ -517,6 +554,7 @@ private struct ComputersView: View {
 private struct ComputersContentView: View {
     @EnvironmentObject var store: MonitorStore
     @ObservedObject var collector: LocalCollector
+    let onStartNewTask: (String) -> Void
     @State private var showingPairing = false
     @State private var showingCollectorSettings = false
     var body: some View {
@@ -551,10 +589,25 @@ private struct ComputersContentView: View {
                 }
                 ForEach(store.devices) { device in
                     GlassCard {
-                        HStack(spacing: 15) {
-                            Image(systemName: device.symbol).font(.system(size: 28)).frame(width: 38)
-                            VStack(alignment: .leading, spacing: 7) { Text(device.name).fontWeight(.medium); Text(store.fresh && device.online ? "在线" : "离线").foregroundStyle(store.fresh && device.online ? Color.green : .secondary) }
-                            Spacer()
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 15) {
+                                Image(systemName: device.symbol).font(.system(size: 28)).frame(width: 38)
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Text(device.name).fontWeight(.medium)
+                                    Text(store.fresh && device.online ? "在线" : "离线")
+                                        .foregroundStyle(store.fresh && device.online ? Color.green : .secondary)
+                                }
+                                Spacer()
+                                if store.fresh && device.online {
+                                    Button("新建任务", systemImage: "plus") { onStartNewTask(device.id) }
+                                        .controlSize(.regular)
+                                }
+                            }
+                            let devPreviews = DevPreviewPolicy.items(for: nil, computer: device, fresh: store.fresh)
+                            if !devPreviews.isEmpty {
+                                Divider()
+                                DevPreviewRowsView(items: devPreviews, computer: device, store: store, onPrefillPrompt: nil)
+                            }
                         }
                     }
                 }
@@ -695,5 +748,266 @@ private struct ProfileEditor: View {
         NSGraphicsContext.restoreGraphicsState()
         guard let data = bitmap.representation(using: .png, properties: [:]) else { return }
         avatar = "data:image/png;base64," + data.base64EncodedString()
+    }
+}
+
+@MainActor
+private struct DevPreviewCardView: View {
+    let items: [DevPreviewItem]
+    let computer: Computer
+    let matchedTask: Bool
+    @ObservedObject var store: MonitorStore
+    let onPrefillPrompt: ((String) -> Void)?
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack {
+                    Label("本地开发预览", systemImage: "globe")
+                        .font(.custom("MiSans-Regular", size: 17))
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Text(matchedTask && items.first?.matchedProject == true ? "当前项目监听端口" : "电脑活跃开发端口")
+                        .font(.custom("MiSans-Regular", size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                DevPreviewRowsView(items: items, computer: computer, store: store, onPrefillPrompt: onPrefillPrompt)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct DevPreviewRowsView: View {
+    let items: [DevPreviewItem]
+    let computer: Computer
+    @ObservedObject var store: MonitorStore
+    let onPrefillPrompt: ((String) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(items) { item in
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("端口 :\(item.port)")
+                            .font(.custom("MiSans-Regular", size: 13.5))
+                            .fontWeight(.medium)
+                        Text(item.subtitle)
+                            .font(.custom("MiSans-Regular", size: 12))
+                            .foregroundStyle(item.openURL == nil ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    if let shareURL = item.shareURL, item.localMachine {
+                        Button("复制真机链接") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(shareURL, forType: .string)
+                            store.notice = "已复制真机预览地址：\(shareURL)"
+                        }
+                        .controlSize(.small)
+                    }
+                    if let fixPrompt = item.loopbackFixPrompt {
+                        Button(onPrefillPrompt != nil ? "让 AI 改为 0.0.0.0" : "复制开放指令") {
+                            if let onPrefillPrompt {
+                                onPrefillPrompt(fixPrompt)
+                            } else {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(fixPrompt, forType: .string)
+                                store.notice = "已复制改为绑定 0.0.0.0 的提示指令"
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                    if let openURL = item.openURL {
+                        Button(item.buttonLabel) {
+                            _ = store.openDevPreview(openURL, allowLoopback: computer.local)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(10)
+                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+    }
+}
+
+@MainActor
+private struct NewTaskSheet: View {
+    @ObservedObject var store: MonitorStore
+    let preferredDeviceId: String?
+    let onCreated: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedDeviceId = ""
+    @State private var selectedProjectId = ""
+    @State private var selectedTool = "codex"
+    @State private var prompt = ""
+    @State private var submitting = false
+    @State private var statusMessage = ""
+    @State private var statusIsWarning = false
+
+    private var onlineComputers: [Computer] {
+        store.fresh ? store.devices.filter(\.online) : []
+    }
+    private var activeComputer: Computer? {
+        onlineComputers.first(where: { $0.id == selectedDeviceId }) ?? onlineComputers.first
+    }
+    private var projects: [ProjectSummary] {
+        DevPreviewPolicy.verifiedProjects(for: activeComputer)
+    }
+    private var supportedTools: [String] {
+        DevPreviewPolicy.supportedTools(for: activeComputer)
+    }
+    private var canSubmit: Bool {
+        !submitting
+            && activeComputer != nil
+            && supportedTools.contains(selectedTool)
+            && MonitorSecurity.matches(selectedProjectId, "[0-9a-f]{24}")
+            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("新建远程任务")
+                .font(.custom("MiSans-Regular", size: 22))
+                .fontWeight(.semibold)
+            Text("无需提前在电脑打开终端窗口：选择在线电脑与历史活跃项目目录，发送首条指令即可启动全新会话。")
+                .font(.custom("MiSans-Regular", size: 13))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if onlineComputers.isEmpty {
+                Text("当前没有在线的已连接电脑，请先开启目标电脑的同步服务后再试。")
+                    .font(.custom("MiSans-Regular", size: 13.5))
+                    .foregroundStyle(.orange)
+                    .padding(.vertical, 12)
+            } else {
+                Picker("目标电脑", selection: $selectedDeviceId) {
+                    ForEach(onlineComputers) { dev in
+                        Text(dev.local ? "\(dev.name)（这台电脑）" : "\(dev.name) · \(dev.platform)").tag(dev.id)
+                    }
+                }
+                .disabled(submitting)
+                .onChange(of: selectedDeviceId) { _, _ in syncSelectionForDevice() }
+
+                if projects.isEmpty {
+                    Text("这台电脑暂未同步到历史活跃项目目录；先在电脑端对应文件夹打开一次工具会话后即可在此选用。")
+                        .font(.custom("MiSans-Regular", size: 12.5))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Picker("项目目录", selection: $selectedProjectId) {
+                        ForEach(projects) { proj in
+                            Text(proj.name).tag(proj.id)
+                        }
+                    }
+                    .disabled(submitting)
+                }
+
+                if supportedTools.isEmpty {
+                    Text("这台电脑尚未开启「结果、文件与回复」同步模式，或未安装可用的 Codex / Claude Code / Antigravity 命令程序。")
+                        .font(.custom("MiSans-Regular", size: 12.5))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Picker("编程工具", selection: $selectedTool) {
+                        ForEach(supportedTools, id: \.self) { t in
+                            Text(MonitorTask.brand(for: t)).tag(t)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(submitting)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("首条任务指令")
+                        .font(.custom("MiSans-Regular", size: 12.5))
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $prompt)
+                        .font(.custom("MiSans-Regular", size: 13.5))
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .frame(minHeight: 96, maxHeight: 170)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .disabled(submitting)
+                }
+
+                if !statusMessage.isEmpty {
+                    Text(statusMessage)
+                        .font(.custom("MiSans-Regular", size: 12.5))
+                        .foregroundStyle(statusIsWarning ? Color.orange : Color.accentColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack {
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                if !onlineComputers.isEmpty {
+                    if submitting { ProgressView().controlSize(.small) }
+                    Button(submitting ? "正在启动…" : "启动新任务") {
+                        Task { await submit() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmit)
+                }
+            }
+            .controlSize(.large)
+        }
+        .padding(26)
+        .frame(width: 470)
+        .onAppear {
+            if let preferred = preferredDeviceId, onlineComputers.contains(where: { $0.id == preferred }) {
+                selectedDeviceId = preferred
+            } else if let first = onlineComputers.first {
+                selectedDeviceId = first.id
+            }
+            syncSelectionForDevice()
+        }
+    }
+
+    private func syncSelectionForDevice() {
+        let projs = projects
+        if !projs.contains(where: { $0.id == selectedProjectId }) {
+            selectedProjectId = projs.first?.id ?? ""
+        }
+        let tools = supportedTools
+        if !tools.contains(selectedTool) {
+            if let projTools = projs.first?.tools, let match = projTools.first(where: { tools.contains($0) }) {
+                selectedTool = match
+            } else if let first = tools.first {
+                selectedTool = first
+            }
+        }
+    }
+
+    private func submit() async {
+        guard canSubmit, let comp = activeComputer else { return }
+        submitting = true
+        statusIsWarning = false
+        statusMessage = "正在向电脑发送新建任务请求…"
+        let outcome = await store.startNewTask(
+            deviceId: comp.id,
+            projectId: selectedProjectId,
+            tool: selectedTool,
+            prompt: prompt,
+            onProgress: { msg in
+                statusIsWarning = false
+                statusMessage = msg
+            }
+        )
+        if let createdId = outcome.createdTaskId, !createdId.isEmpty {
+            dismiss()
+            onCreated(createdId)
+            return
+        }
+        submitting = false
+        if let err = outcome.error, !err.isEmpty {
+            statusIsWarning = true
+            statusMessage = err
+        }
     }
 }

@@ -273,4 +273,29 @@ final class UsageTests: XCTestCase {
         XCTAssertEqual(task.usage?.cachedInputTokens, 17500)
         XCTAssertNil(task.usage?.cacheWriteTokens)
     }
+
+    func testQuotaPaceComputesIdealTickReserveAndExhaustionCountdown() throws {
+        let now = try date("2026-11-24T12:00:00Z")
+        let aheadReset = Int64(now.timeIntervalSince1970 + 180 * 60)
+        let ahead = try decode(UsageQuota.self, """
+        {"key":"five_hour","remaining_percent":80,"window_minutes":300,"resets_at":\(aheadReset),"observed_at":"2026-11-24T12:00:00Z","stale":false}
+        """)
+        let aheadPace = try XCTUnwrap(ahead.pace(now: now))
+        XCTAssertEqual(aheadPace.idealRemainingPercent, 60.0, accuracy: 0.1)
+        XCTAssertEqual(aheadPace.state, "ahead")
+        XCTAssertFalse(aheadPace.isWarning)
+        XCTAssertEqual(aheadPace.label, "富余 +20%")
+
+        let behindReset = Int64(now.timeIntervalSince1970 + 240 * 60)
+        let behind = try decode(UsageQuota.self, """
+        {"key":"five_hour","remaining_percent":40,"window_minutes":300,"resets_at":\(behindReset),"observed_at":"2026-11-24T12:00:00Z","stale":false}
+        """)
+        let behindPace = try XCTUnwrap(behind.pace(now: now))
+        XCTAssertEqual(behindPace.idealRemainingPercent, 80.0, accuracy: 0.1)
+        XCTAssertEqual(behindPace.state, "behind")
+        XCTAssertTrue(behindPace.isWarning)
+        XCTAssertEqual(behindPace.label, "超速 · 约 40 分钟耗尽")
+
+        XCTAssertNil(behind.pace(now: now, failed: true))
+    }
 }

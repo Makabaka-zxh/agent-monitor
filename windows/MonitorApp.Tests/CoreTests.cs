@@ -639,4 +639,100 @@ public class CoreTests
         Assert.Equal(7.0, UiKit.PodRadius, 2);
         Assert.Equal(6.5, UiKit.ControlRadius, 2);
     }
+
+    [Fact]
+    public void ComputeQuotaPace_ComputesIdealTickReserveAndExhaustionWarning()
+    {
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_770_000_000);
+
+        // 5-hour window (300 min), 3 hours left (60% time remaining), 80% quota remaining -> +20% ahead
+        var ahead = UsageFormatting.ComputeQuotaPace(new UsageQuotaDto
+        {
+            Key = "five_hour",
+            RemainingPercent = 80.0,
+            WindowMinutes = 300,
+            ResetsAt = now.AddMinutes(180).ToUnixTimeSeconds()
+        }, now);
+        Assert.NotNull(ahead);
+        Assert.Equal(60.0, ahead!.IdealRemainingPercent, 1);
+        Assert.Equal("ahead", ahead.State);
+        Assert.False(ahead.IsWarning);
+        Assert.Equal("富余 +20%", ahead.Label);
+
+        // 5-hour window (300 min), 4 hours left (80% time remaining, 1h elapsed), 40% quota remaining (60% burned in 1h -> ~40 min left!)
+        var behind = UsageFormatting.ComputeQuotaPace(new UsageQuotaDto
+        {
+            Key = "five_hour",
+            RemainingPercent = 40.0,
+            WindowMinutes = 300,
+            ResetsAt = now.AddMinutes(240).ToUnixTimeSeconds()
+        }, now);
+        Assert.NotNull(behind);
+        Assert.Equal(80.0, behind!.IdealRemainingPercent, 1);
+        Assert.Equal("behind", behind.State);
+        Assert.True(behind.IsWarning);
+        Assert.Equal("超速 · 约 40 分钟耗尽", behind.Label);
+
+        // Stale or missing window returns null
+        Assert.Null(UsageFormatting.ComputeQuotaPace(new UsageQuotaDto
+        {
+            Key = "five_hour",
+            RemainingPercent = 50.0,
+            WindowMinutes = 300,
+            ResetsAt = now.AddMinutes(150).ToUnixTimeSeconds(),
+            Stale = true
+        }, now));
+    }
+
+    [Fact]
+    public void DevPreviewPolicy_ValidatesHostsUrlsProjectsAndLocalOrRemotePorts()
+    {
+        Assert.Equal("devbox.example-tailnet.ts.net", DevPreviewPolicy.ValidNetworkHost("DevBox.Example-Tailnet.ts.net"));
+        Assert.Equal("100.88.12.34", DevPreviewPolicy.ValidNetworkHost("100.88.12.34"));
+        Assert.Equal("192.168.1.25", DevPreviewPolicy.ValidNetworkHost("192.168.1.25"));
+        Assert.Null(DevPreviewPolicy.ValidNetworkHost("8.8.8.8"));
+        Assert.Null(DevPreviewPolicy.ValidNetworkHost("127.0.0.1"));
+        Assert.Null(DevPreviewPolicy.ValidNetworkHost("evil.com"));
+
+        Assert.True(DevPreviewPolicy.ValidPreviewUrl("http://127.0.0.1:5173/", allowLoopback: true));
+        Assert.False(DevPreviewPolicy.ValidPreviewUrl("http://127.0.0.1:5173/", allowLoopback: false));
+        Assert.True(DevPreviewPolicy.ValidPreviewUrl("http://100.90.1.2:3000/", allowLoopback: false));
+        Assert.False(DevPreviewPolicy.ValidPreviewUrl("https://evil.com:3000/", allowLoopback: true));
+        Assert.False(DevPreviewPolicy.ValidPreviewUrl("http://100.90.1.2:80/", allowLoopback: true));
+
+        var projA = "0123456789abcdef01234567";
+        var remoteMac = new Computer
+        {
+            Id = "11111111-2222-3333-4444-555555555555",
+            Name = "Studio Mac",
+            Online = true,
+            Local = false,
+            SupportedTools = ["claude", "codex"],
+            Projects =
+            [
+                new ProjectSummaryDto { Id = projA, Name = "web-app", Tools = ["codex"] },
+                new ProjectSummaryDto { Id = "not-valid-hex", Name = "bad" }
+            ],
+            PreviewHosts = ["100.101.2.3", "8.8.8.8"],
+            DevPorts =
+            [
+                new DevPortDto { Port = 5173, BindScope = "network", Process = "node", ProjectId = projA },
+                new DevPortDto { Port = 3000, BindScope = "loopback", Process = "bun", ProjectId = "" }
+            ]
+        };
+
+        Assert.Equal(["codex", "claude"], DevPreviewPolicy.SupportedToolsFor(remoteMac));
+        Assert.Single(DevPreviewPolicy.VerifiedProjectsFor(remoteMac));
+
+        var taskA = new MonitorTask { Id = "t1", DeviceId = remoteMac.Id, ProjectId = projA };
+        var matchedItems = DevPreviewPolicy.ItemsFor(taskA, remoteMac, fresh: true);
+        Assert.Single(matchedItems);
+        Assert.True(matchedItems[0].MatchedProject);
+        Assert.Equal("http://100.101.2.3:5173/", matchedItems[0].OpenUrl);
+
+        var allDeviceItems = DevPreviewPolicy.ItemsFor(null, remoteMac, fresh: true);
+        Assert.Equal(2, allDeviceItems.Count);
+        Assert.Null(allDeviceItems[1].OpenUrl);
+        Assert.Contains("0.0.0.0:3000", allDeviceItems[1].LoopbackFixPrompt);
+    }
 }

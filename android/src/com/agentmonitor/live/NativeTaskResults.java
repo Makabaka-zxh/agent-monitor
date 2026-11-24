@@ -239,6 +239,14 @@ public final class NativeTaskResults {
         persistDraft();
         updateSend();
     }
+    public boolean prefillReply(String text) {
+        if (!interactive || text == null || text.trim().isEmpty()) return false;
+        replyInput.setText(text);
+        replyInput.setSelection(replyInput.length());
+        persistDraft();
+        openReplyFromUser();
+        return true;
+    }
     private void openReplyFromUser() {
         if (!interactive || !current() || !host.visible() || !replyCard.isAttachedToWindow()) return;
         boolean opening = replyCard.getVisibility() != View.VISIBLE;

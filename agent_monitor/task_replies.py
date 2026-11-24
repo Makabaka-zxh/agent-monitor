@@ -17,6 +17,8 @@ from .failure_reasons import FAILURE_LABELS
 from .session_controls import ModelSelection, reply_fingerprint
 
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
+NEW_SOURCE_PATTERN = re.compile(r"^(codex|claude|antigravity):new_([0-9a-f]{24})\Z")
+CREATED_SOURCE_PATTERN = re.compile(r"^(codex|claude|antigravity):[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 LIVE = ("queued", "dispatching", "running")
 FINAL = ("succeeded", "failed", "blocked", "uncertain")
 REASONS = {
@@ -59,6 +61,23 @@ class ReplyInput(BaseModel):
         return value
 
 
+class TaskStartInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    device_id: str = Field(min_length=1, max_length=120)
+    project_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+    tool: Literal["codex", "claude", "antigravity"]
+    request_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    text: str = Field(min_length=1, max_length=8000)
+    selection: ModelSelection | None = None
+
+    @field_validator("text")
+    @classmethod
+    def valid_text(cls, value):
+        if not value.strip() or any(ord(c) < 32 and c not in "\r\n\t" for c in value):
+            raise ValueError("任务内容无效")
+        return value
+
+
 class AgentPoll(BaseModel):
     model_config = ConfigDict(extra="forbid")
     supported_tools: list[Literal["codex", "claude", "antigravity"]] = Field(default_factory=list, max_length=3)
@@ -93,6 +112,16 @@ class AgentUpdate(BaseModel):
     state: Literal["running", "succeeded", "failed", "blocked", "uncertain"]
     error_code: str = Field(default="", max_length=80, pattern=r"^[a-z_]*$")
     applied: dict[str, str] | None = None
+    created_source_id: str = Field(default="", max_length=200)
+
+    @field_validator("created_source_id")
+    @classmethod
+    def valid_created_source(cls, value):
+        if not value:
+            return ""
+        if not CREATED_SOURCE_PATTERN.fullmatch(value):
+            raise ValueError("无效的新建会话编号")
+        return value
 
     @field_validator("applied")
     @classmethod
@@ -139,9 +168,13 @@ class TaskReplies:
                 store.db.execute('ALTER TABLE task_replies ADD COLUMN request_schema INTEGER NOT NULL DEFAULT 1')
             if 'applied' not in columns:
                 store.db.execute("ALTER TABLE task_replies ADD COLUMN applied TEXT NOT NULL DEFAULT ''")
+            if 'created_task_id' not in columns:
+                store.db.execute("ALTER TABLE task_replies ADD COLUMN created_task_id TEXT NOT NULL DEFAULT ''")
+            if 'spawn_title' not in columns:
+                store.db.execute("ALTER TABLE task_replies ADD COLUMN spawn_title TEXT NOT NULL DEFAULT ''")
             # Never replay a command after a hub restart; the tool may have received it.
             store.db.execute("UPDATE task_replies SET state='uncertain',reason_code='restarted',"
-                             "prompt='',finished_at=? WHERE state IN ('queued','dispatching','running')", (time.time(),))
+                             "prompt='',spawn_title='',finished_at=? WHERE state IN ('queued','dispatching','running')", (time.time(),))
         from .task_interactions import TaskInteractions
         self.controls = TaskInteractions(store, self)
 
@@ -149,6 +182,28 @@ class TaskReplies:
         device_id, sep, source_id = task_id.partition(":")
         if not sep:
             raise HTTPException(404, "任务不存在")
+        new_match = NEW_SOURCE_PATTERN.fullmatch(source_id)
+        if new_match is not None:
+            tool, project_id = new_match.group(1), new_match.group(2)
+            dev = self.store.db.execute(
+                "SELECT id,local,last_seen,projects FROM devices WHERE id=?",
+                (device_id,),
+            ).fetchone()
+            if not dev:
+                raise HTTPException(404, "电脑不存在或已断开")
+            raw_projects = json.loads(dev["projects"]) if "projects" in dev.keys() and dev["projects"] else []
+            proj = next((p for p in raw_projects if isinstance(p, dict) and p.get("id") == project_id), None)
+            if proj is None:
+                raise HTTPException(404, "所选项目目录不可用或尚未同步")
+            device_row = {"local": dev["local"], "last_seen": dev["last_seen"], "archived": 0}
+            synthetic_task = {
+                "id": source_id,
+                "tool": tool,
+                "status": "idle",
+                "project": proj.get("name", ""),
+                "project_id": project_id,
+            }
+            return device_id, source_id, device_row, synthetic_task
         row = self.store.db.execute("""SELECT t.payload,d.local,d.last_seen,
                 COALESCE(a.archived,0) AS archived FROM tasks t JOIN devices d ON t.device_id=d.id
                 LEFT JOIN task_archive a ON a.device_id=t.device_id AND a.source_id=t.source_id
@@ -170,6 +225,8 @@ class TaskReplies:
             value[key] = iso(row[key]) if key in keys and row[key] is not None else None
         if row["started_at"]:
             value["delivery_ms"] = max(0, round((row["started_at"] - row["queued_at"]) * 1000))
+        if "created_task_id" in keys and row["created_task_id"]:
+            value["created_task_id"] = row["created_task_id"]
         if "selection" in keys and row["selection"]:
             try:
                 parsed_sel = sanitize_applied_settings(json.loads(row["selection"]))
@@ -202,6 +259,28 @@ class TaskReplies:
             found = set()
         self._local_tools_cache = (found, now)
         return found
+
+    def device_supported_tools(self, snapshot: dict) -> dict[str, list[str]]:
+        now = time.time()
+        devices = snapshot.get("devices", [])
+        local_tools = self._local_supported_tools() if any(isinstance(d, dict) and d.get("local") and d.get("online") for d in devices) else set()
+        order = ("codex", "claude", "antigravity")
+        result: dict[str, list[str]] = {}
+        for dev in devices:
+            if not isinstance(dev, dict) or "id" not in dev:
+                continue
+            dev_id = dev["id"]
+            if not dev.get("online"):
+                result[dev_id] = []
+            elif dev.get("local"):
+                result[dev_id] = [t for t in order if self.local_enabled and t in local_tools]
+            else:
+                rem_tools, stamp = self._capabilities.get(dev_id, ([], 0))
+                if now - stamp < ONLINE_SECONDS:
+                    result[dev_id] = [t for t in order if t in rem_tools]
+                else:
+                    result[dev_id] = []
+        return result
 
     def continuation_states(self, snapshot: dict) -> dict[str, str]:
         """Classify each live, unarchived task as continuable, computer_in_use, or view_only."""
@@ -255,6 +334,9 @@ class TaskReplies:
         elif row["local"]:
             if not self.local_enabled:
                 reason = "unsupported"
+            elif NEW_SOURCE_PATTERN.fullmatch(source_id) and task.get("tool") not in self._local_supported_tools():
+                reason = {"codex": "codex_missing", "claude": "claude_missing",
+                          "antigravity": "antigravity_missing"}.get(task.get("tool"), "unsupported")
         else:
             supported, stamp = self._capabilities.get(device_id, ([], 0))
             if time.time() - stamp >= ONLINE_SECONDS:
@@ -298,14 +380,48 @@ class TaskReplies:
         if self.store.db.execute("SELECT COUNT(*) FROM task_replies").fetchone()[0] >= 50000:
             raise HTTPException(429, "发送记录较多，请稍后再试")
         now = time.time()
+        spawn_title = " ".join(data.text.split())[:72] if NEW_SOURCE_PATTERN.fullmatch(source_id) else ""
         self.store.db.execute("""INSERT INTO task_replies
-            (id,reader_id,device_id,source_id,task_id,tool,prompt,prompt_hash,state,queued_at,expires_at,selection,request_schema)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,2)""", (data.request_id, reader["id"], device_id, source_id,
+            (id,reader_id,device_id,source_id,task_id,tool,prompt,prompt_hash,state,queued_at,expires_at,selection,request_schema,spawn_title)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,2,?)""", (data.request_id, reader["id"], device_id, source_id,
             data.task_id, task["tool"], data.text, prompt_hash, "queued", now, now + 120,
-            data.selection.model_dump_json() if data.selection is not None else ''))
+            data.selection.model_dump_json() if data.selection is not None else '', spawn_title))
         return self._public(self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (data.request_id,)).fetchone())
 
-    def update(self, command_id, state, error_code="", *, device_id=None, applied=None):
+    def _record_created_session(self, row, created_source_id: str) -> None:
+        if not created_source_id or not CREATED_SOURCE_PATTERN.fullmatch(created_source_id):
+            return
+        new_match = NEW_SOURCE_PATTERN.fullmatch(row["source_id"])
+        if new_match is None or not created_source_id.startswith(row["tool"] + ":"):
+            return
+        if row["created_task_id"]:
+            return
+        created_task_id = row["device_id"] + ":" + created_source_id
+        self.store.db.execute(
+            "UPDATE task_replies SET created_task_id=?,spawn_title='' WHERE id=?",
+            (created_task_id, row["id"]),
+        )
+        proj_id = new_match.group(2)
+        proj_name = ""
+        dev = self.store.db.execute("SELECT projects FROM devices WHERE id=?", (row["device_id"],)).fetchone()
+        if dev and "projects" in dev.keys() and dev["projects"]:
+            try:
+                proj_list = json.loads(dev["projects"])
+                matched = next((p for p in proj_list if isinstance(p, dict) and p.get("id") == proj_id), None)
+                if matched:
+                    proj_name = matched.get("name", "")
+            except (ValueError, TypeError):
+                pass
+        self.store.upsert_spawned_task(
+            row["device_id"],
+            created_source_id,
+            row["tool"],
+            row["spawn_title"] if "spawn_title" in row.keys() else "",
+            project=proj_name,
+            project_id=proj_id,
+        )
+
+    def update(self, command_id, state, error_code="", *, device_id=None, applied=None, created_source_id=""):
         if state not in (*FINAL, "running"):
             return
         cleaned_applied = sanitize_applied_settings(applied)
@@ -322,18 +438,33 @@ class TaskReplies:
             reason = error_code if error_code in REASONS else ""
             if state == 'running':
                 self.store.db.execute('UPDATE task_replies SET started_at=COALESCE(started_at,?) WHERE id=?', (time.time(), command_id))
+            if created_source_id:
+                self._record_created_session(row, created_source_id)
             if applied_json is not None:
                 self.store.db.execute("UPDATE task_replies SET applied=? WHERE id=?", (applied_json, command_id))
-            self.store.db.execute("UPDATE task_replies SET state=?,reason_code=?,prompt='',finished_at=? WHERE id=?",
-                                  (state, reason, time.time() if state in FINAL else None, command_id))
+            if state in FINAL:
+                self.store.db.execute(
+                    "UPDATE task_replies SET state=?,reason_code=?,prompt='',spawn_title='',finished_at=? WHERE id=?",
+                    (state, reason, time.time(), command_id),
+                )
+            else:
+                self.store.db.execute(
+                    "UPDATE task_replies SET state=?,reason_code=?,prompt='',finished_at=NULL WHERE id=?",
+                    (state, reason, command_id),
+                )
             if state in FINAL:
                 self.controls.cancel_command(command_id)
             return self._public(self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (command_id,)).fetchone())
 
     def _emit(self, event):
         try:
-            self.update(event.get("command_id", event.get("id", "")), event["state"], event.get("error_code", ""),
-                        applied=event.get("applied"))
+            self.update(
+                event.get("command_id", event.get("id", "")),
+                event["state"],
+                event.get("error_code", ""),
+                applied=event.get("applied"),
+                created_source_id=event.get("created_source_id", ""),
+            )
         except (HTTPException, KeyError):
             pass
 
@@ -431,8 +562,13 @@ class TaskReplies:
                     settings = {'selection': command['selection']} if 'selection' in command else {}
                     result = self.executor.start(command["id"], command["source_id"], command["text"], **settings)
                     if isinstance(result, dict) and result.get("state") in FINAL:
-                        self.update(command["id"], result["state"], result.get("error_code", ""),
-                                    applied=result.get("applied"))
+                        self.update(
+                            command["id"],
+                            result["state"],
+                            result.get("error_code", ""),
+                            applied=result.get("applied"),
+                            created_source_id=result.get("created_source_id", ""),
+                        )
                 except Exception:
                     # Do not reveal raw errors (which can contain prompt, path or credentials).
                     self.update(command["id"], "uncertain")
@@ -485,6 +621,16 @@ def install_reply_routes(app, store, perform):
     def send_reply(data: ReplyInput, request: Request):
         return perform(request, lambda reader: service.enqueue(reader, data), write=True)
 
+    @app.post("/api/native/tasks/start")
+    def start_task(data: TaskStartInput, request: Request):
+        synthetic = ReplyInput(
+            task_id=f"{data.device_id}:{data.tool}:new_{data.project_id}",
+            request_id=data.request_id,
+            text=data.text,
+            selection=data.selection,
+        )
+        return perform(request, lambda reader: service.enqueue(reader, synthetic), write=True)
+
     @app.post("/api/agent/replies/poll")
     def poll_reply(data: AgentPoll, request: Request):
         return app.state.agent_operation(request, lambda device_id: service.poll_agent(device_id, data.supported_tools))
@@ -493,5 +639,12 @@ def install_reply_routes(app, store, perform):
     def update_reply(data: AgentUpdate, request: Request):
         return app.state.agent_operation(
             request,
-            lambda device_id: service.update(data.id, data.state, data.error_code, device_id=device_id, applied=data.applied),
+            lambda device_id: service.update(
+                data.id,
+                data.state,
+                data.error_code,
+                device_id=device_id,
+                applied=data.applied,
+                created_source_id=data.created_source_id,
+            ),
         )

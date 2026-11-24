@@ -112,6 +112,8 @@ class RemoteReplyWorker:
                 return
             if isinstance(event.get('applied'), dict):
                 item['applied'] = dict(event['applied'])
+            if isinstance(event.get('created_source_id'), str) and event['created_source_id']:
+                item['created_source_id'] = event['created_source_id']
             item.update(state=event['state'], error_code=event.get('error_code', ''), pending=True, updated=time.time())
             self._save()
 
@@ -154,6 +156,8 @@ class RemoteReplyWorker:
             update_payload = {'id': key, 'state': item['state'], 'error_code': item.get('error_code', '')}
             if isinstance(item.get('applied'), dict):
                 update_payload['applied'] = item['applied']
+            if isinstance(item.get('created_source_id'), str) and item['created_source_id']:
+                update_payload['created_source_id'] = item['created_source_id']
             response = self._post('/api/agent/replies/update', update_payload)
         except Exception as error:
             if self.stop.is_set():

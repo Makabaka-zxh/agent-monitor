@@ -119,6 +119,7 @@ public sealed class MonitorTask
     [JsonPropertyName("device_id")] public string DeviceId { get; set; } = "";
     [JsonPropertyName("device_name")] public string? DeviceName { get; set; }
     [JsonPropertyName("project")] public string? Project { get; set; }
+    [JsonPropertyName("project_id")] public string? ProjectId { get; set; }
     [JsonPropertyName("preview")] public string? Preview { get; set; }
     [JsonPropertyName("updated_at")] public string? UpdatedAt { get; set; }
     [JsonPropertyName("final_result_id")] public string? FinalResultId { get; set; }
@@ -221,6 +222,22 @@ public sealed class DeviceSourceDto
     [JsonPropertyName("detail")] public string? Detail { get; set; }
 }
 
+public sealed class ProjectSummaryDto
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("tools")] public List<string>? Tools { get; set; }
+    [JsonPropertyName("updated_at")] public string? UpdatedAt { get; set; }
+}
+
+public sealed class DevPortDto
+{
+    [JsonPropertyName("port")] public int Port { get; set; }
+    [JsonPropertyName("bind_scope")] public string BindScope { get; set; } = "";
+    [JsonPropertyName("process")] public string? Process { get; set; }
+    [JsonPropertyName("project_id")] public string? ProjectId { get; set; }
+}
+
 public sealed class Computer
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";
@@ -230,6 +247,10 @@ public sealed class Computer
     [JsonPropertyName("local")] public bool Local { get; set; }
     [JsonPropertyName("last_seen")] public string? LastSeen { get; set; }
     [JsonPropertyName("sources")] public List<DeviceSourceDto>? Sources { get; set; }
+    [JsonPropertyName("supported_tools")] public List<string>? SupportedTools { get; set; }
+    [JsonPropertyName("projects")] public List<ProjectSummaryDto>? Projects { get; set; }
+    [JsonPropertyName("dev_ports")] public List<DevPortDto>? DevPorts { get; set; }
+    [JsonPropertyName("preview_hosts")] public List<string>? PreviewHosts { get; set; }
 }
 
 public sealed class PreferencesDto
@@ -370,6 +391,7 @@ public sealed class ReplyCommandDto
     [JsonPropertyName("reason")] public string? Reason { get; set; }
     [JsonPropertyName("delivery_ms")] public int? DeliveryMs { get; set; }
     [JsonPropertyName("claimed_at")] public string? ClaimedAt { get; set; }
+    [JsonPropertyName("created_task_id")] public string? CreatedTaskId { get; set; }
     [JsonPropertyName("requested_selection")] public SessionModelSelectionDto? RequestedSelection { get; set; }
     [JsonPropertyName("applied")] public AppliedSettingsDto? Applied { get; set; }
 }
@@ -382,9 +404,22 @@ public sealed class ReplyStateDto
     [JsonPropertyName("available")] public bool? Available { get; set; }
     [JsonPropertyName("reason")] public string? Reason { get; set; }
     [JsonPropertyName("claimed_at")] public string? ClaimedAt { get; set; }
+    [JsonPropertyName("created_task_id")] public string? CreatedTaskId { get; set; }
     [JsonPropertyName("requested_selection")] public SessionModelSelectionDto? RequestedSelection { get; set; }
     [JsonPropertyName("applied")] public AppliedSettingsDto? Applied { get; set; }
     [JsonPropertyName("latest")] public ReplyCommandDto? Latest { get; set; }
+}
+
+public sealed class TaskStartPayloadDto
+{
+    [JsonPropertyName("device_id")] public string DeviceId { get; set; } = "";
+    [JsonPropertyName("project_id")] public string ProjectId { get; set; } = "";
+    [JsonPropertyName("tool")] public string Tool { get; set; } = "";
+    [JsonPropertyName("request_id")] public string RequestId { get; set; } = "";
+    [JsonPropertyName("text")] public string Text { get; set; } = "";
+    [JsonPropertyName("selection")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SessionModelSelectionDto? Selection { get; set; }
 }
 
 public sealed class LoginSecret

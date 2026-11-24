@@ -1310,7 +1310,7 @@ public partial class MainWindow : Window
             return btn;
         }
 
-        UIElement BuildProgressBar(double remPercent, Brush fillBrush, double height = 5.0)
+        UIElement BuildProgressBar(double remPercent, Brush fillBrush, double height = 5.0, double? idealTickPercent = null, bool tickWarning = false)
         {
             var track = new Grid { Height = height };
             track.Children.Add(new Border
@@ -1341,6 +1341,27 @@ public partial class MainWindow : Window
                 g.Children.Add(fill);
                 track.Children.Add(g);
             }
+            if (idealTickPercent is { } idealPct && !double.IsNaN(idealPct))
+            {
+                var tickRatio = Math.Clamp(idealPct / 100.0, 0.018, 0.982);
+                var tickGrid = new Grid { IsHitTestVisible = false };
+                tickGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(tickRatio, GridUnitType.Star) });
+                tickGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, 1.0 - tickRatio), GridUnitType.Star) });
+                var tick = new Border
+                {
+                    Width = 2.2,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Margin = new Thickness(0, -1.3, -1.1, -1.3),
+                    CornerRadius = new CornerRadius(1.1),
+                    Background = tickWarning ? UiKit.WarningBrush : UiKit.TextBrush,
+                    BorderBrush = UiKit.SurfaceBrush,
+                    BorderThickness = new Thickness(0.45),
+                    Opacity = tickWarning ? 0.96 : 0.82
+                };
+                Grid.SetColumn(tick, 0);
+                tickGrid.Children.Add(tick);
+                track.Children.Add(tickGrid);
+            }
             return track;
         }
 
@@ -1349,6 +1370,7 @@ public partial class MainWindow : Window
             var rem = Math.Clamp(q.Remaining ?? 0.0, 0.0, 100.0);
             var low = rem <= 15.0;
             var barColor = rem <= 5.0 ? UiKit.DangerBrush : low ? UiKit.WarningBrush : UiKit.AccentBrush;
+            var pace = UsageFormatting.ComputeQuotaPace(q, now);
 
             var itemStack = new StackPanel();
             var qTop = new Grid { Margin = new Thickness(0, 0, 0, 2.5) };
@@ -1394,19 +1416,51 @@ public partial class MainWindow : Window
             qTop.Children.Add(qPct);
             itemStack.Children.Add(qTop);
 
-            var bar = BuildProgressBar(rem, barColor, 4.6);
+            var bar = BuildProgressBar(rem, barColor, 4.6, pace?.IdealRemainingPercent, pace?.IsWarning == true);
             if (bar is FrameworkElement bfe) bfe.Margin = new Thickness(0, 0, 0, 2.0);
             itemStack.Children.Add(bar);
 
-            itemStack.Children.Add(new TextBlock
+            var subGrid = new Grid();
+            subGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            subGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var resetBlock = new TextBlock
             {
                 Text = UsageFormatting.ResetText(q, now),
                 FontFamily = UiKit.AppFont,
                 FontSize = 10.2,
                 Foreground = UiKit.MutedBrush,
                 TextWrapping = TextWrapping.NoWrap,
-                TextTrimming = TextTrimming.CharacterEllipsis
-            });
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(0, 0, 6, 0)
+            };
+            Grid.SetColumn(resetBlock, 0);
+            subGrid.Children.Add(resetBlock);
+
+            if (!string.IsNullOrEmpty(pace?.CompactLabel))
+            {
+                var paceBrush = pace.State == "exhausted"
+                    ? UiKit.DangerBrush
+                    : pace.IsWarning
+                        ? UiKit.WarningBrush
+                        : pace.State == "ahead"
+                            ? UiKit.GreenBrush
+                            : UiKit.MutedBrush;
+                var paceBlock = new TextBlock
+                {
+                    Text = pace.CompactLabel,
+                    ToolTip = $"线性时间基准剩余 {UsageFormatting.Percentage(pace.IdealRemainingPercent)} · {pace.Label}",
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 10.0,
+                    FontWeight = pace.IsWarning ? FontWeights.SemiBold : FontWeights.Normal,
+                    Foreground = paceBrush,
+                    TextWrapping = TextWrapping.NoWrap
+                };
+                Grid.SetColumn(paceBlock, 1);
+                subGrid.Children.Add(paceBlock);
+            }
+
+            itemStack.Children.Add(subGrid);
             return itemStack;
         }
 
@@ -2532,7 +2586,8 @@ public partial class MainWindow : Window
                     topGrid.Children.Add(pctBadge);
                     block.Children.Add(topGrid);
 
-                    var bar = BuildProgressBar(rem, meterBrush, 4.8);
+                    var heroPace = UsageFormatting.ComputeQuotaPace(lq.Quota, now);
+                    var bar = BuildProgressBar(rem, meterBrush, 4.8, heroPace?.IdealRemainingPercent, heroPace?.IsWarning == true);
                     if (bar is FrameworkElement bfe)
                         bfe.Margin = new Thickness(0, isNano ? 5.0 : 6.5, 0, isNano ? 4.0 : 5.5);
                     block.Children.Add(bar);
@@ -2541,12 +2596,19 @@ public partial class MainWindow : Window
                     metaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                     metaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
+                    var baseReset = UsageFormatting.ResetText(lq.Quota, now);
+                    var resetLine = !string.IsNullOrEmpty(heroPace?.CompactLabel)
+                        ? $"{baseReset} · {heroPace.CompactLabel}"
+                        : baseReset;
                     var resetTxt = new TextBlock
                     {
-                        Text = UsageFormatting.ResetText(lq.Quota, now),
+                        Text = resetLine,
+                        ToolTip = heroPace is not null
+                            ? $"{baseReset} · 线性时间基准剩余 {UsageFormatting.Percentage(heroPace.IdealRemainingPercent)} ({heroPace.Label})"
+                            : baseReset,
                         FontFamily = UiKit.AppFont,
                         FontSize = 10.6,
-                        Foreground = UiKit.MutedBrush,
+                        Foreground = heroPace?.IsWarning == true ? UiKit.WarningBrush : UiKit.MutedBrush,
                         TextWrapping = TextWrapping.NoWrap,
                         TextTrimming = TextTrimming.CharacterEllipsis,
                         VerticalAlignment = VerticalAlignment.Center,
@@ -3658,6 +3720,9 @@ public partial class MainWindow : Window
         headerRight.Children.Add(_searchMatchSummary);
         _pendingEntryHost = new ContentControl { VerticalAlignment = VerticalAlignment.Center };
         headerRight.Children.Add(_pendingEntryHost);
+        var newTaskBtn = UiKit.IconButton("plus", "在已连接电脑新建远程任务", () => OpenNewTaskFlow(), boxSize: 28, iconSize: 15.5, highContrast: true);
+        newTaskBtn.Margin = new Thickness(6, 0, 0, 0);
+        headerRight.Children.Add(newTaskBtn);
         DockPanel.SetDock(headerRight, Dock.Right);
         headerRow.Children.Add(headerRight);
         topControls.Children.Add(headerRow);
@@ -4102,10 +4167,15 @@ public partial class MainWindow : Window
                 t1.HorizontalAlignment = HorizontalAlignment.Center;
                 emptyCardInner.Children.Add(t1);
 
-                var t2 = UiKit.Body("在左侧点选任意电脑会话，即可查看最终结果、下载交付附件、回答选择题或继续发送指令。", 13, UiKit.MutedBrush);
+                var t2 = UiKit.Body("在左侧点选任意电脑会话查看详情或继续对话，也可直接选择电脑与项目目录远程发起全新任务。", 13, UiKit.MutedBrush);
                 t2.TextAlignment = TextAlignment.Center;
-                t2.Margin = new Thickness(0, 7, 0, 16);
+                t2.Margin = new Thickness(0, 7, 0, 14);
                 emptyCardInner.Children.Add(t2);
+
+                var startEmptyBtn = UiKit.PrimaryButton("新建远程任务", () => OpenNewTaskFlow());
+                startEmptyBtn.HorizontalAlignment = HorizontalAlignment.Center;
+                startEmptyBtn.Margin = new Thickness(0, 0, 0, 14);
+                emptyCardInner.Children.Add(startEmptyBtn);
 
                 var kbdRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
                 foreach (var hint in new[] { "Ctrl + F 搜索任务", "F5 立即刷新" })
@@ -4161,6 +4231,139 @@ public partial class MainWindow : Window
         if (_selectedTaskId == task.Id) return;
         _selectedTaskId = task.Id;
         UpdateTasksPageInPlace();
+    }
+
+    private void OpenNewTaskFlow(string? preferredDeviceId = null)
+    {
+        Dialogs.ShowNewTaskDialog(this, _controller, preferredDeviceId, createdTaskId =>
+        {
+            _selectedDeviceId = null;
+            _page = NavPage.Tasks;
+            _selectedTaskId = createdTaskId;
+            if (_controller.Tasks.All(t => t.Id != createdTaskId))
+                _controller.Scope = TaskScope.Active;
+            RenderAll(forceShell: true);
+        });
+    }
+
+    private Border? BuildDevPreviewCard(MonitorTask? task, Computer? computer, Action<string>? onPrefillPrompt = null)
+    {
+        var items = DevPreviewPolicy.ItemsFor(task, computer, _controller.IsFresh);
+        if (items.Count == 0 || computer is null) return null;
+
+        var stack = new StackPanel();
+        var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+        var leftHead = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        leftHead.Children.Add(new MonitorIcon("globe", UiKit.AccentBrush, 17) { Margin = new Thickness(0, 0, 7, 0) });
+        leftHead.Children.Add(UiKit.Heading("本地开发预览", 16.5));
+        headerRow.Children.Add(leftHead);
+
+        var scopeHint = task is not null && items[0].MatchedProject
+            ? "当前项目监听端口"
+            : "电脑活跃开发端口";
+        var hintLbl = UiKit.Body(scopeHint, 12, UiKit.MutedBrush);
+        DockPanel.SetDock(hintLbl, Dock.Right);
+        hintLbl.HorizontalAlignment = HorizontalAlignment.Right;
+        hintLbl.VerticalAlignment = VerticalAlignment.Center;
+        headerRow.Children.Add(hintLbl);
+        stack.Children.Add(headerRow);
+
+        foreach (var item in items)
+        {
+            var captured = item;
+            var podRow = new DockPanel { LastChildFill = true };
+            var rightBtns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
+
+            if (!string.IsNullOrEmpty(captured.ShareUrl) && captured.LocalMachine)
+            {
+                var copyBtn = UiKit.SecondaryButton("复制真机链接", () =>
+                {
+                    try
+                    {
+                        Clipboard.SetText(captured.ShareUrl!);
+                        _controller.Notice = $"已复制真机预览地址：{captured.ShareUrl}";
+                        RenderAll(false);
+                    }
+                    catch { }
+                }, glyph: "copy");
+                copyBtn.Margin = new Thickness(0, 0, 8, 0);
+                rightBtns.Children.Add(copyBtn);
+            }
+
+            if (!string.IsNullOrEmpty(captured.LoopbackFixPrompt))
+            {
+                var fixLabel = onPrefillPrompt is not null ? "让 AI 改为 0.0.0.0" : "复制开放指令";
+                var fixBtn = UiKit.SecondaryButton(fixLabel, () =>
+                {
+                    if (onPrefillPrompt is not null)
+                    {
+                        onPrefillPrompt(captured.LoopbackFixPrompt!);
+                    }
+                    else
+                    {
+                        try
+                        {
+                            Clipboard.SetText(captured.LoopbackFixPrompt!);
+                            _controller.Notice = "已复制改为绑定 0.0.0.0 的提示指令，可粘贴给对应会话";
+                            RenderAll(false);
+                        }
+                        catch { }
+                    }
+                });
+                if (!string.IsNullOrEmpty(captured.OpenUrl))
+                    fixBtn.Margin = new Thickness(0, 0, 8, 0);
+                rightBtns.Children.Add(fixBtn);
+            }
+
+            if (!string.IsNullOrEmpty(captured.OpenUrl))
+            {
+                var openBtn = UiKit.PrimaryButton(captured.ButtonLabel, () =>
+                {
+                    MonitorController.OpenDevPreviewUrl(captured.OpenUrl, allowLoopback: computer.Local);
+                });
+                rightBtns.Children.Add(openBtn);
+            }
+
+            if (rightBtns.Children.Count > 0)
+            {
+                DockPanel.SetDock(rightBtns, Dock.Right);
+                podRow.Children.Add(rightBtns);
+            }
+
+            var leftInfo = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            leftInfo.Children.Add(new TextBlock
+            {
+                Text = $"端口 :{captured.Port}",
+                FontFamily = UiKit.AppFont,
+                FontSize = 13.5,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = UiKit.TextBrush
+            });
+            leftInfo.Children.Add(new TextBlock
+            {
+                Text = captured.Subtitle,
+                FontFamily = UiKit.AppFont,
+                FontSize = 12,
+                Foreground = captured.OpenUrl is null ? UiKit.WarningBrush : UiKit.MutedBrush,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 2, 0, 0)
+            });
+            podRow.Children.Add(leftInfo);
+
+            stack.Children.Add(new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(UiKit.PodRadius),
+                Padding = new Thickness(13, 9.5, 13, 9.5),
+                Margin = new Thickness(0, 6, 0, 0),
+                SnapsToDevicePixels = true,
+                Child = podRow
+            });
+        }
+
+        return UiKit.Card(stack, 18, UiKit.CardRadius);
     }
 
     private UIElement BuildTaskDetailPane(MonitorTask task, TaskDetailController detail)
@@ -4326,7 +4529,25 @@ public partial class MainWindow : Window
           .Append(detail.Controls is not null ? '1' : '0').Append('|')
           .Append(detail.Controls?.Reason).Append('|')
           .Append(detail.DecisionSending ? '1' : '0').Append('|')
-          .Append(detail.ControlsFeedback).Append('|');
+          .Append(detail.ControlsFeedback).Append('|')
+          .Append(task.ProjectId).Append('|');
+
+        var dev = _controller.Devices.FirstOrDefault(d => d.Id == task.DeviceId);
+        if (dev is not null)
+        {
+            sb.Append(dev.Online ? '1' : '0').Append(':');
+            if (dev.DevPorts is { Count: > 0 } dps)
+            {
+                foreach (var dp in dps)
+                    sb.Append(dp.Port).Append(',').Append(dp.BindScope).Append(',').Append(dp.ProjectId).Append(';');
+            }
+            if (dev.PreviewHosts is { Count: > 0 } phs)
+            {
+                foreach (var ph in phs)
+                    sb.Append(ph).Append(',');
+            }
+            sb.Append('|');
+        }
 
         if (detail.Result?.Files is { Count: > 0 } files)
         {
@@ -4470,6 +4691,28 @@ public partial class MainWindow : Window
             errCard.BorderBrush = UiKit.WarningBrush;
             errCard.Margin = new Thickness(0, 0, 0, 16);
             _taskDetailCardsHost.Children.Add(errCard);
+        }
+
+        // Local Dev Server One-Tap Preview Card (Parity with Android NativeDevPreviewPolicy)
+        var taskComputer = _controller.Devices.FirstOrDefault(d => d.Id == liveTask.DeviceId);
+        var previewCard = BuildDevPreviewCard(
+            liveTask,
+            taskComputer,
+            liveTask.SupportsReply
+                ? prompt =>
+                {
+                    if (_replyInputBox is not null)
+                    {
+                        _replyInputBox.Text = prompt;
+                        _replyInputBox.Focus();
+                        _replyInputBox.CaretIndex = _replyInputBox.Text.Length;
+                    }
+                }
+                : null);
+        if (previewCard is not null)
+        {
+            previewCard.Margin = new Thickness(0, 0, 0, 16);
+            _taskDetailCardsHost.Children.Add(previewCard);
         }
 
         // Conversation Token Card
@@ -5182,6 +5425,14 @@ public partial class MainWindow : Window
         var headStack = new StackPanel();
         var topRow = new DockPanel();
         topRow.Children.Add(UiKit.Heading(computer.Name, 23));
+        var topRightBtns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+        if (_controller.IsFresh && computer.Online)
+        {
+            var startDevTaskBtn = UiKit.PrimaryButton("新建任务", () => OpenNewTaskFlow(computer.Id));
+            if (!computer.Local)
+                startDevTaskBtn.Margin = new Thickness(0, 0, 8, 0);
+            topRightBtns.Children.Add(startDevTaskBtn);
+        }
         if (!computer.Local)
         {
             var rmBtn = UiKit.SecondaryButton("移除电脑", async () =>
@@ -5194,9 +5445,12 @@ public partial class MainWindow : Window
                     RenderAll(false);
                 }
             }, !_controller.Mutating, UiKit.DangerBrush, "close");
-            DockPanel.SetDock(rmBtn, Dock.Right);
-            rmBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            topRow.Children.Add(rmBtn);
+            topRightBtns.Children.Add(rmBtn);
+        }
+        if (topRightBtns.Children.Count > 0)
+        {
+            DockPanel.SetDock(topRightBtns, Dock.Right);
+            topRow.Children.Add(topRightBtns);
         }
         headStack.Children.Add(topRow);
 
@@ -5218,6 +5472,13 @@ public partial class MainWindow : Window
         var infoCard = UiKit.Card(headStack, 22);
         infoCard.Margin = new Thickness(0, 0, 0, 20);
         stack.Children.Add(infoCard);
+
+        var devPreviewCard = BuildDevPreviewCard(null, computer);
+        if (devPreviewCard is not null)
+        {
+            devPreviewCard.Margin = new Thickness(0, 0, 0, 20);
+            stack.Children.Add(devPreviewCard);
+        }
 
         var devTasks = _controller.Tasks.Where(t => t.DeviceId == computer.Id && !t.Archived).ToList();
         var taskHead = UiKit.Heading($"这台电脑上的任务 ({devTasks.Count})", 18);
@@ -5368,7 +5629,11 @@ public partial class MainWindow : Window
             {
                 foreach (var q in activeSource.Quotas)
                 {
-                    lines.Add($"{UsageFormatting.QuotaDisplayTitle(q)}\n已用 {UsageFormatting.Percentage(q.Used)}（剩余 {UsageFormatting.Percentage(q.Remaining)}）\n{UsageFormatting.ResetText(q, now)}");
+                    var paceInfo = UsageFormatting.ComputeQuotaPace(q, now);
+                    var paceLine = paceInfo is not null
+                        ? $"\n线性基准剩余 {UsageFormatting.Percentage(paceInfo.IdealRemainingPercent)} · {paceInfo.Label}"
+                        : "";
+                    lines.Add($"{UsageFormatting.QuotaDisplayTitle(q)}\n已用 {UsageFormatting.Percentage(q.Used)}（剩余 {UsageFormatting.Percentage(q.Remaining)}）\n{UsageFormatting.ResetText(q, now)}{paceLine}");
                 }
             }
             foreach (var c in checks.Where(c => c.Tool == tool))
@@ -5433,11 +5698,19 @@ public partial class MainWindow : Window
                 l1.Children.Add(remTxt);
                 qRow.Children.Add(l1);
 
-                // Remaining bar matching UsageRemainingBar in UsageView.swift
-                var track = new Grid { Height = 7, Margin = new Thickness(0, 6, 0, 6) };
-                track.Children.Add(new Border { Background = UiKit.SoftBrush, CornerRadius = new CornerRadius(3.5) });
+                var pace = UsageFormatting.ComputeQuotaPace(q, now);
+
+                // Remaining bar with linear-time benchmark pace pointer
+                var track = new Grid { Height = 9, Margin = new Thickness(0, 5, 0, 5) };
+                track.Children.Add(new Border
+                {
+                    Height = 7,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Background = UiKit.SoftBrush,
+                    CornerRadius = new CornerRadius(3.5)
+                });
                 var ratio = Math.Clamp((q.Remaining ?? 0.0) / 100.0, 0.0, 1.0);
-                var barGrid = new Grid();
+                var barGrid = new Grid { Height = 7, VerticalAlignment = VerticalAlignment.Center };
                 barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, ratio), GridUnitType.Star) });
                 barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, 1.0 - ratio), GridUnitType.Star) });
                 var fill = new Border
@@ -5448,9 +5721,62 @@ public partial class MainWindow : Window
                 Grid.SetColumn(fill, 0);
                 barGrid.Children.Add(fill);
                 track.Children.Add(barGrid);
+
+                if (pace is not null)
+                {
+                    var tickRatio = Math.Clamp(pace.IdealRemainingPercent / 100.0, 0.015, 0.985);
+                    var tickGrid = new Grid { IsHitTestVisible = false };
+                    tickGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(tickRatio, GridUnitType.Star) });
+                    tickGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, 1.0 - tickRatio), GridUnitType.Star) });
+                    var tick = new Border
+                    {
+                        Width = 2.4,
+                        Height = 9.5,
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(0, 0, -1.2, 0),
+                        CornerRadius = new CornerRadius(1.2),
+                        Background = pace.IsWarning ? UiKit.WarningBrush : UiKit.TextBrush,
+                        BorderBrush = UiKit.SurfaceBrush,
+                        BorderThickness = new Thickness(0.5),
+                        Opacity = pace.IsWarning ? 0.98 : 0.85
+                    };
+                    Grid.SetColumn(tick, 0);
+                    tickGrid.Children.Add(tick);
+                    track.Children.Add(tickGrid);
+                }
+
+                track.ToolTip = pace is not null
+                    ? $"剩余 {UsageFormatting.Percentage(q.Remaining)} · 线性时间基准剩余 {UsageFormatting.Percentage(pace.IdealRemainingPercent)} ({pace.Label})"
+                    : null;
                 qRow.Children.Add(track);
 
-                qRow.Children.Add(UiKit.Body($"已用 {UsageFormatting.Percentage(q.Used)} · {UsageFormatting.ResetText(q, now)}", 11.5, UiKit.MutedBrush));
+                var subDock = new DockPanel();
+                if (!string.IsNullOrEmpty(pace?.Label))
+                {
+                    var paceColor = pace.State == "exhausted"
+                        ? UiKit.DangerBrush
+                        : pace.IsWarning
+                            ? UiKit.WarningBrush
+                            : pace.State == "ahead"
+                                ? UiKit.GreenBrush
+                                : UiKit.MutedBrush;
+                    var paceTxt = new TextBlock
+                    {
+                        Text = pace.Label,
+                        FontFamily = UiKit.AppFont,
+                        FontSize = 11.5,
+                        FontWeight = pace.IsWarning ? FontWeights.SemiBold : FontWeights.Normal,
+                        Foreground = paceColor,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(8, 0, 0, 0)
+                    };
+                    DockPanel.SetDock(paceTxt, Dock.Right);
+                    paceTxt.HorizontalAlignment = HorizontalAlignment.Right;
+                    subDock.Children.Add(paceTxt);
+                }
+                subDock.Children.Add(UiKit.Body($"已用 {UsageFormatting.Percentage(q.Used)} · {UsageFormatting.ResetText(q, now)}", 11.5, UiKit.MutedBrush));
+                qRow.Children.Add(subDock);
                 col.Children.Add(qRow);
             }
         }

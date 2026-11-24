@@ -50,10 +50,13 @@ def install_workspace_routes(app, access, store, bearer, reader_gate, same_origi
         snapshot = store.snapshot()
         pending_kinds = app.state.task_replies.controls.pending_kinds(reader["id"])
         continuation = app.state.task_replies.continuation_states(snapshot)
+        device_tools = app.state.task_replies.device_supported_tools(snapshot)
         mark_request_phase("snapshot_end")
         mark_request_phase("usage_start")
         snapshot = app.state.usage.enrich(snapshot)
         mark_request_phase("usage_end")
+        for device in snapshot["devices"]:
+            device["supported_tools"] = device_tools.get(device["id"], [])
         names = {device["id"]: device["name"] for device in snapshot["devices"]}
         for task in snapshot["tasks"]:
             task["device_name"] = names.get(task["device_id"], "电脑")

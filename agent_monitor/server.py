@@ -138,6 +138,7 @@ class Task(BaseModel):
     final_result_id: str = Field(default="", max_length=64)
     final_result_at: str = Field(default="", max_length=80)
     project: str = Field(default="", max_length=120)
+    project_id: str = Field(default="", max_length=24, pattern=r"^(?:[0-9a-f]{24})?$")
     status_source: Literal["local_log", "hook"] = "local_log"
     error_analysis: ErrorAnalysis | None = None
     failure_code: FailureCode | Literal[""] = ""
@@ -159,10 +160,44 @@ class Source(BaseModel):
     detail: str = Field(default="", max_length=500)
 
 
+class ProjectSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=24, max_length=24, pattern=r"^[0-9a-f]{24}$")
+    name: str = Field(min_length=1, max_length=80)
+    tools: list[Literal["codex", "claude", "antigravity"]] = Field(default_factory=list, max_length=3)
+    updated_at: str = Field(max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def valid_project_name(cls, value):
+        if not value.strip() or any(unicodedata.category(c) in {"Cc", "Cf"} for c in value):
+            raise ValueError("项目名称格式无效")
+        return value.strip()
+
+    @field_validator("updated_at")
+    @classmethod
+    def valid_updated_at(cls, value):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("时间必须带时区")
+        return iso(min(parsed.timestamp(), time.time()))
+
+
+class DevPort(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    port: int = Field(ge=1024, le=65535)
+    bind_scope: Literal["network", "loopback"]
+    process: str = Field(default="", max_length=32, pattern=r"^[a-z0-9._-]{0,32}$")
+    project_id: str = Field(default="", max_length=24, pattern=r"^(?:[0-9a-f]{24})?$")
+
+
 class Heartbeat(BaseModel):
     tasks: list[Task] = Field(max_length=100)
     sources: list[Source] = Field(max_length=10)
     collected_at: str | None = Field(default=None, max_length=80)
+    projects: list[ProjectSummary] | None = Field(default=None, max_length=24)
+    dev_ports: list[DevPort] | None = Field(default=None, max_length=12)
+    preview_hosts: list[str] | None = Field(default=None, max_length=6)
 
     @field_validator("collected_at")
     @classmethod
@@ -173,6 +208,21 @@ class Heartbeat(BaseModel):
         if parsed.tzinfo is None:
             raise ValueError("时间必须带时区")
         return iso(min(parsed.timestamp(), time.time()))
+
+    @field_validator("preview_hosts")
+    @classmethod
+    def valid_hosts(cls, value):
+        if value is None:
+            return None
+        from .dev_previews import valid_preview_host
+        cleaned = []
+        for item in value:
+            host = valid_preview_host(item)
+            if not host:
+                raise ValueError("预览地址格式无效")
+            if host not in cleaned:
+                cleaned.append(host)
+        return cleaned
 
 
 class Attempts:
@@ -217,11 +267,34 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
                 local_id = store.ensure_local(platform.node() or "这台电脑", platform.system())
             snapshot = collect_snapshot(include_output=store.preferences()["sync_output"], codex_growth=codex_growth,
                                         codex_primary_backfill=True)
+            if isinstance(snapshot, dict) and "projects" in snapshot and "dev_ports" not in snapshot:
+                from .dev_previews import discover_dev_ports, discover_preview_hosts
+                from .task_results import resolve_local_project
+                path_map = {}
+                for proj in snapshot.get("projects") or []:
+                    if isinstance(proj, dict) and isinstance(proj.get("id"), str):
+                        resolved = resolve_local_project(proj["id"])
+                        if resolved is not None:
+                            path_map[resolved] = proj["id"]
+                snapshot = {
+                    **snapshot,
+                    "dev_ports": discover_dev_ports(path_map),
+                    "preview_hosts": discover_preview_hosts(public_url=public_url),
+                }
             parsed = Heartbeat.model_validate(snapshot)
             tasks_dump = [t.model_dump() for t in parsed.tasks]
             sources_dump = [s.model_dump() for s in parsed.sources]
+            extra_ingest: dict = {}
             if parsed.collected_at is not None:
-                store.ingest(local_id, tasks_dump, sources_dump, collected_at=parsed.collected_at)
+                extra_ingest["collected_at"] = parsed.collected_at
+            if parsed.projects is not None:
+                extra_ingest["projects"] = [p.model_dump() for p in parsed.projects]
+            if parsed.dev_ports is not None:
+                extra_ingest["dev_ports"] = [p.model_dump() for p in parsed.dev_ports]
+            if parsed.preview_hosts is not None:
+                extra_ingest["preview_hosts"] = parsed.preview_hosts
+            if extra_ingest:
+                store.ingest(local_id, tasks_dump, sources_dump, **extra_ingest)
             else:
                 store.ingest(local_id, tasks_dump, sources_dump)
         except Exception as exc:
@@ -505,9 +578,16 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
         device_id = store.agent_device(token)
         if not device_id:
             raise HTTPException(401, "设备连接已失效，请重新配对")
-        store.ingest(device_id, [t.model_dump() for t in payload.tasks], [s.model_dump() for s in payload.sources],
-                     collected_at=payload.collected_at)
-        return {"sync_output": store.preferences()["sync_output"], "antigravity_v1": True}
+        store.ingest(
+            device_id,
+            [t.model_dump() for t in payload.tasks],
+            [s.model_dump() for s in payload.sources],
+            collected_at=payload.collected_at,
+            projects=[p.model_dump() for p in payload.projects] if payload.projects is not None else None,
+            dev_ports=[p.model_dump() for p in payload.dev_ports] if payload.dev_ports is not None else None,
+            preview_hosts=payload.preview_hosts,
+        )
+        return {"sync_output": store.preferences()["sync_output"], "antigravity_v1": True, "workspace_meta_v1": True}
 
     from .google_login import install_google_routes
     google_enabled = install_google_routes(app, store, state_dir, public_url, authenticated, same_origin)

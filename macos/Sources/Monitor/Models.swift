@@ -45,6 +45,7 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
     let deviceId: String
     let deviceName: String?
     let project: String?
+    var projectId: String? = nil
     let preview: String?
     let updatedAt: String?
     let finalResultId: String?
@@ -88,6 +89,20 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
     }
 }
 
+struct ProjectSummary: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let tools: [String]?
+    let updatedAt: String?
+}
+
+struct DevPort: Decodable, Hashable {
+    let port: Int
+    let bindScope: String
+    let process: String?
+    let projectId: String?
+}
+
 struct Computer: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -95,6 +110,10 @@ struct Computer: Decodable, Identifiable, Hashable {
     let online: Bool
     let local: Bool
     let lastSeen: String?
+    var supportedTools: [String]? = nil
+    var projects: [ProjectSummary]? = nil
+    var devPorts: [DevPort]? = nil
+    var previewHosts: [String]? = nil
     var symbol: String { platform.lowercased().contains("darwin") || platform.lowercased().contains("mac") ? "macmini" : "desktopcomputer" }
 }
 struct Preferences: Decodable {
@@ -190,6 +209,7 @@ struct ReplyState: Decodable {
     let found: Bool?
     let available: Bool?
     let reason: String?
+    let createdTaskId: String?
     let latest: ReplyCommand?
     let deliveryMs: Int?
 }
@@ -197,6 +217,7 @@ struct ReplyCommand: Decodable {
     let id: String
     let state: String
     let reason: String?
+    let createdTaskId: String?
     let deliveryMs: Int?
 }
 struct PendingReply: Codable {
@@ -268,5 +289,170 @@ enum MonitorDate {
         if let result = formatter.date(from: text) { return result }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: text)
+    }
+}
+
+struct DevPreviewItem: Identifiable, Equatable {
+    var id: Int { port }
+    let port: Int
+    let process: String
+    let bindScope: String
+    let matchedProject: Bool
+    let localMachine: Bool
+    let openURL: String?
+    let shareURL: String?
+    let buttonLabel: String
+    let subtitle: String
+    let loopbackFixPrompt: String?
+}
+
+enum DevPreviewPolicy {
+    private static let canonicalTools = ["codex", "claude", "antigravity"]
+
+    static func supportedTools(for computer: Computer?) -> [String] {
+        guard let raw = computer?.supportedTools, !raw.isEmpty else { return [] }
+        return canonicalTools.filter { raw.contains($0) }
+    }
+
+    static func verifiedProjects(for computer: Computer?) -> [ProjectSummary] {
+        guard let raw = computer?.projects, !raw.isEmpty else { return [] }
+        var seen = Set<String>()
+        var out: [ProjectSummary] = []
+        for item in raw {
+            let trimmed = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, MonitorSecurity.matches(item.id, "[0-9a-f]{24}") else { continue }
+            if seen.insert(item.id).inserted { out.append(item) }
+        }
+        return out
+    }
+
+    static func validNetworkHost(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let host = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !host.isEmpty, host.count <= 253 else { return nil }
+        for scalar in host.unicodeScalars {
+            if scalar.value <= 0x20 || "/\\:@?#".unicodeScalars.contains(scalar) {
+                return nil
+            }
+        }
+        if host.hasSuffix(".ts.net") {
+            let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+            guard labels.count >= 3 else { return nil }
+            for label in labels {
+                guard !label.isEmpty, label.count <= 63, label.first != "-", label.last != "-" else { return nil }
+                for ch in label.unicodeScalars {
+                    let ok = (ch.value >= 97 && ch.value <= 122) || (ch.value >= 48 && ch.value <= 57) || ch == "-"
+                    if !ok { return nil }
+                }
+            }
+            return host
+        }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var nums: [Int] = []
+        for part in octets {
+            guard !part.isEmpty, part.count <= 3, !(part.count > 1 && part.first == "0"),
+                  part.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+                  let value = Int(part), (0...255).contains(value) else { return nil }
+            nums.append(value)
+        }
+        let a = nums[0], b = nums[1]
+        let allowed = a == 10
+            || (a == 172 && (16...31).contains(b))
+            || (a == 192 && b == 168)
+            || (a == 100 && (64...127).contains(b))
+        return allowed ? host : nil
+    }
+
+    static func validPreviewURL(_ raw: String?, allowLoopback: Bool) -> URL? {
+        guard let raw, !raw.isEmpty,
+              let components = URLComponents(string: raw),
+              components.scheme == "http",
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path == "/",
+              let port = components.port, (1024...65535).contains(port),
+              let host = components.host else { return nil }
+        if allowLoopback && host == "127.0.0.1" { return components.url }
+        guard validNetworkHost(host) != nil else { return nil }
+        return components.url
+    }
+
+    static func items(for task: MonitorTask?, computer: Computer?, fresh: Bool) -> [DevPreviewItem] {
+        guard fresh, let computer, computer.online, let rawPorts = computer.devPorts, !rawPorts.isEmpty else {
+            return []
+        }
+        var validHosts: [String] = []
+        for candidate in computer.previewHosts ?? [] {
+            if let clean = validNetworkHost(candidate), !validHosts.contains(clean) {
+                validHosts.append(clean)
+            }
+        }
+        let taskProj = (task?.projectId).flatMap { MonitorSecurity.matches($0, "[0-9a-f]{24}") ? $0 : nil } ?? ""
+        var seenPorts = Set<Int>()
+        var matched: [DevPort] = []
+        var all: [DevPort] = []
+        for dp in rawPorts {
+            guard (1024...65535).contains(dp.port),
+                  dp.bindScope == "network" || dp.bindScope == "loopback",
+                  seenPorts.insert(dp.port).inserted else { continue }
+            all.append(dp)
+            if !taskProj.isEmpty && dp.projectId == taskProj {
+                matched.append(dp)
+            }
+        }
+        guard !all.isEmpty else { return [] }
+        let chosen = matched.isEmpty ? all : matched
+        let matchedFlag = !matched.isEmpty
+        let primaryHost = validHosts.first
+
+        return chosen.prefix(4).map { dp in
+            let procTrimmed = (dp.process ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let proc = procTrimmed.isEmpty ? "dev" : procTrimmed
+            let fixPrompt = "请把当前监听 127.0.0.1:\(dp.port) 的本地开发服务改为绑定 0.0.0.0:\(dp.port)（例如加上 --host 0.0.0.0），方便手机或其他设备直接真机预览。"
+            if computer.local {
+                let localURL = "http://127.0.0.1:\(dp.port)/"
+                let shareURL = (dp.bindScope == "network" && primaryHost != nil) ? "http://\(primaryHost!):\(dp.port)/" : nil
+                let sub = shareURL != nil
+                    ? "\(proc) · 本机与手机均可访问 (\(primaryHost!):\(dp.port))"
+                    : "\(proc) · 本机可直连 (仅 127.0.0.1，手机预览需绑定 0.0.0.0)"
+                return DevPreviewItem(
+                    port: dp.port, process: proc, bindScope: dp.bindScope,
+                    matchedProject: matchedFlag, localMachine: true,
+                    openURL: localURL, shareURL: shareURL,
+                    buttonLabel: "打开预览 (:\(dp.port))", subtitle: sub,
+                    loopbackFixPrompt: dp.bindScope == "loopback" ? fixPrompt : nil
+                )
+            } else if dp.bindScope == "network", let host = primaryHost {
+                let remoteURL = "http://\(host):\(dp.port)/"
+                return DevPreviewItem(
+                    port: dp.port, process: proc, bindScope: dp.bindScope,
+                    matchedProject: matchedFlag, localMachine: false,
+                    openURL: remoteURL, shareURL: remoteURL,
+                    buttonLabel: "打开远程预览 (:\(dp.port))", subtitle: "\(proc) · \(host):\(dp.port)",
+                    loopbackFixPrompt: nil
+                )
+            } else if dp.bindScope == "loopback" {
+                return DevPreviewItem(
+                    port: dp.port, process: proc, bindScope: dp.bindScope,
+                    matchedProject: matchedFlag, localMachine: false,
+                    openURL: nil, shareURL: nil,
+                    buttonLabel: ":\(dp.port) 仅限该电脑本机",
+                    subtitle: "\(proc) · 仅监听 127.0.0.1，需绑定 0.0.0.0 才可跨设备预览",
+                    loopbackFixPrompt: fixPrompt
+                )
+            } else {
+                return DevPreviewItem(
+                    port: dp.port, process: proc, bindScope: dp.bindScope,
+                    matchedProject: matchedFlag, localMachine: false,
+                    openURL: nil, shareURL: nil,
+                    buttonLabel: ":\(dp.port)",
+                    subtitle: "\(proc) · 未检测到可用的 Tailscale 或局域网地址",
+                    loopbackFixPrompt: nil
+                )
+            }
+        }
     }
 }

@@ -339,24 +339,36 @@ public final class NativeUsagePage {
         StringBuilder message = new StringBuilder("各窗口分别计量，不能合并为一个余额\n"); long now = System.currentTimeMillis();
         for (JSONObject window : visibleWindows(source, now)) {
             long reset = NativeUsageFormat.epochMillis(window.opt("resets_at")); boolean old = stale(window, now);
+            Double wLeft = NativeUsageFormat.percent(window.opt("remaining_percent"));
+            Double wUsed = NativeUsageFormat.percent(window.opt("used_percent"));
+            NativeUsageFormat.QuotaPace wPace = NativeUsageFormat.computePace(wLeft, wUsed, window.optLong("window_minutes"), reset, now, old);
             message.append("\n").append(quotaLabel(window)).append("\n")
-                    .append(NativeUsageFormat.remaining(NativeUsageFormat.percent(window.opt("remaining_percent")), NativeUsageFormat.percent(window.opt("used_percent")), old, reset, now)).append("\n")
+                    .append(NativeUsageFormat.remaining(wLeft, wUsed, old, reset, now)).append("\n")
                     .append(NativeUsageFormat.reset(reset, now, old));
+            if (!wPace.label.isEmpty()) message.append("\n").append(wPace.label);
             String at = readableTime(window.optString("observed_at")); if (!at.isEmpty()) message.append("\n记录于 ").append(at);
             message.append("\n");
         }
         return message.toString();
     }
     private final class QuotaRow {
-        final ProviderCard owner; final LinearLayout view = ui.column(); final TextView title, remaining, reset; final Meter meter;
+        final ProviderCard owner; final LinearLayout view = ui.column(); final TextView title, remaining, reset, paceLabel; final Meter meter;
         final JSONObject data; final String label;
         QuotaRow(ProviderCard owner, String label, JSONObject data) {
             this.owner = owner; this.label = label; this.data = data;
             title = ui.text(label, 14); title.setTypeface(ui.medium);
             remaining = ui.text("", 26, true);
             view.addView(title, wrap()); view.addView(ui.space(12)); view.addView(remaining, wrap());
-            view.addView(ui.space(12)); meter = new Meter(); view.addView(meter, new LinearLayout.LayoutParams(-1, ui.dp(5)));
-            view.addView(ui.space(12)); reset = ui.text("", 13); reset.setTextColor(ui.muted); view.addView(reset, wrap());
+            view.addView(ui.space(10)); meter = new Meter(); view.addView(meter, new LinearLayout.LayoutParams(-1, ui.dp(10)));
+            view.addView(ui.space(10));
+            LinearLayout metaRow = ui.row();
+            reset = ui.text("", 13); reset.setTextColor(ui.muted);
+            metaRow.addView(reset, new LinearLayout.LayoutParams(0, -2, 1));
+            paceLabel = ui.text("", 12); paceLabel.setTypeface(ui.medium); paceLabel.setGravity(Gravity.END);
+            LinearLayout.LayoutParams paceParams = new LinearLayout.LayoutParams(-2, -2);
+            paceParams.setMarginStart(ui.dp(10));
+            metaRow.addView(paceLabel, paceParams);
+            view.addView(metaRow, wrap());
         }
         void update(long now) {
             if (data == null) { view.setVisibility(View.GONE); return; }
@@ -365,6 +377,7 @@ public final class NativeUsagePage {
             boolean visible = NativeUsagePresentation.quotaVisible(left, used, resetTime, now);
             view.setVisibility(visible ? View.VISIBLE : View.GONE); if (!visible) return;
             Double value = NativeUsagePresentation.used(used, left);
+            NativeUsageFormat.QuotaPace pace = NativeUsageFormat.computePace(left, used, data.optLong("window_minutes"), resetTime, now, old);
             setText(title, label);
             String prefix = old ? "上次已用 " : "已用 ";
             String reading = prefix + NativeUsageFormat.percentage(value);
@@ -374,18 +387,49 @@ public final class NativeUsagePage {
                 remaining.setText(styled);
             }
             remaining.setTextColor(old ? ui.muted : value != null && value >= 90 ? ui.warning : ui.text);
-            setText(reset, NativeUsageFormat.reset(resetTime, now, old)); meter.set(value, old);
+            setText(reset, NativeUsageFormat.reset(resetTime, now, old));
+            setText(paceLabel, pace.compactLabel);
+            paceLabel.setVisibility(pace.compactLabel.isEmpty() ? View.GONE : View.VISIBLE);
+            boolean paceWarn = "deficit".equals(pace.state) || "exhausted".equals(pace.state);
+            paceLabel.setTextColor(paceWarn ? ui.warning : "reserve".equals(pace.state) ? ui.accent : ui.muted);
+            meter.set(value, old, pace.hasTick() ? pace.idealUsedPercent : null, paceWarn);
         }
     }
     private final class Meter extends View {
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); Double value; boolean old = true;
+        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Double value, tickPercent;
+        boolean old = true, tickWarn;
         Meter() { super(ui.activity); setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO); }
-        void set(Double next, boolean stale) { if ((value == null ? next != null : !value.equals(next)) || old != stale) { value = next; old = stale; invalidate(); } }
+        void set(Double next, boolean stale, Double nextTick, boolean warn) {
+            boolean changedVal = value == null ? next != null : !value.equals(next);
+            boolean changedTick = tickPercent == null ? nextTick != null : !tickPercent.equals(nextTick);
+            if (changedVal || changedTick || old != stale || tickWarn != warn) {
+                value = next; old = stale; tickPercent = nextTick; tickWarn = warn; invalidate();
+            }
+        }
         @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas); float radius = getHeight() / 2f; paint.setColor(ui.line);
-            canvas.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), radius, radius, paint);
-            if (value != null && value > 0) { paint.setColor(old ? ui.muted : value >= 90 ? ui.warning : ui.accent); paint.setAlpha(old ? 110 : 255);
-                canvas.drawRoundRect(new RectF(0, 0, (float) (getWidth() * value / 100), getHeight()), radius, radius, paint); paint.setAlpha(255); }
+            super.onDraw(canvas);
+            float trackH = ui.dp(5);
+            float top = (getHeight() - trackH) / 2f;
+            float bottom = top + trackH;
+            float radius = trackH / 2f;
+            paint.setColor(ui.line);
+            canvas.drawRoundRect(new RectF(0, top, getWidth(), bottom), radius, radius, paint);
+            if (value != null && value > 0) {
+                paint.setColor(old ? ui.muted : value >= 90 ? ui.warning : ui.accent);
+                paint.setAlpha(old ? 110 : 255);
+                canvas.drawRoundRect(new RectF(0, top, (float) (getWidth() * value / 100), bottom), radius, radius, paint);
+                paint.setAlpha(255);
+            }
+            if (!old && tickPercent != null && tickPercent >= 0 && tickPercent <= 100 && getWidth() > 0) {
+                float tickW = Math.max(2f, ui.dp(2));
+                float cx = (float) (getWidth() * tickPercent / 100.0);
+                float left = Math.max(0f, Math.min(getWidth() - tickW, cx - tickW / 2f));
+                paint.setColor(tickWarn ? ui.warning : ui.text);
+                paint.setAlpha(tickWarn ? 235 : 190);
+                canvas.drawRoundRect(new RectF(left, 0, left + tickW, getHeight()), tickW / 2f, tickW / 2f, paint);
+                paint.setAlpha(255);
+            }
         }
     }
     private String emptyQuotaNote(String tool, boolean hasRecordedHistory) {

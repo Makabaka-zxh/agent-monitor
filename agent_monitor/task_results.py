@@ -219,6 +219,59 @@ def resolve_local_session(source_id: str, codex_home=None, claude_home=None, *,
     return None
 
 
+def resolve_local_project(project_id: str, *, codex_home=None, claude_home=None,
+                          antigravity_home=None) -> Path | None:
+    """Resolve an opaque 24-hex project ID to a verified local workspace directory."""
+    if not isinstance(project_id, str) or not re.fullmatch(r"[0-9a-f]{24}", project_id):
+        return None
+    use_antigravity = antigravity_home is not None or (codex_home is None and claude_home is None)
+    c_home = Path(codex_home) if codex_home is not None else Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    l_home = Path(claude_home) if claude_home is not None else Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+    for tool, home in (("codex", c_home), ("claude", l_home)):
+        base = home / ("sessions" if tool == "codex" else "projects")
+        if not _unlinked(base):
+            continue
+        files, _, _ = collector._recent_files(base, collector.MAX_SESSION_FILES, claude=tool == "claude")
+        for path in files:
+            if not _unlinked(path):
+                continue
+            try:
+                head = collector._read_head(path)
+                if tool == "codex":
+                    metadata = next((row.get("payload") for row in head if row.get("type") == "session_meta"
+                                     and isinstance(row.get("payload"), dict)), None)
+                    if not metadata or collector._codex_is_subagent(metadata):
+                        continue
+                    cwd = metadata.get("cwd")
+                else:
+                    if any(row.get("isSidechain") for row in head):
+                        continue
+                    cwd = next((row.get("cwd") for row in head if isinstance(row.get("cwd"), str) and row.get("cwd")), None)
+                if not isinstance(cwd, str) or collector.project_id_for_cwd(cwd) != project_id:
+                    continue
+                root = Path(os.path.abspath(cwd))
+                if root.parent != root and root.is_dir() and _unlinked(root):
+                    return root
+            except (OSError, ValueError):
+                continue
+    if use_antigravity:
+        try:
+            from .antigravity import _LOCAL_SOURCES, _read, resolve_antigravity_workspace
+            rows = _read(antigravity_home, 150)
+            for row in rows:
+                if len(row) < 8 or row[5] not in _LOCAL_SOURCES or row[7] != 0:
+                    continue
+                candidate = resolve_antigravity_workspace(row[3])
+                if candidate is None or collector.project_id_for_cwd(candidate) != project_id:
+                    continue
+                root = Path(os.path.abspath(str(candidate)))
+                if root.parent != root and root.is_dir() and _unlinked(root):
+                    return root
+        except Exception:
+            pass
+    return None
+
+
 def _safe_name(name: str) -> bool:
     lowered = name.lower()
     return bool(name and name not in {".", ".."} and len(name) <= 180 and

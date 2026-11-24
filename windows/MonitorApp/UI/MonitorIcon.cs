@@ -112,6 +112,12 @@ public sealed class MonitorIcon : FrameworkElement
                 DrawGeometry(dc, pen, "M 9.5,16 L 8,16 A 4,4 0 0 1 8,8 L 10,8 M 14.5,8 L 16,8 A 4,4 0 0 1 16,16 L 14,16 M 8.8,12 L 15.2,12");
                 break;
 
+            case "globe":
+                dc.DrawEllipse(null, pen, new Point(12, 12), 8.2, 8.2);
+                Line(dc, pen, 3.8, 12, 20.2, 12);
+                DrawGeometry(dc, pen, "M 12,3.8 C 8.5,7.2 8.5,16.8 12,20.2 M 12,3.8 C 15.5,7.2 15.5,16.8 12,20.2");
+                break;
+
             case "plus":
                 Line(dc, pen, 12, 5.5, 12, 18.5);
                 Line(dc, pen, 5.5, 12, 18.5, 12);

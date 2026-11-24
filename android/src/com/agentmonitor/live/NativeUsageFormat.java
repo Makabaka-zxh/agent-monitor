@@ -151,6 +151,84 @@ public final class NativeUsageFormat {
         return sourceId != null && !sourceId.trim().isEmpty()
                 && (selectedSource == null || selectedSource.equals("device:" + sourceId));
     }
+    public static final class QuotaPace {
+        public static final QuotaPace UNAVAILABLE = new QuotaPace("unavailable", -1, -1, 0, 0, "", "");
+        public final String state;
+        public final double idealUsedPercent;
+        public final double idealRemainingPercent;
+        public final double deltaPercent;
+        public final long exhaustSeconds;
+        public final String label;
+        public final String compactLabel;
+
+        QuotaPace(String state, double idealUsedPercent, double idealRemainingPercent,
+                  double deltaPercent, long exhaustSeconds, String label, String compactLabel) {
+            this.state = state;
+            this.idealUsedPercent = idealUsedPercent;
+            this.idealRemainingPercent = idealRemainingPercent;
+            this.deltaPercent = deltaPercent;
+            this.exhaustSeconds = exhaustSeconds;
+            this.label = label;
+            this.compactLabel = compactLabel;
+        }
+
+        public boolean hasTick() {
+            return idealUsedPercent >= 0 && idealUsedPercent <= 100;
+        }
+    }
+
+    public static String paceDuration(long seconds) {
+        long minutes = Math.max(1L, (seconds + 59L) / 60L);
+        if (minutes >= 1440L) {
+            long days = minutes / 1440L;
+            long hours = (minutes % 1440L) / 60L;
+            return hours > 0 ? days + " 天 " + hours + " 小时" : days + " 天";
+        }
+        if (minutes >= 60L) {
+            long hours = minutes / 60L;
+            long remMin = minutes % 60L;
+            return remMin > 0 ? hours + " 小时 " + remMin + " 分钟" : hours + " 小时";
+        }
+        return minutes + " 分钟";
+    }
+
+    public static QuotaPace computePace(Double remaining, Double used, long windowMinutes,
+                                        long resetsMillis, long nowMillis, boolean stale) {
+        if (stale || windowMinutes <= 0 || resetsMillis <= nowMillis) return QuotaPace.UNAVAILABLE;
+        Double remVal = percent(remaining);
+        Double usedVal = percent(used);
+        if (remVal == null && usedVal == null) return QuotaPace.UNAVAILABLE;
+        if (remVal == null) remVal = 100.0 - usedVal;
+        if (usedVal == null) usedVal = 100.0 - remVal;
+        long windowMs = windowMinutes * 60_000L;
+        long remMs = resetsMillis - nowMillis;
+        if (remMs <= 0 || remMs >= windowMs) return QuotaPace.UNAVAILABLE;
+        long elapsedMs = windowMs - remMs;
+        double idealRem = Math.max(0.0, Math.min(100.0, (remMs * 100.0) / windowMs));
+        double idealUsed = 100.0 - idealRem;
+        double delta = remVal - idealRem;
+        if (remVal <= 0.5) {
+            return new QuotaPace("exhausted", idealUsed, idealRem, delta, 0, "额度已耗尽", "已耗尽");
+        }
+        long warmupMs = Math.min(300_000L, (long) (windowMs * 0.03));
+        if (elapsedMs < warmupMs && usedVal < 10.0) {
+            return new QuotaPace("warming_up", idealUsed, idealRem, delta, 0, "", "");
+        }
+        if (delta <= -5.0) {
+            double safeUsed = Math.max(0.5, usedVal);
+            long exhaustSec = Math.max(60L, Math.round((elapsedMs / 1000.0) * (remVal / safeUsed)));
+            String eta = paceDuration(exhaustSec);
+            return new QuotaPace("deficit", idealUsed, idealRem, delta, exhaustSec,
+                    "消耗超速 · 约 " + eta + "耗尽", "超速 · 约 " + eta + "耗尽");
+        }
+        if (delta >= 6.0) {
+            long rounded = Math.round(delta);
+            return new QuotaPace("reserve", idealUsed, idealRem, delta, 0,
+                    "配速稳健 · 富余 +" + rounded + "%", "富余 +" + rounded + "%");
+        }
+        return new QuotaPace("on_track", idealUsed, idealRem, delta, 0, "配速均衡", "均速");
+    }
+
     public static String day(long nowMillis) {
         java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd", Locale.CHINA);
         format.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Shanghai"));

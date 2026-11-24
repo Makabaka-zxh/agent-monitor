@@ -3,7 +3,7 @@ import Foundation
 enum Endpoint {
     case workbench, usage, account, profile, preferences, session, pairingStart, pairingPoll(String), pairingCode
     case qrPairingStart, qrPairingPoll(String)
-    case archive, result(String), resultTXT(String, String), file(String, String, String), reply(String, String?), sendReply
+    case archive, result(String), resultTXT(String, String), file(String, String, String), reply(String, String?), sendReply, startTask
     case controls(String), controlDecision
 
     var path: String {
@@ -24,6 +24,7 @@ enum Endpoint {
         case .resultTXT: "/api/native/tasks/result.txt"
         case .file: "/api/native/tasks/result/file"
         case .reply, .sendReply: "/api/native/tasks/reply"
+        case .startTask: "/api/native/tasks/start"
         case .controls: "/api/native/tasks/controls"
         case .controlDecision: "/api/native/tasks/controls/decision"
         }

@@ -267,7 +267,8 @@ def _status(native, not_idle, killed, updated, now, stale_seconds):
 
 
 def scan_antigravity(*, base: Path | str | None = None, limit: int = 50,
-                     now: datetime | None = None) -> list[dict] | None:
+                     now: datetime | None = None,
+                     workspace_sink: dict | None = None) -> list[dict] | None:
     """Return bounded task metadata; None means the local index is unavailable."""
     from . import collector
 
@@ -292,7 +293,13 @@ def scan_antigravity(*, base: Path | str | None = None, limit: int = 50,
             continue
         status = _status(status, not_idle, killed, updated, current, collector.STALE_SECONDS)
         label = _display(title, 120) or f"Antigravity 会话 {identifier[:8]}"
-        tasks.append(collector._task("antigravity", identifier, label, status, updated, _project(workspace)))
+        cwd = resolve_antigravity_workspace(workspace)
+        proj_id = collector.project_id_for_cwd(cwd) if cwd is not None else ""
+        task = collector._task("antigravity", identifier, label, status, updated, _project(workspace),
+                               project_id=proj_id)
+        if cwd is not None and proj_id:
+            collector._record_workspace(workspace_sink, proj_id, cwd, "antigravity", task["updated_at"])
+        tasks.append(task)
         if len(tasks) >= limit:
             break
     return tasks

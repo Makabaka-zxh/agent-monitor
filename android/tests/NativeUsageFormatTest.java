@@ -62,6 +62,26 @@ public final class NativeUsageFormatTest {
         equal(false, NativeUsageFormat.quotaCheckSource(null, ""));
         equal(false, NativeUsageFormat.quotaCheckSource(null, "   "));
         equal(true, NativeUsageFormat.quotaCheckSource(null, "windows"));
+
+        // QuotaPace: 5-hour window (300 min = 18_000_000 ms), 3 hours left (40% elapsed, idealRemaining=60%, idealUsed=40%)
+        long windowEnd = now + 180L * 60_000L;
+        NativeUsageFormat.QuotaPace reserve = NativeUsageFormat.computePace(80d, 20d, 300, windowEnd, now, false);
+        equal("reserve", reserve.state);
+        equal("富余 +20%", reserve.compactLabel);
+        equal(40L, Math.round(reserve.idealUsedPercent));
+
+        NativeUsageFormat.QuotaPace balanced = NativeUsageFormat.computePace(58d, 42d, 300, windowEnd, now, false);
+        equal("on_track", balanced.state);
+        equal("均速", balanced.compactLabel);
+
+        NativeUsageFormat.QuotaPace deficit = NativeUsageFormat.computePace(30d, 70d, 300, windowEnd, now, false);
+        equal("deficit", deficit.state);
+        equal("超速 · 约 52 分钟耗尽", deficit.compactLabel);
+
+        NativeUsageFormat.QuotaPace stalePace = NativeUsageFormat.computePace(30d, 70d, 300, windowEnd, now, true);
+        equal("unavailable", stalePace.state);
+        equal(false, stalePace.hasTick());
+
         System.out.println("NativeUsageFormatTest: " + checks + " checks passed");
     }
 }

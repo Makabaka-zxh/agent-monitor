@@ -126,4 +126,50 @@ final class MonitorTests: XCTestCase {
         XCTAssertEqual(approvalTask.statusTitle, "等待批准")
         XCTAssertTrue(approvalTask.matches(tool: .all, scope: .active, fresh: true))
     }
+
+    func testNewTaskEndpointAndDevPreviewPolicyValidation() throws {
+        let startTaskURL = try Endpoint.startTask.url(origin: testOrigin)
+        XCTAssertEqual(startTaskURL.absoluteString, testOrigin + "/api/native/tasks/start")
+
+        let replyWithCreated = try decode(ReplyState.self, #"{"id":"req-1","state":"running","created_task_id":"dev-1:codex:11111111-2222-3333-4444-555555555555"}"#)
+        XCTAssertEqual(replyWithCreated.createdTaskId, "dev-1:codex:11111111-2222-3333-4444-555555555555")
+
+        XCTAssertEqual(DevPreviewPolicy.validNetworkHost("DevBox.Example-Tailnet.ts.net"), "devbox.example-tailnet.ts.net")
+        XCTAssertEqual(DevPreviewPolicy.validNetworkHost("100.88.12.34"), "100.88.12.34")
+        XCTAssertEqual(DevPreviewPolicy.validNetworkHost("192.168.1.25"), "192.168.1.25")
+        XCTAssertNil(DevPreviewPolicy.validNetworkHost("8.8.8.8"))
+        XCTAssertNil(DevPreviewPolicy.validNetworkHost("127.0.0.1"))
+        XCTAssertNil(DevPreviewPolicy.validNetworkHost("evil.com"))
+
+        XCTAssertNotNil(DevPreviewPolicy.validPreviewURL("http://127.0.0.1:5173/", allowLoopback: true))
+        XCTAssertNil(DevPreviewPolicy.validPreviewURL("http://127.0.0.1:5173/", allowLoopback: false))
+        XCTAssertNotNil(DevPreviewPolicy.validPreviewURL("http://100.90.1.2:3000/", allowLoopback: false))
+        XCTAssertNil(DevPreviewPolicy.validPreviewURL("https://evil.com:3000/", allowLoopback: true))
+
+        let projId = "0123456789abcdef01234567"
+        let bench = try decode(Workbench.self, """
+        {"devices":[{"id":"11111111-2222-3333-4444-555555555555","name":"Remote PC","platform":"Windows","online":true,"local":false,
+          "supported_tools":["claude","codex"],
+          "projects":[{"id":"\(projId)","name":"web-app","tools":["codex"]},{"id":"invalid","name":"bad"}],
+          "preview_hosts":["100.101.2.3","8.8.8.8"],
+          "dev_ports":[{"port":5173,"bind_scope":"network","process":"node","project_id":"\(projId)"},
+                       {"port":3000,"bind_scope":"loopback","process":"bun","project_id":""}]}],
+         "tasks":[{"id":"t1","title":"Web","tool":"codex","status":"running","device_id":"11111111-2222-3333-4444-555555555555","project_id":"\(projId)","archived":false,"stale":false}],
+         "preferences":{"sync_output":true}}
+        """)
+        let computer = try XCTUnwrap(bench.devices.first)
+        let task = try XCTUnwrap(bench.tasks.first)
+        XCTAssertEqual(DevPreviewPolicy.supportedTools(for: computer), ["codex", "claude"])
+        XCTAssertEqual(DevPreviewPolicy.verifiedProjects(for: computer).map(\.id), [projId])
+
+        let matched = DevPreviewPolicy.items(for: task, computer: computer, fresh: true)
+        XCTAssertEqual(matched.count, 1)
+        XCTAssertTrue(matched[0].matchedProject)
+        XCTAssertEqual(matched[0].openURL, "http://100.101.2.3:5173/")
+
+        let allItems = DevPreviewPolicy.items(for: nil, computer: computer, fresh: true)
+        XCTAssertEqual(allItems.count, 2)
+        XCTAssertNil(allItems[1].openURL)
+        XCTAssertTrue(allItems[1].loopbackFixPrompt?.contains("0.0.0.0:3000") == true)
+    }
 }

@@ -117,6 +117,9 @@ class Store:
         dev_columns = {row[1] for row in self.db.execute("PRAGMA table_info(devices)")}
         if "last_collected_at" not in dev_columns:
             self.db.execute("ALTER TABLE devices ADD COLUMN last_collected_at REAL")
+        for col_name in ("projects", "dev_ports", "preview_hosts"):
+            if col_name not in dev_columns:
+                self.db.execute(f"ALTER TABLE devices ADD COLUMN {col_name} TEXT NOT NULL DEFAULT '[]'")
         self.db.commit()
 
     def close(self):
@@ -444,7 +447,17 @@ class Store:
             row = self.db.execute("SELECT id FROM devices WHERE token_hash=? AND local=0", (digest(token),)).fetchone()
         return row["id"] if row else None
 
-    def ingest(self, device_id: str, tasks: list[dict], sources: list[dict], *, collected_at: str | None = None):
+    def ingest(
+        self,
+        device_id: str,
+        tasks: list[dict],
+        sources: list[dict],
+        *,
+        collected_at: str | None = None,
+        projects: list[dict] | None = None,
+        dev_ports: list[dict] | None = None,
+        preview_hosts: list[str] | None = None,
+    ):
         with self.lock, self.db:
             if not self.db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone():
                 raise ValueError("设备已断开，请重新配对")
@@ -459,9 +472,47 @@ class Store:
                 except ValueError:
                     collected_ts = None
             self.db.execute(
-                "UPDATE devices SET last_seen=?,last_collected_at=COALESCE(?,last_collected_at),sources=? WHERE id=?",
-                (now, collected_ts, json.dumps(sources, ensure_ascii=False), device_id),
+                """UPDATE devices SET
+                    last_seen=?,
+                    last_collected_at=COALESCE(?,last_collected_at),
+                    sources=?,
+                    projects=COALESCE(?,projects),
+                    dev_ports=COALESCE(?,dev_ports),
+                    preview_hosts=COALESCE(?,preview_hosts)
+                   WHERE id=?""",
+                (
+                    now,
+                    collected_ts,
+                    json.dumps(sources, ensure_ascii=False),
+                    json.dumps(projects[:24], ensure_ascii=False) if projects is not None else None,
+                    json.dumps(dev_ports[:12], ensure_ascii=False) if dev_ports is not None else None,
+                    json.dumps(preview_hosts[:6], ensure_ascii=False) if preview_hosts is not None else None,
+                    device_id,
+                ),
             )
+            incoming_ids = {item["id"] for item in tasks[:100] if isinstance(item, dict) and isinstance(item.get("id"), str)}
+            preserved_rows: list[tuple[str, str]] = []
+            has_replies = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_replies'"
+            ).fetchone()
+            if has_replies:
+                reply_cols = {r[1] for r in self.db.execute("PRAGMA table_info(task_replies)")}
+                if "created_task_id" in reply_cols:
+                    prefix = device_id + ":"
+                    for r in self.db.execute(
+                        "SELECT created_task_id FROM task_replies WHERE device_id=? AND state IN ('dispatching','running') AND created_task_id!=''",
+                        (device_id,),
+                    ).fetchall():
+                        ctid = r["created_task_id"]
+                        if ctid.startswith(prefix):
+                            sid = ctid[len(prefix):]
+                            if sid and sid not in incoming_ids:
+                                existing_task = self.db.execute(
+                                    "SELECT payload FROM tasks WHERE device_id=? AND source_id=?",
+                                    (device_id, sid),
+                                ).fetchone()
+                                if existing_task:
+                                    preserved_rows.append((sid, existing_task["payload"]))
             self.db.execute("DELETE FROM tasks WHERE device_id=?", (device_id,))
             for item in tasks[:100]:
                 task = dict(item)
@@ -473,6 +524,41 @@ class Store:
                     task["final_result_at"] = ""
                     task["preview"] = STATUS_PREVIEWS.get(task["status"], STATUS_PREVIEWS["unknown"])
                 self.db.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?)", (device_id, task["id"], json.dumps(task, ensure_ascii=False)))
+            for sid, payload in preserved_rows:
+                self.db.execute("INSERT OR IGNORE INTO tasks VALUES (?,?,?)", (device_id, sid, payload))
+
+    def upsert_spawned_task(
+        self,
+        device_id: str,
+        source_id: str,
+        tool: str,
+        title: str,
+        project: str = "",
+        project_id: str = "",
+    ) -> None:
+        clean_title = " ".join((title or "").split())[:72] or f"{tool} 新任务"
+        payload = {
+            "id": source_id,
+            "tool": tool,
+            "title": clean_title,
+            "status": "running",
+            "updated_at": iso(),
+            "preview": STATUS_PREVIEWS["running"],
+            "output": "",
+            "final_result_id": "",
+            "final_result_at": "",
+            "project": project[:120],
+            "project_id": project_id[:24],
+            "status_source": "hook" if tool == "claude" else "local_log",
+            "error_analysis": None,
+            "failure_code": "",
+        }
+        with self.lock, self.db:
+            if self.db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone():
+                self.db.execute(
+                    "INSERT OR IGNORE INTO tasks VALUES (?,?,?)",
+                    (device_id, source_id, json.dumps(payload, ensure_ascii=False)),
+                )
 
     def remove_device(self, device_id: str):
         with self.lock, self.db:
@@ -496,8 +582,21 @@ class Store:
         with self.lock:
             devices = []
             for row in self.db.execute("SELECT * FROM devices ORDER BY local DESC,name").fetchall():
-                entry = {"id": row["id"], "name": row["name"], "platform": row["platform"], "last_seen": iso(row["last_seen"]), "online": now - row["last_seen"] < ONLINE_SECONDS, "local": bool(row["local"]), "sources": json.loads(row["sources"])}
-                if "last_collected_at" in row.keys() and row["last_collected_at"]:
+                keys = row.keys()
+                is_online = now - row["last_seen"] < ONLINE_SECONDS
+                entry = {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "platform": row["platform"],
+                    "last_seen": iso(row["last_seen"]),
+                    "online": is_online,
+                    "local": bool(row["local"]),
+                    "sources": json.loads(row["sources"]),
+                    "projects": json.loads(row["projects"]) if "projects" in keys and row["projects"] else [],
+                    "dev_ports": (json.loads(row["dev_ports"]) if "dev_ports" in keys and row["dev_ports"] else []) if is_online else [],
+                    "preview_hosts": json.loads(row["preview_hosts"]) if "preview_hosts" in keys and row["preview_hosts"] else [],
+                }
+                if "last_collected_at" in keys and row["last_collected_at"]:
                     entry["collected_at"] = iso(row["last_collected_at"])
                 devices.append(entry)
             online = {d["id"]: d["online"] for d in devices}

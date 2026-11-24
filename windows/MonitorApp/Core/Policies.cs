@@ -6,6 +6,16 @@ namespace MonitorApp.Core;
 
 public sealed record UsageSourceGroup(string Id, string Name, List<UsageQuotaDto> Quotas);
 
+public sealed record QuotaPaceInfo(
+    double IdealRemainingPercent,
+    double DeltaPercent,
+    string State,
+    string Label,
+    string CompactLabel)
+{
+    public bool IsWarning => State is "behind" or "exhausted";
+}
+
 public static class UsageCalendar
 {
     private static readonly TimeSpan BeijingOffset = TimeSpan.FromHours(8);
@@ -143,6 +153,74 @@ public static class UsageFormatting
             : $"{minutes} 分钟";
         var isOld = stale || quota.Stale;
         return (isOld ? "预计 " : "") + duration + "后重置" + (isOld ? " · 待更新" : "");
+    }
+
+    public static string PaceDuration(double seconds)
+    {
+        var minutes = Math.Max(1, (int)Math.Round(seconds / 60.0));
+        if (minutes >= 1440)
+        {
+            var days = minutes / 1440;
+            var hours = (minutes % 1440) / 60;
+            return hours > 0 ? $"{days} 天 {hours} 小时" : $"{days} 天";
+        }
+        if (minutes >= 60)
+        {
+            var hours = minutes / 60;
+            var remMin = minutes % 60;
+            return remMin > 0 ? $"{hours} 小时 {remMin} 分钟" : $"{hours} 小时";
+        }
+        return $"{minutes} 分钟";
+    }
+
+    public static QuotaPaceInfo? ComputeQuotaPace(UsageQuotaDto? quota, DateTimeOffset now, bool stale = false)
+    {
+        if (quota is null || stale || quota.Stale || quota.IsExpired(now))
+            return null;
+        if (quota.Remaining is not { } rawRem || double.IsNaN(rawRem) || double.IsInfinity(rawRem))
+            return null;
+        if (quota.ResetDate is not { } reset || quota.WindowMinutes is not (> 0 and <= 100800))
+            return null;
+
+        var windowSec = quota.WindowMinutes.Value * 60.0;
+        var remSec = (reset - now).TotalSeconds;
+        if (remSec <= 0 || remSec > windowSec)
+            return null;
+
+        var rem = Math.Clamp(rawRem, 0.0, 100.0);
+        var used = Math.Clamp(100.0 - rem, 0.0, 100.0);
+        var elapsedSec = windowSec - remSec;
+        var idealRem = Math.Clamp((remSec / windowSec) * 100.0, 0.0, 100.0);
+        var delta = rem - idealRem;
+
+        if (rem <= 0.05)
+            return new QuotaPaceInfo(idealRem, delta, "exhausted", "额度已用尽", "已用尽");
+
+        if (elapsedSec < Math.Max(180.0, windowSec * 0.03))
+            return new QuotaPaceInfo(idealRem, delta, "steady", "窗口刚开启", "");
+
+        if (delta >= 5.0)
+        {
+            var pts = (int)Math.Round(delta);
+            var text = $"富余 +{pts}%";
+            return new QuotaPaceInfo(idealRem, delta, "ahead", text, text);
+        }
+
+        if (delta >= -5.0)
+            return new QuotaPaceInfo(idealRem, delta, "steady", "配速均衡", "均速");
+
+        var ratePerSec = used / Math.Max(1.0, elapsedSec);
+        if (ratePerSec > 0)
+        {
+            var secToEmpty = rem / ratePerSec;
+            if (secToEmpty < remSec)
+            {
+                var warn = $"超速 · 约 {PaceDuration(secToEmpty)}耗尽";
+                return new QuotaPaceInfo(idealRem, delta, "behind", warn, warn);
+            }
+        }
+        var mild = $"偏快 {(int)Math.Round(delta)}%";
+        return new QuotaPaceInfo(idealRem, delta, "behind", mild, mild);
     }
 
     public static string QuotaCheckText(string? state) => state switch
@@ -1042,5 +1120,222 @@ public static class UsageAlertEvaluator
             }
         }
         return notifications;
+    }
+}
+
+public sealed record DevPreviewItem(
+    int Port,
+    string Process,
+    string BindScope,
+    bool MatchedProject,
+    bool LocalMachine,
+    string? OpenUrl,
+    string? ShareUrl,
+    string ButtonLabel,
+    string Subtitle,
+    string? LoopbackFixPrompt);
+
+public static class DevPreviewPolicy
+{
+    private static readonly string[] CanonicalTools = ["codex", "claude", "antigravity"];
+
+    public static List<string> SupportedToolsFor(Computer? computer)
+    {
+        if (computer?.SupportedTools is not { Count: > 0 } raw) return [];
+        var result = new List<string>(3);
+        foreach (var t in CanonicalTools)
+        {
+            if (raw.Any(x => string.Equals(x, t, StringComparison.Ordinal)))
+                result.Add(t);
+        }
+        return result;
+    }
+
+    public static List<ProjectSummaryDto> VerifiedProjectsFor(Computer? computer)
+    {
+        if (computer?.Projects is not { Count: > 0 } raw) return [];
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var list = new List<ProjectSummaryDto>();
+        foreach (var p in raw)
+        {
+            if (p is null || string.IsNullOrWhiteSpace(p.Name)) continue;
+            if (!MonitorSecurity.Matches(p.Id, "[0-9a-f]{24}")) continue;
+            if (seen.Add(p.Id))
+                list.Add(p);
+        }
+        return list;
+    }
+
+    public static string? ValidNetworkHost(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var host = raw.Trim().ToLowerInvariant();
+        if (host.Length is < 1 or > 253) return null;
+        foreach (var ch in host)
+        {
+            if (ch <= ' ' || ch is '/' or '\\' or ':' or '@' or '?' or '#')
+                return null;
+        }
+
+        if (host.EndsWith(".ts.net", StringComparison.Ordinal))
+        {
+            var labels = host.Split('.');
+            if (labels.Length < 3) return null;
+            foreach (var label in labels)
+            {
+                if (label.Length is < 1 or > 63 || label[0] == '-' || label[^1] == '-')
+                    return null;
+                foreach (var c in label)
+                {
+                    if (!((c is >= 'a' and <= 'z') || (c is >= '0' and <= '9') || c == '-'))
+                        return null;
+                }
+            }
+            return host;
+        }
+
+        var octets = host.Split('.');
+        if (octets.Length != 4) return null;
+        var nums = new int[4];
+        for (var i = 0; i < 4; i++)
+        {
+            var part = octets[i];
+            if (part.Length is < 1 or > 3 || (part.Length > 1 && part[0] == '0'))
+                return null;
+            if (!int.TryParse(part, NumberStyles.None, CultureInfo.InvariantCulture, out var v) || v is < 0 or > 255)
+                return null;
+            nums[i] = v;
+        }
+
+        var a = nums[0];
+        var b = nums[1];
+        var isPrivateOrTailnet =
+            a == 10
+            || (a == 172 && b is >= 16 and <= 31)
+            || (a == 192 && b == 168)
+            || (a == 100 && b is >= 64 and <= 127);
+        return isPrivateOrTailnet ? host : null;
+    }
+
+    public static bool ValidPreviewUrl(string? url, bool allowLoopback)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (!string.Equals(uri.Scheme, "http", StringComparison.Ordinal)) return false;
+        if (uri.Port is < 1024 or > 65535) return false;
+        if (!string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Fragment)) return false;
+        if (uri.PathAndQuery != "/") return false;
+        if (allowLoopback && string.Equals(uri.Host, "127.0.0.1", StringComparison.Ordinal))
+            return true;
+        return ValidNetworkHost(uri.Host) is not null;
+    }
+
+    public static List<DevPreviewItem> ItemsFor(MonitorTask? task, Computer? computer, bool fresh)
+    {
+        if (!fresh || computer is not { Online: true, DevPorts.Count: > 0 })
+            return [];
+
+        var validHosts = new List<string>();
+        if (computer.PreviewHosts is { Count: > 0 } rawHosts)
+        {
+            foreach (var h in rawHosts)
+            {
+                if (ValidNetworkHost(h) is { } clean && !validHosts.Contains(clean, StringComparer.Ordinal))
+                    validHosts.Add(clean);
+            }
+        }
+
+        var taskProjId = task?.ProjectId is { } pid && MonitorSecurity.Matches(pid, "[0-9a-f]{24}") ? pid : "";
+        var seenPorts = new HashSet<int>();
+        var matched = new List<DevPortDto>();
+        var all = new List<DevPortDto>();
+
+        foreach (var dp in computer.DevPorts)
+        {
+            if (dp is null || dp.Port is < 1024 or > 65535) continue;
+            if (dp.BindScope is not ("network" or "loopback")) continue;
+            if (!seenPorts.Add(dp.Port)) continue;
+            all.Add(dp);
+            if (!string.IsNullOrEmpty(taskProjId) && string.Equals(dp.ProjectId, taskProjId, StringComparison.Ordinal))
+                matched.Add(dp);
+        }
+
+        if (all.Count == 0) return [];
+        var chosen = matched.Count > 0 ? matched : all;
+        var matchedFlag = matched.Count > 0;
+        var primaryHost = validHosts.Count > 0 ? validHosts[0] : null;
+        var items = new List<DevPreviewItem>(Math.Min(4, chosen.Count));
+
+        foreach (var dp in chosen.Take(4))
+        {
+            var proc = string.IsNullOrWhiteSpace(dp.Process) ? "dev" : dp.Process!.Trim();
+            var fixPrompt = $"请把当前监听 127.0.0.1:{dp.Port} 的本地开发服务改为绑定 0.0.0.0:{dp.Port}（例如加上 --host 0.0.0.0），方便手机或其他设备直接真机预览。";
+
+            if (computer.Local)
+            {
+                var localUrl = $"http://127.0.0.1:{dp.Port}/";
+                var shareUrl = dp.BindScope == "network" && primaryHost is not null
+                    ? $"http://{primaryHost}:{dp.Port}/"
+                    : null;
+                var sub = shareUrl is not null
+                    ? $"{proc} · 本机与手机均可访问 ({primaryHost}:{dp.Port})"
+                    : $"{proc} · 本机可直连 (仅 127.0.0.1，手机预览需绑定 0.0.0.0)";
+                items.Add(new DevPreviewItem(
+                    Port: dp.Port,
+                    Process: proc,
+                    BindScope: dp.BindScope,
+                    MatchedProject: matchedFlag,
+                    LocalMachine: true,
+                    OpenUrl: localUrl,
+                    ShareUrl: shareUrl,
+                    ButtonLabel: $"打开预览 (:{dp.Port})",
+                    Subtitle: sub,
+                    LoopbackFixPrompt: dp.BindScope == "loopback" ? fixPrompt : null));
+            }
+            else if (dp.BindScope == "network" && primaryHost is not null)
+            {
+                var remoteUrl = $"http://{primaryHost}:{dp.Port}/";
+                items.Add(new DevPreviewItem(
+                    Port: dp.Port,
+                    Process: proc,
+                    BindScope: dp.BindScope,
+                    MatchedProject: matchedFlag,
+                    LocalMachine: false,
+                    OpenUrl: remoteUrl,
+                    ShareUrl: remoteUrl,
+                    ButtonLabel: $"打开远程预览 (:{dp.Port})",
+                    Subtitle: $"{proc} · {primaryHost}:{dp.Port}",
+                    LoopbackFixPrompt: null));
+            }
+            else if (dp.BindScope == "loopback")
+            {
+                items.Add(new DevPreviewItem(
+                    Port: dp.Port,
+                    Process: proc,
+                    BindScope: dp.BindScope,
+                    MatchedProject: matchedFlag,
+                    LocalMachine: false,
+                    OpenUrl: null,
+                    ShareUrl: null,
+                    ButtonLabel: $":{dp.Port} 仅限该电脑本机",
+                    Subtitle: $"{proc} · 仅监听 127.0.0.1，需绑定 0.0.0.0 才可跨设备预览",
+                    LoopbackFixPrompt: fixPrompt));
+            }
+            else
+            {
+                items.Add(new DevPreviewItem(
+                    Port: dp.Port,
+                    Process: proc,
+                    BindScope: dp.BindScope,
+                    MatchedProject: matchedFlag,
+                    LocalMachine: false,
+                    OpenUrl: null,
+                    ShareUrl: null,
+                    ButtonLabel: $":{dp.Port}",
+                    Subtitle: $"{proc} · 未检测到可用的 Tailscale 或局域网地址",
+                    LoopbackFixPrompt: null));
+            }
+        }
+        return items;
     }
 }

@@ -350,7 +350,11 @@ class TaskInteractions:
                     and row["hook_seen_at"] is not None and row["hook_seen_at"] > time.time() - LEASE_SECONDS
                     and self.store.valid_full_reader(row["reader_id"])
                     and local_task(self.store, row["source_id"]) == row["device_id"])
-        command = self.store.db.execute("SELECT * FROM task_replies WHERE id=? AND device_id=? AND source_id=?", (row["command_id"], row["device_id"], row["source_id"])).fetchone()
+        expected_created = row["device_id"] + ":" + row["source_id"]
+        command = self.store.db.execute(
+            "SELECT * FROM task_replies WHERE id=? AND device_id=? AND (source_id=? OR created_task_id=?)",
+            (row["command_id"], row["device_id"], row["source_id"], expected_created),
+        ).fetchone()
         if not command or command["state"] not in ("dispatching", "running") or command["reader_id"] != row["reader_id"] or not self.replies._valid_reader(row["reader_id"]):
             return False
         try:
@@ -401,11 +405,20 @@ class TaskInteractions:
         payload = request.model_dump_json()
         digest = hashlib.sha256(payload.encode()).hexdigest()
         with self.store.lock, self.store.db:
-            command = self.store.db.execute("SELECT * FROM task_replies WHERE id=? AND device_id=? AND source_id=?", (command_id, device_id, source_id)).fetchone()
+            command = self.store.db.execute("SELECT * FROM task_replies WHERE id=? AND device_id=?", (command_id, device_id)).fetchone()
             if not command or command["state"] not in ("dispatching", "running"):
                 raise HTTPException(409, "原会话控制通道不可用")
             if request.provider != command["tool"] or source_id != request.provider + ":" + request.session_id:
                 raise HTTPException(409, "请求与原会话不匹配")
+            expected_created = device_id + ":" + source_id
+            if command["source_id"] != source_id:
+                from .task_replies import NEW_SOURCE_PATTERN
+                if command["created_task_id"] == expected_created:
+                    pass
+                elif NEW_SOURCE_PATTERN.fullmatch(command["source_id"]) and re.fullmatch(UUID, request.session_id):
+                    self.replies._record_created_session(command, source_id)
+                else:
+                    raise HTTPException(409, "请求与原会话不匹配")
             binding = {"command_id": command_id, "device_id": device_id, "source_id": source_id, "reader_id": command["reader_id"]}
             if not self._live_command(binding):
                 raise HTTPException(409, "原会话控制通道已失效")
@@ -429,11 +442,13 @@ class TaskInteractions:
         if self.replies.stopping.is_set():
             return {}
         rows = self.store.db.execute("""
-            SELECT c.task_id, CASE WHEN MAX(i.kind='question') THEN 'question' ELSE 'approval' END AS kind
+            SELECT COALESCE(NULLIF(c.created_task_id,''), c.task_id) AS task_id,
+                   CASE WHEN MAX(i.kind='question') THEN 'question' ELSE 'approval' END AS kind
             FROM task_interactions i JOIN task_replies c ON c.id=i.command_id
-                AND c.reader_id=i.reader_id AND c.device_id=i.device_id AND c.source_id=i.source_id
+                AND c.reader_id=i.reader_id AND c.device_id=i.device_id
+                AND (c.source_id=i.source_id OR c.created_task_id=i.device_id||':'||i.source_id)
             WHERE i.reader_id=? AND i.state='pending' AND i.expires_at>? AND c.state IN ('dispatching','running')
-            GROUP BY c.task_id""", (reader_id, time.time()))
+            GROUP BY COALESCE(NULLIF(c.created_task_id,''), c.task_id)""", (reader_id, time.time()))
         result = {row["task_id"]: row["kind"] for row in rows}
         hooks = self.store.db.execute("""SELECT device_id,source_id,command_id,reader_id,kind,provider,hook_seen_at FROM task_interactions
             WHERE reader_id=? AND state='pending' AND command_id='' AND expires_at>?""", (reader_id, time.time()))

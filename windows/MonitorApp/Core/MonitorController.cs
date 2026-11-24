@@ -980,6 +980,126 @@ public sealed class MonitorController : IDisposable
         catch { }
     }
 
+    public static bool OpenDevPreviewUrl(string? url, bool allowLoopback)
+    {
+        if (!DevPreviewPolicy.ValidPreviewUrl(url, allowLoopback)) return false;
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = url!, UseShellExecute = true });
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<(string? CreatedTaskId, string? Error)> StartNewTaskAsync(
+        string deviceId,
+        string projectId,
+        string tool,
+        string prompt,
+        Action<string>? onProgress = null,
+        CancellationToken ct = default)
+    {
+        if (_credential is not { } login || !Connected || string.IsNullOrEmpty(Origin))
+            return (null, "请先登录并连接同步服务");
+        if (!MonitorSecurity.Matches(deviceId, "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"))
+            return (null, "请选择有效的在线电脑");
+        if (!MonitorSecurity.Matches(projectId, "[0-9a-f]{24}"))
+            return (null, "请选择有效的项目目录");
+        if (tool is not ("codex" or "claude" or "antigravity"))
+            return (null, "请选择支持的工具");
+
+        var trimmed = prompt.Trim();
+        if (trimmed.Length is < 1 or > 8000)
+            return (null, "请输入 1–8000 字的首条任务指令");
+
+        var requestId = Guid.NewGuid().ToString("D").ToLowerInvariant();
+        var syntheticTaskId = $"{deviceId}:{tool}:new_{projectId}";
+        var epoch = _generation;
+
+        var payload = new TaskStartPayloadDto
+        {
+            DeviceId = deviceId,
+            ProjectId = projectId,
+            Tool = tool,
+            RequestId = requestId,
+            Text = trimmed
+        };
+
+        try
+        {
+            onProgress?.Invoke("正在向电脑发送新建任务请求…");
+            var res = await Api.JsonAsync<ReplyStateDto>(
+                Origin,
+                "/api/native/tasks/start",
+                System.Net.Http.HttpMethod.Post,
+                body: payload,
+                token: login.Token,
+                ct: ct);
+
+            var immediateId = !string.IsNullOrWhiteSpace(res.CreatedTaskId)
+                ? res.CreatedTaskId
+                : res.Latest?.CreatedTaskId;
+            if (!string.IsNullOrWhiteSpace(immediateId))
+            {
+                if (epoch == _generation) await RefreshWorkbenchAsync();
+                return (immediateId, null);
+            }
+
+            for (var i = 0; i < 28 && !ct.IsCancellationRequested; i++)
+            {
+                await Task.Delay(450, ct);
+                if (epoch != _generation || _credential?.Token != login.Token)
+                    return (null, "登录状态已变更");
+
+                var poll = await Api.JsonAsync<ReplyStateDto>(
+                    Origin,
+                    "/api/native/tasks/reply",
+                    System.Net.Http.HttpMethod.Get,
+                    token: login.Token,
+                    query: [("task_id", syntheticTaskId), ("request_id", requestId)],
+                    ct: ct);
+
+                var created = !string.IsNullOrWhiteSpace(poll.CreatedTaskId)
+                    ? poll.CreatedTaskId
+                    : poll.Latest?.CreatedTaskId;
+                if (!string.IsNullOrWhiteSpace(created))
+                {
+                    await RefreshWorkbenchAsync();
+                    return (created, null);
+                }
+
+                var st = poll.State ?? poll.Latest?.State ?? "";
+                var reason = poll.Reason ?? poll.Latest?.Reason;
+                if (st is "failed" or "blocked")
+                {
+                    return (null, string.IsNullOrWhiteSpace(reason) ? "电脑端未能启动新会话，请检查对应工具状态" : reason);
+                }
+
+                onProgress?.Invoke(st switch
+                {
+                    "running" => $"电脑已启动 {MonitorTask.BrandFor(tool)}，正在创建会话…",
+                    "dispatching" => "电脑已接收请求，正在准备项目目录…",
+                    _ => "等待目标电脑接收并启动新会话…"
+                });
+            }
+
+            if (epoch == _generation) await RefreshWorkbenchAsync();
+            return (null, "电脑正在后台启动新会话，稍后将自动出现在工作台列表中");
+        }
+        catch (OperationCanceledException)
+        {
+            return (null, null);
+        }
+        catch (Exception ex)
+        {
+            HandleApiError(ex, login.Token, showAlert: false);
+            return (null, ex is MonitorApiException apiEx ? apiEx.Message : "发送新建任务请求失败，请检查网络连接");
+        }
+    }
+
     private void NotifyChanged() => StateChanged?.Invoke();
 
     public void Dispose()

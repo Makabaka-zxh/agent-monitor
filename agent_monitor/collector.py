@@ -6,6 +6,7 @@ Local formats can change; unrecognized lifecycle data deliberately stays unknown
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import heapq
 import json
@@ -78,6 +79,125 @@ def project_name(value: Any) -> str:
     else:
         name = Path(value).name
     return _text(name, 80)
+
+
+def project_id_for_cwd(value: Any) -> str:
+    """Return a deterministic opaque 24-hex workspace ID for a local path."""
+    if isinstance(value, Path):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return ""
+    if not text or len(text) > 4096 or any(c in text for c in "*?\x00\r\n"):
+        return ""
+    if text.startswith(("\\\\", "//")):
+        return ""
+    try:
+        candidate = Path(text)
+        if not candidate.is_absolute() or ".." in candidate.parts:
+            return ""
+        resolved = Path(os.path.abspath(str(candidate)))
+        if resolved.parent == resolved:
+            return ""
+        norm = os.path.normcase(str(resolved))
+    except (OSError, ValueError):
+        return ""
+    return hashlib.sha256(("project\0" + norm).encode("utf-8")).hexdigest()[:24]
+
+
+def _plain_workspace_dir(value: Any, *, _memo: dict[str, Path | None] | None = None) -> Path | None:
+    if not project_id_for_cwd(value):
+        return None
+    try:
+        resolved = Path(os.path.abspath(str(value)))
+    except (OSError, ValueError):
+        return None
+    key = os.path.normcase(str(resolved))
+    if _memo is not None and key in _memo:
+        return _memo[key]
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    result: Path | None = resolved
+    try:
+        if resolved.parent == resolved or resolved.anchor.startswith(("\\\\", "//")):
+            result = None
+        else:
+            for piece in (*reversed(resolved.parents), resolved):
+                info = piece.lstat()
+                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse:
+                    result = None
+                    break
+    except OSError:
+        result = None
+    if _memo is not None:
+        _memo[key] = result
+    return result
+
+
+_ACTIVE_WORKSPACE_SINK: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_active_workspace_sink", default=None
+)
+
+
+def _record_workspace(sink: dict | None, proj_id: str, cwd: Any, tool: str, updated_at: str) -> None:
+    target_sink = sink if sink is not None else _ACTIVE_WORKSPACE_SINK.get()
+    if target_sink is None or not proj_id or tool not in {"codex", "claude", "antigravity"}:
+        return
+    entry = target_sink.get(proj_id)
+    if entry is None:
+        target_sink[proj_id] = {"cwd": cwd, "tools": {tool}, "updated_at": updated_at}
+        return
+    entry["tools"].add(tool)
+    if updated_at > entry["updated_at"]:
+        entry["updated_at"] = updated_at
+        entry["cwd"] = cwd
+
+
+def _finalize_projects(sink: dict, *, limit: int = 24) -> tuple[list[dict], dict[Path, str]]:
+    memo: dict[str, Path | None] = {}
+    verified: list[tuple[str, Path, str, list[str], str]] = []
+    for proj_id, info in sink.items():
+        directory = _plain_workspace_dir(info["cwd"], _memo=memo)
+        if directory is None:
+            continue
+        base_name = project_name(str(directory))
+        if not base_name:
+            continue
+        order = ("codex", "claude", "antigravity")
+        tools = [t for t in order if t in info["tools"]]
+        verified.append((proj_id, directory, base_name, tools, info["updated_at"]))
+    verified.sort(key=lambda item: item[4], reverse=True)
+    verified = verified[:limit]
+    try:
+        home_norm = os.path.normcase(os.path.abspath(str(Path.home())))
+    except (OSError, ValueError):
+        home_norm = ""
+    counts: dict[str, int] = {}
+    for _, directory, base_name, _, _ in verified:
+        label = "主目录" if home_norm and os.path.normcase(str(directory)) == home_norm else base_name
+        counts[label] = counts.get(label, 0) + 1
+    projects: list[dict] = []
+    by_path: dict[Path, str] = {}
+    for proj_id, directory, base_name, tools, updated_at in verified:
+        dir_norm = os.path.normcase(str(directory))
+        label = "主目录" if home_norm and dir_norm == home_norm else base_name
+        if counts.get(label, 0) > 1 and label != "主目录":
+            parent = directory.parent
+            parent_norm = os.path.normcase(str(parent))
+            if home_norm and parent_norm == home_norm:
+                label = f"{base_name} (主目录)"[:80]
+            elif parent.parent != parent:
+                parent_label = project_name(str(parent))
+                if parent_label:
+                    label = f"{parent_label}/{base_name}"[:80]
+        projects.append({
+            "id": proj_id,
+            "name": label,
+            "tools": tools,
+            "updated_at": updated_at,
+        })
+        by_path[directory] = proj_id
+    return projects, by_path
 
 
 def state_directory() -> Path:
@@ -328,13 +448,15 @@ def _default_id(path: Path) -> str:
 
 
 def _task(tool: str, session: str, title: str, status: str, updated: datetime,
-          project: str, output: str = "", source: str = "local_log") -> dict:
+          project: str, output: str = "", source: str = "local_log", *,
+          project_id: str = "") -> dict:
     return {
         "id": f"{tool}:{session}", "tool": tool,
         "title": title or f"{'Codex' if tool == 'codex' else 'Claude Code'} 会话 {session[:8]}",
         "status": status, "updated_at": _iso(updated),
         "preview": STATUS_PREVIEWS[status], "output": output[:OUTPUT_CHAR_LIMIT],
-        "project": project, "status_source": source, "error_analysis": None, "failure_code": "",
+        "project": project, "project_id": project_id,
+        "status_source": source, "error_analysis": None, "failure_code": "",
     }
 
 
@@ -366,14 +488,16 @@ def _codex_titles(home: Path) -> dict[str, str]:
 def parse_codex_session(path: Path, *, titles: dict[str, str] | None = None,
                         include_output: bool = False, now: datetime | None = None,
                         diagnostics: dict | None = None, _candidate: str | None = None,
-                        _expected: os.stat_result | None = None) -> dict | None:
+                        _expected: os.stat_result | None = None,
+                        workspace_sink: dict | None = None) -> dict | None:
     now = now or utc_now()
     if path.name.endswith(".jsonl.zst"):
         return _parse_compressed_codex(path, titles=titles, include_output=include_output,
-                                       now=now, diagnostics=diagnostics)
+                                       now=now, diagnostics=diagnostics, workspace_sink=workspace_sink)
     options = {"_codex_candidate": _candidate, "_expected": _expected} if _candidate else {}
     head, tail, gap = _read_window(path, **options)
-    task = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now)
+    task = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now,
+                               workspace_sink=workspace_sink)
     if task is not None and task["status"] == "unknown" and gap:
         # A single screenshot/tool result can occupy the entire 192 KiB tail.
         # mtime only gates extra I/O, including when no complete tail row remains;
@@ -384,13 +508,14 @@ def parse_codex_session(path: Path, *, titles: dict[str, str] | None = None,
             head, tail, _ = _read_window(path, max_bytes=MAX_CODEX_RECOVERY_BYTES, **identity)
             # Start again from unknown over this complete, contiguous tail.
             # Do not retain state from the first read or bridge its omitted bytes.
-            recovered = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now)
+            recovered = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now,
+                                            workspace_sink=workspace_sink)
             if _expected is None or recovered is not None and recovered["id"] == task["id"]:
                 task = recovered
     return task
 
 
-def _parse_compressed_codex(path: Path, *, titles, include_output, now, diagnostics):
+def _parse_compressed_codex(path: Path, *, titles, include_output, now, diagnostics, workspace_sink=None):
     from .compressed_logs import ZstdReadError, read_zstd_head, read_zstd_window
     modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
     recent = -60 <= (now - modified).total_seconds() <= STALE_SECONDS
@@ -417,26 +542,32 @@ def _parse_compressed_codex(path: Path, *, titles, include_output, now, diagnost
                 and isinstance(row.get("payload"), dict)]
         if not head or not _text(head[0]["payload"].get("id") or head[0]["payload"].get("session_id"), 160):
             return None
-        return _parse_codex_window(path, head, [], titles=titles, include_output=False, now=now)
+        return _parse_codex_window(path, head, [], titles=titles, include_output=False, now=now,
+                                   workspace_sink=workspace_sink)
     head, tail, gap = _decoded_window(*raw, max_bytes=MAX_LOG_BYTES)
-    task = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now)
+    task = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now,
+                               workspace_sink=workspace_sink)
     if task is not None and task["status"] == "unknown" and gap and recent:
         head, tail, _ = _decoded_window(*raw, max_bytes=window_size)
-        task = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now)
+        task = _parse_codex_window(path, head, tail, titles=titles, include_output=include_output, now=now,
+                                   workspace_sink=workspace_sink)
     return task
 
 
 def _parse_codex_window(path: Path, head: list[dict], tail: list[dict], *,
-                        titles: dict[str, str] | None, include_output: bool, now: datetime) -> dict | None:
+                        titles: dict[str, str] | None, include_output: bool, now: datetime,
+                        workspace_sink: dict | None = None) -> dict | None:
     from .failure_reasons import failure_code_for_codex, has_codex_error_info, runtime_analysis
-    session, project = _default_id(path), ""
+    session, project, raw_cwd = _default_id(path), "", ""
     for record in head:
         payload = record.get("payload")
         if record.get("type") == "session_meta" and isinstance(payload, dict):
             if _codex_is_subagent(payload):
                 return None
             session = _text(payload.get("id") or payload.get("session_id"), 160) or session
-            project = project_name(payload.get("cwd"))
+            if isinstance(payload.get("cwd"), str):
+                raw_cwd = payload["cwd"]
+            project = project_name(raw_cwd)
             break
     if not head and not tail:
         return None
@@ -514,6 +645,8 @@ def _parse_codex_window(path: Path, head: list[dict], tail: list[dict], *,
                 if status == "running":
                     evidence = stamp or evidence
         if record.get("type") == "turn_context" and not project:
+            if isinstance(payload.get("cwd"), str) and not raw_cwd:
+                raw_cwd = payload["cwd"]
             project = project_name(payload.get("cwd"))
         if status != "error":
             failure_code, failure_turn = "", ""
@@ -522,7 +655,10 @@ def _parse_codex_window(path: Path, head: list[dict], tail: list[dict], *,
         status = "unknown"
     # mtime orders discovery only. It never establishes a lifecycle state.
     updated = latest or datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-    task = _task("codex", session, (titles or {}).get(session, ""), status, updated, project)
+    proj_id = project_id_for_cwd(raw_cwd)
+    task = _task("codex", session, (titles or {}).get(session, ""), status, updated, project, project_id=proj_id)
+    if proj_id and raw_cwd:
+        _record_workspace(workspace_sink, proj_id, raw_cwd, "codex", task["updated_at"])
     _add_final_preview(task, tail, "codex", include_output)
     if status == "error" and include_output:
         task["failure_code"] = failure_code
@@ -534,11 +670,12 @@ def _parse_codex_window(path: Path, head: list[dict], tail: list[dict], *,
     return task
 
 
-def _claude_session(path: Path, *, include_output: bool = False) -> tuple[dict | None, dict]:
+def _claude_session(path: Path, *, include_output: bool = False,
+                    workspace_sink: dict | None = None) -> tuple[dict | None, dict]:
     head, tail, gap = _read_window(path)
     if not head and not tail:
         return None, {}
-    session, project, title, output = _default_id(path), "", "", ""
+    session, project, raw_cwd, title, output = _default_id(path), "", "", "", ""
     latest: datetime | None = None
     latest_prompt: datetime | None = None
     latest_prompt_id = ""
@@ -546,7 +683,9 @@ def _claude_session(path: Path, *, include_output: bool = False) -> tuple[dict |
         if record.get("isSidechain") is True:
             continue
         session = _text(record.get("sessionId"), 160) or session
-        project = project_name(record.get("cwd")) or project
+        if isinstance(record.get("cwd"), str) and record["cwd"]:
+            raw_cwd = record["cwd"]
+            project = project_name(raw_cwd) or project
         kind = record.get("type")
         if kind == "custom-title":
             title = _text(record.get("customTitle")) or title
@@ -572,7 +711,10 @@ def _claude_session(path: Path, *, include_output: bool = False) -> tuple[dict |
     updated = latest or datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
     # assistant.stop_reason=end_turn can precede later tool work / hook blocking.
     # Plain transcripts deliberately never claim the current run is complete.
-    task = _task("claude", session, title, "unknown", updated, project)
+    proj_id = project_id_for_cwd(raw_cwd)
+    task = _task("claude", session, title, "unknown", updated, project, project_id=proj_id)
+    if proj_id and raw_cwd:
+        _record_workspace(workspace_sink, proj_id, raw_cwd, "claude", task["updated_at"])
     _add_final_preview(task, tail, "claude", include_output)
     return task, {
         "prompt_at": latest_prompt, "prompt_id": latest_prompt_id,
@@ -744,18 +886,21 @@ def _published_tasks(tasks, limit, extra_codex=()):
 
 def collect_snapshot(codex_home=None, claude_home=None, include_output=False, limit=50, *,
                      codex_growth: CodexGrowthTracker | None = None, codex_primary_backfill=False,
-                     antigravity_home=None) -> dict:
+                     antigravity_home=None, include_runtime: bool = False,
+                     public_url: str | None = None) -> dict:
     """Collect the existing recent candidates within one compressed-work budget."""
     from .compressed_logs import collection_budget
     with collection_budget():
         return _collect_snapshot(codex_home, claude_home, include_output=include_output, limit=limit,
                                  codex_growth=codex_growth, codex_primary_backfill=codex_primary_backfill,
-                                 antigravity_home=antigravity_home)
+                                 antigravity_home=antigravity_home, include_runtime=include_runtime,
+                                 public_url=public_url)
 
 
 def _collect_snapshot(codex_home=None, claude_home=None, include_output=False, limit=50, *,
                       codex_growth: CodexGrowthTracker | None = None, codex_primary_backfill=False,
-                     antigravity_home=None) -> dict:
+                      antigravity_home=None, include_runtime: bool = False,
+                      public_url: str | None = None) -> dict:
     """Return a serializable read-only snapshot; ``limit`` caps total tasks at 50.
 
     Each tool normally examines at most ``limit`` recent logs. Optional local
@@ -774,117 +919,123 @@ def _collect_snapshot(codex_home=None, claude_home=None, include_output=False, l
     tasks: dict[str, dict] = {}
     extra_codex: set[str] = set()
     claude_prompts: dict[str, dict] = {}
+    workspace_sink: dict = {}
+    sink_token = _ACTIVE_WORKSPACE_SINK.set(workspace_sink)
     sources = []
-    for tool, home in (("codex", codex_home), ("claude", claude_home)):
-        base = home / ("sessions" if tool == "codex" else "projects")
-        backup = [] if tool == "codex" and codex_primary_backfill else None
-        discovery = {"_codex_backup": backup} if backup is not None else {}
-        if codex_growth is not None:
-            discovery["codex_growth"] = codex_growth
-        files, count, capped = _recent_files(base, limit, claude=tool == "claude", **discovery)
-        titles = _codex_titles(home) if tool == "codex" and limit else {}
-        unreadable = 0
-        diagnostics: dict[str, int] = {}
-        vacated = 0
-        for path in files:
-            try:
-                if tool == "codex":
-                    gate = {"_candidate": "ordinary"} if backup and path.name.endswith(".jsonl") else {}
+    try:
+        for tool, home in (("codex", codex_home), ("claude", claude_home)):
+            base = home / ("sessions" if tool == "codex" else "projects")
+            backup = [] if tool == "codex" and codex_primary_backfill else None
+            discovery = {"_codex_backup": backup} if backup is not None else {}
+            if codex_growth is not None:
+                discovery["codex_growth"] = codex_growth
+            files, count, capped = _recent_files(base, limit, claude=tool == "claude", **discovery)
+            titles = _codex_titles(home) if tool == "codex" and limit else {}
+            unreadable = 0
+            diagnostics: dict[str, int] = {}
+            vacated = 0
+            for path in files:
+                try:
+                    if tool == "codex":
+                        gate = {"_candidate": "ordinary"} if backup and path.name.endswith(".jsonl") else {}
+                        task = parse_codex_session(path, titles=titles, include_output=include_output, now=now,
+                                                   diagnostics=diagnostics, **gate)
+                    else:
+                        task, prompt = _claude_session(path, include_output=include_output)
+                        if task:
+                            claude_prompts[task["id"]] = prompt
+                    if task and (task["id"] not in tasks or tasks[task["id"]]["updated_at"] < task["updated_at"]):
+                        tasks[task["id"]] = task
+                except _CodexCandidateSkipped as exc:
+                    if exc.subagent:
+                        vacated += 1
+                except (OSError, ValueError, TypeError, RecursionError):
+                    unreadable += 1
+            # Only a confirmed plain subagent vacates a full-read slot. Extra
+            # compressed files cannot enter this lane or spend its shared budget.
+            remaining = min(vacated, CODEX_PRIMARY_BACKFILL_SLOTS)
+            for path in backup or ():
+                if not remaining:
+                    break
+                try:
+                    identity = _plain_codex_identity(path, base)
+                    if identity is None:
+                        continue
                     task = parse_codex_session(path, titles=titles, include_output=include_output, now=now,
-                                               diagnostics=diagnostics, **gate)
-                else:
-                    task, prompt = _claude_session(path, include_output=include_output)
-                    if task:
-                        claude_prompts[task["id"]] = prompt
-                if task and (task["id"] not in tasks or tasks[task["id"]]["updated_at"] < task["updated_at"]):
-                    tasks[task["id"]] = task
-            except _CodexCandidateSkipped as exc:
-                if exc.subagent:
-                    vacated += 1
-            except (OSError, ValueError, TypeError, RecursionError):
-                unreadable += 1
-        # Only a confirmed plain subagent vacates a full-read slot. Extra
-        # compressed files cannot enter this lane or spend its shared budget.
-        remaining = min(vacated, CODEX_PRIMARY_BACKFILL_SLOTS)
-        for path in backup or ():
-            if not remaining:
-                break
-            try:
-                identity = _plain_codex_identity(path, base)
-                if identity is None:
+                                               diagnostics=diagnostics, _candidate="primary", _expected=identity)
+                except _CodexCandidateSkipped:
+                    continue  # This candidate's tail has not been opened.
+                except (OSError, ValueError, TypeError, RecursionError):
+                    remaining -= 1
+                    unreadable += 1
                     continue
-                task = parse_codex_session(path, titles=titles, include_output=include_output, now=now,
-                                           diagnostics=diagnostics, _candidate="primary", _expected=identity)
-            except _CodexCandidateSkipped:
-                continue  # This candidate's tail has not been opened.
-            except (OSError, ValueError, TypeError, RecursionError):
                 remaining -= 1
-                unreadable += 1
-                continue
-            remaining -= 1
-            if task is not None and task["id"] not in tasks:
-                tasks[task["id"]] = task
-                extra_codex.add(task["id"])
-        detail = f"发现 {count} 个日志；常规解析最近 {len(files)} 个，每个最多 256 KB。"
-        if tool == "claude":
-            detail += "普通日志不能确认当前运行状态；启用可选状态 hooks 后可补充。"
-        else:
-            detail += "仅依据明确生命周期事件；子代理不单列。"
-            if backup is not None:
-                detail += f" 已从有限回填中识别 {len(extra_codex)} 个主会话。"
-            detail += "近期窗口截断且状态未知时扩大到 1 MiB；普通日志单轮读取上限为 1.25 MiB。"
-            detail += "支持 .jsonl.zst，同名普通日志优先；超出读取或耗时限制时，保留可识别的主任务为状态未知。"
-            incomplete = diagnostics.get("compressed_incomplete", 0)
-            if incomplete:
-                detail += f" {incomplete} 个压缩日志未能完整读取；可识别的主任务保留为状态未知。"
-        if capped:
-            detail += "目录枚举达到上限，可能未覆盖全部会话。"
-        if unreadable:
-            detail += f" {unreadable} 个日志暂时不可读。"
-        sources.append({"tool": tool, "available": base.is_dir(), "mode": "local_log", "detail": detail})
-    hooks = _hook_tasks(limit, now) if limit else []
-    for hook in hooks:
-        from .failure_reasons import runtime_analysis
-        if include_output and hook["status"] == "error":
-            hook["error_analysis"] = runtime_analysis(hook.get("failure_code"))
-        else:
-            hook["failure_code"] = ""
-        hook_prompt = hook.pop("_prompt_id", "")
-        existing = tasks.get(hook["id"])
-        if existing:
-            prompt = claude_prompts.get(hook["id"], {})
-            prompt_time = prompt.get("prompt_at")
-            same_prompt = bool(hook_prompt and hook_prompt == prompt.get("prompt_id"))
-            if hook_prompt and prompt.get("prompt_id") and not same_prompt:
-                continue
-            # New prompts invalidate missed hooks; late writes within the same
-            # prompt and unrelated metadata must not erase authoritative state.
-            if not same_prompt and prompt_time and prompt_time > _timestamp(hook["updated_at"]):
-                continue
-            hook["title"] = existing["title"]
-            hook["output"] = existing["output"]
-            hook["final_result_id"] = existing.get("final_result_id", "")
-            hook["final_result_at"] = existing.get("final_result_at", "")
-            hook["project"] = existing["project"] or hook["project"]
-            final = prompt.get("error_final")
-            # Match the existing final identity as well as a fresh prompt. A
-            # A hook-only failure may have a fixed runtime error enum; without
-            # it, do not invent an explanation from unrelated old output.
-            if include_output and hook["status"] == "error" and hook["error_analysis"] is None and prompt_time and final and final["result_id"] == hook["final_result_id"]:
-                from .error_analysis import analyze_final_text
-                hook["error_analysis"] = analyze_final_text(hook["output"])
-        tasks[hook["id"]] = hook
-    if hooks:
-        sources[1]["mode"] = "local_log+hook"
-        sources[1]["available"] = True
-        sources[1]["detail"] += f" 已读到 {len(hooks)} 个会话的本地 hook 状态；超过 5 分钟无活动的运行/等待状态会转为未知。"
-    if use_antigravity:
-        from .antigravity import scan_antigravity
-        antigravity = scan_antigravity(base=antigravity_home, limit=limit)
-        if antigravity is not None:
-            tasks.update((task["id"], task) for task in antigravity)
-            sources.append({"tool": "antigravity", "available": True, "mode": "local_log",
-                            "detail": f"已读取 {len(antigravity)} 个 Antigravity 会话；已登录官方 agy CLI 时支持手机续接与单次审批。"})
+                if task is not None and task["id"] not in tasks:
+                    tasks[task["id"]] = task
+                    extra_codex.add(task["id"])
+            detail = f"发现 {count} 个日志；常规解析最近 {len(files)} 个，每个最多 256 KB。"
+            if tool == "claude":
+                detail += "普通日志不能确认当前运行状态；启用可选状态 hooks 后可补充。"
+            else:
+                detail += "仅依据明确生命周期事件；子代理不单列。"
+                if backup is not None:
+                    detail += f" 已从有限回填中识别 {len(extra_codex)} 个主会话。"
+                detail += "近期窗口截断且状态未知时扩大到 1 MiB；普通日志单轮读取上限为 1.25 MiB。"
+                detail += "支持 .jsonl.zst，同名普通日志优先；超出读取或耗时限制时，保留可识别的主任务为状态未知。"
+                incomplete = diagnostics.get("compressed_incomplete", 0)
+                if incomplete:
+                    detail += f" {incomplete} 个压缩日志未能完整读取；可识别的主任务保留为状态未知。"
+            if capped:
+                detail += "目录枚举达到上限，可能未覆盖全部会话。"
+            if unreadable:
+                detail += f" {unreadable} 个日志暂时不可读。"
+            sources.append({"tool": tool, "available": base.is_dir(), "mode": "local_log", "detail": detail})
+        hooks = _hook_tasks(limit, now) if limit else []
+        for hook in hooks:
+            from .failure_reasons import runtime_analysis
+            if include_output and hook["status"] == "error":
+                hook["error_analysis"] = runtime_analysis(hook.get("failure_code"))
+            else:
+                hook["failure_code"] = ""
+            hook_prompt = hook.pop("_prompt_id", "")
+            existing = tasks.get(hook["id"])
+            if existing:
+                prompt = claude_prompts.get(hook["id"], {})
+                prompt_time = prompt.get("prompt_at")
+                same_prompt = bool(hook_prompt and hook_prompt == prompt.get("prompt_id"))
+                if hook_prompt and prompt.get("prompt_id") and not same_prompt:
+                    continue
+                # New prompts invalidate missed hooks; late writes within the same
+                # prompt and unrelated metadata must not erase authoritative state.
+                if not same_prompt and prompt_time and prompt_time > _timestamp(hook["updated_at"]):
+                    continue
+                hook["title"] = existing["title"]
+                hook["output"] = existing["output"]
+                hook["final_result_id"] = existing.get("final_result_id", "")
+                hook["final_result_at"] = existing.get("final_result_at", "")
+                hook["project"] = existing["project"] or hook["project"]
+                hook["project_id"] = existing.get("project_id", "") or hook.get("project_id", "")
+                final = prompt.get("error_final")
+                # Match the existing final identity as well as a fresh prompt. A
+                # A hook-only failure may have a fixed runtime error enum; without
+                # it, do not invent an explanation from unrelated old output.
+                if include_output and hook["status"] == "error" and hook["error_analysis"] is None and prompt_time and final and final["result_id"] == hook["final_result_id"]:
+                    from .error_analysis import analyze_final_text
+                    hook["error_analysis"] = analyze_final_text(hook["output"])
+            tasks[hook["id"]] = hook
+        if hooks:
+            sources[1]["mode"] = "local_log+hook"
+            sources[1]["available"] = True
+            sources[1]["detail"] += f" 已读到 {len(hooks)} 个会话的本地 hook 状态；超过 5 分钟无活动的运行/等待状态会转为未知。"
+        if use_antigravity:
+            from .antigravity import scan_antigravity
+            antigravity = scan_antigravity(base=antigravity_home, limit=limit)
+            if antigravity is not None:
+                tasks.update((task["id"], task) for task in antigravity)
+                sources.append({"tool": "antigravity", "available": True, "mode": "local_log",
+                                "detail": f"已读取 {len(antigravity)} 个 Antigravity 会话；已登录官方 agy CLI 时支持手机续接与单次审批。"})
+    finally:
+        _ACTIVE_WORKSPACE_SINK.reset(sink_token)
     published = _published_tasks(tasks, limit, extra_codex)
     if include_output:
         from .antigravity import read_antigravity_result
@@ -896,4 +1047,15 @@ def _collect_snapshot(codex_home=None, claude_home=None, include_output=False, l
             final = read_antigravity_result(task["id"].removeprefix("antigravity:"), base=antigravity_home)
             if final:
                 task.update(final_result_id=final["result_id"], final_result_at=final["completed_at"])
-    return {"tasks": published, "sources": sources, "collected_at": _iso(utc_now())}
+    projects, projects_by_path = _finalize_projects(workspace_sink)
+    result = {
+        "tasks": published,
+        "sources": sources,
+        "projects": projects,
+        "collected_at": _iso(utc_now()),
+    }
+    if include_runtime:
+        from .dev_previews import discover_dev_ports, discover_preview_hosts
+        result["dev_ports"] = discover_dev_ports(projects_by_path)
+        result["preview_hosts"] = discover_preview_hosts(public_url=public_url)
+    return result

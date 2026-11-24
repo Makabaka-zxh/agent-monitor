@@ -92,6 +92,7 @@ final class MonitorStore: ObservableObject {
         return verificationURL(pairing.id).absoluteString
     }
     func task(_ id: String) -> MonitorTask? { tasks.first { $0.id == id } }
+    func device(_ id: String) -> Computer? { devices.first { $0.id == id } }
     func current(_ token: String) -> Bool { connected && credential?.token == token }
 
     @discardableResult
@@ -564,5 +565,84 @@ final class MonitorStore: ObservableObject {
     private func report(_ error: Error) {
         if let failure = error as? MonitorError, failure.status == 429 { cooldownUntil = Date().addingTimeInterval(failure.retryAfter) }
         notice = error is MonitorError ? error.localizedDescription : "暂时无法连接，请稍后重试"
+    }
+
+    @discardableResult
+    func openDevPreview(_ urlString: String?, allowLoopback: Bool) -> Bool {
+        guard let url = DevPreviewPolicy.validPreviewURL(urlString, allowLoopback: allowLoopback) else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+
+    func startNewTask(
+        deviceId: String,
+        projectId: String,
+        tool: String,
+        prompt: String,
+        onProgress: ((String) -> Void)? = nil
+    ) async -> (createdTaskId: String?, error: String?) {
+        guard let login = credential, connected, !origin.isEmpty else {
+            return (nil, "请先登录并连接同步服务")
+        }
+        guard MonitorSecurity.matches(deviceId, "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}") else {
+            return (nil, "请选择有效的在线电脑")
+        }
+        guard MonitorSecurity.matches(projectId, "[0-9a-f]{24}") else {
+            return (nil, "请选择有效的项目目录")
+        }
+        guard ["codex", "claude", "antigravity"].contains(tool) else {
+            return (nil, "请选择支持的工具")
+        }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 8000 else {
+            return (nil, "请输入 1–8000 字的首条任务指令")
+        }
+        let requestId = UUID().uuidString.lowercased()
+        let syntheticTaskId = "\(deviceId):\(tool):new_\(projectId)"
+        let epoch = generation
+        let body: [String: Any] = [
+            "device_id": deviceId,
+            "project_id": projectId,
+            "tool": tool,
+            "request_id": requestId,
+            "text": trimmed
+        ]
+        do {
+            onProgress?("正在向电脑发送新建任务请求…")
+            let initial = try await api.json(ReplyState.self, .startTask, method: "POST", body: body, token: login.token)
+            if let immediate = initial.createdTaskId ?? initial.latest?.createdTaskId, !immediate.isEmpty {
+                if epoch == generation { await refresh() }
+                return (immediate, nil)
+            }
+            for _ in 0..<28 {
+                if Task.isCancelled { return (nil, nil) }
+                try await Task.sleep(for: .milliseconds(450))
+                guard current(login.token), epoch == generation else { return (nil, "登录状态已变更") }
+                let poll = try await api.json(ReplyState.self, .reply(syntheticTaskId, requestId), token: login.token)
+                if let created = poll.createdTaskId ?? poll.latest?.createdTaskId, !created.isEmpty {
+                    await refresh()
+                    return (created, nil)
+                }
+                let st = poll.state ?? poll.latest?.state ?? ""
+                let reason = poll.reason ?? poll.latest?.reason
+                if st == "failed" || st == "blocked" {
+                    return (nil, (reason?.isEmpty == false) ? reason : "电脑端未能启动新会话，请检查对应工具状态")
+                }
+                switch st {
+                case "running":
+                    onProgress?("电脑已启动 \(MonitorTask.brand(for: tool))，正在创建会话…")
+                case "dispatching":
+                    onProgress?("电脑已接收请求，正在准备项目目录…")
+                default:
+                    onProgress?("等待目标电脑接收并启动新会话…")
+                }
+            }
+            if epoch == generation { await refresh() }
+            return (nil, "电脑正在后台启动新会话，稍后将自动出现在工作台列表中")
+        } catch is CancellationError {
+            return (nil, nil)
+        } catch {
+            handle(error, token: login.token, alert: false)
+            return (nil, error is MonitorError ? error.localizedDescription : "发送新建任务请求失败，请检查网络连接")
+        }
     }
 }

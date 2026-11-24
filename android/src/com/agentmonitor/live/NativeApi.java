@@ -103,7 +103,7 @@ public final class NativeApi {
         if (method == null || path == null) return false;
         if ("GET".equals(method)) return path.matches("/api/native/(snapshot|session|workbench|usage|account|profile|computers/pairing/[A-Za-z0-9_-]{32})") || allowedTaskQuery(path);
         if ("PATCH".equals(method)) return path.matches("/api/native/(profile|preferences|tasks/archive)");
-        if ("POST".equals(method)) return path.matches("/api/native/(tasks/reply|tasks/controls/decision|web-session|pairing/start|pairing/[A-Za-z0-9_-]{32}/poll|computers/pairing|computers/pairing/[A-Za-z0-9_-]{32}/(approve|reject))");
+        if ("POST".equals(method)) return path.matches("/api/native/(tasks/reply|tasks/start|tasks/controls/decision|web-session|pairing/start|pairing/[A-Za-z0-9_-]{32}/poll|computers/pairing|computers/pairing/[A-Za-z0-9_-]{32}/(approve|reject))");
         if ("DELETE".equals(method)) return path.matches("/api/native/(session|connections/[A-Za-z0-9_-]{32}|(computers|sessions)/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})");
         return false;
     }

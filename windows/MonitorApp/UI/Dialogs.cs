@@ -705,6 +705,259 @@ public static class Dialogs
         PresentModal(win, root);
     }
 
+    public static void ShowNewTaskDialog(
+        Window owner,
+        MonitorController controller,
+        string? preferredDeviceId,
+        Action<string> onTaskCreated)
+    {
+        var onlineComputers = controller.IsFresh
+            ? controller.Devices.Where(d => d.Online).ToList()
+            : [];
+
+        if (onlineComputers.Count == 0)
+        {
+            ShowMessage(owner, "暂无在线电脑", "当前没有在线的已连接电脑。请确认目标电脑已开启同步，或点击刷新后再试。");
+            return;
+        }
+
+        var win = CreateModal(owner, "新建远程任务", 478);
+        var cts = new CancellationTokenSource();
+        win.Closed += (_, _) =>
+        {
+            try { cts.Cancel(); cts.Dispose(); } catch { }
+        };
+
+        var root = new StackPanel { Margin = new Thickness(26, 24, 26, 24) };
+        var head = UiKit.Heading("新建远程任务", 20.5);
+        head.Margin = new Thickness(0, 0, 28, 0);
+        root.Children.Add(head);
+
+        var desc = UiKit.Body("无需提前在电脑打开终端窗口：选择在线电脑与历史活跃项目目录，发送首条指令即可启动全新会话。", 12.8, UiKit.MutedBrush);
+        desc.Margin = new Thickness(0, 7, 0, 16);
+        root.Children.Add(desc);
+
+        root.Children.Add(UiKit.Body("目标电脑", 12.8, UiKit.MutedBrush));
+        var devCombo = UiKit.StyledComboBox();
+        devCombo.Margin = new Thickness(0, 6, 0, 13);
+        var defaultDevIdx = 0;
+        for (var i = 0; i < onlineComputers.Count; i++)
+        {
+            var dev = onlineComputers[i];
+            var tag = dev.Local ? $"{dev.Name}（这台电脑）" : $"{dev.Name} · {dev.Platform}";
+            UiKit.AddComboItem(devCombo, tag, dev.Id);
+            if (!string.IsNullOrEmpty(preferredDeviceId) && dev.Id == preferredDeviceId)
+                defaultDevIdx = i;
+        }
+        devCombo.SelectedIndex = defaultDevIdx;
+        root.Children.Add(devCombo);
+
+        root.Children.Add(UiKit.Body("项目目录（来自电脑端已验证的活跃工作区）", 12.8, UiKit.MutedBrush));
+        var projCombo = UiKit.StyledComboBox();
+        projCombo.Margin = new Thickness(0, 6, 0, 13);
+        root.Children.Add(projCombo);
+
+        root.Children.Add(UiKit.Body("编程工具", 12.8, UiKit.MutedBrush));
+        var toolHost = new ContentControl { Margin = new Thickness(0, 6, 0, 13) };
+        root.Children.Add(toolHost);
+
+        var capabilityHint = UiKit.Body("", 12.2, UiKit.WarningBrush);
+        capabilityHint.Margin = new Thickness(0, 0, 0, 12);
+        capabilityHint.Visibility = Visibility.Collapsed;
+        root.Children.Add(capabilityHint);
+
+        root.Children.Add(UiKit.Body("首条任务指令", 12.8, UiKit.MutedBrush));
+        var promptBox = UiKit.StyledTextBox("", "描述你想让它完成的任务（Ctrl + Enter 快捷发起）…", multiline: true);
+        promptBox.MinHeight = 96;
+        promptBox.MaxHeight = 180;
+        promptBox.Margin = new Thickness(0, 6, 0, 12);
+        root.Children.Add(promptBox);
+
+        var statusText = UiKit.Body("", 12.5, UiKit.AccentBrush);
+        statusText.Margin = new Thickness(0, 0, 0, 12);
+        statusText.Visibility = Visibility.Collapsed;
+        root.Children.Add(statusText);
+
+        var selectedTool = "codex";
+        var submitting = false;
+        Button? startBtn = null;
+
+        Computer SelectedComputer()
+        {
+            var id = (devCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+            return onlineComputers.FirstOrDefault(d => d.Id == id) ?? onlineComputers[0];
+        }
+
+        string SelectedProjectId() =>
+            (projCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+
+        void SyncStartButton()
+        {
+            if (startBtn is null) return;
+            var comp = SelectedComputer();
+            var tools = DevPreviewPolicy.SupportedToolsFor(comp);
+            var hasProj = MonitorSecurity.Matches(SelectedProjectId(), "[0-9a-f]{24}");
+            var hasPrompt = !string.IsNullOrWhiteSpace(promptBox.Text);
+            var canSend = !submitting && tools.Contains(selectedTool) && hasProj && hasPrompt;
+            UiKit.SetButtonState(startBtn, submitting ? "正在启动…" : "启动新任务", canSend, primary: true);
+        }
+
+        void RebuildToolChips(List<string> tools)
+        {
+            if (tools.Count == 0)
+            {
+                toolHost.Content = UiKit.Body("当前电脑暂未报告支持远程启动的工具", 12.5, UiKit.MutedBrush);
+                return;
+            }
+            if (!tools.Contains(selectedTool))
+                selectedTool = tools[0];
+
+            var seg = UiKit.SegmentedControl(
+                tools.Select(t =>
+                {
+                    var key = t;
+                    return (MonitorTask.BrandFor(key), selectedTool == key, (Action)(() =>
+                    {
+                        if (submitting) return;
+                        selectedTool = key;
+                        RebuildToolChips(tools);
+                        SyncStartButton();
+                    }));
+                }).ToList());
+            toolHost.Content = seg;
+        }
+
+        void RebuildComputerContext()
+        {
+            var comp = SelectedComputer();
+            var projects = DevPreviewPolicy.VerifiedProjectsFor(comp);
+            var tools = DevPreviewPolicy.SupportedToolsFor(comp);
+
+            projCombo.Items.Clear();
+            if (projects.Count == 0)
+            {
+                UiKit.AddComboItem(projCombo, "暂无同步到的活跃项目目录", "");
+                projCombo.SelectedIndex = 0;
+                projCombo.IsEnabled = false;
+            }
+            else
+            {
+                foreach (var p in projects)
+                {
+                    var toolsBadge = p.Tools is { Count: > 0 } pt
+                        ? " · " + string.Join("/", pt.Select(MonitorTask.BrandFor))
+                        : "";
+                    UiKit.AddComboItem(projCombo, p.Name + toolsBadge, p.Id);
+                }
+                projCombo.SelectedIndex = 0;
+                projCombo.IsEnabled = !submitting;
+            }
+
+            if (projects.Count > 0 && projects[0].Tools is { Count: > 0 } preferredTools)
+            {
+                var firstSupported = preferredTools.FirstOrDefault(t => tools.Contains(t));
+                if (!string.IsNullOrEmpty(firstSupported) && !tools.Contains(selectedTool))
+                    selectedTool = firstSupported;
+            }
+
+            RebuildToolChips(tools);
+
+            if (tools.Count == 0)
+            {
+                capabilityHint.Text = "这台电脑尚未开启「结果、文件与回复」同步模式，或未检测到可用的 Codex / Claude Code / Antigravity 命令程序。";
+                capabilityHint.Visibility = Visibility.Visible;
+            }
+            else if (projects.Count == 0)
+            {
+                capabilityHint.Text = "这台电脑暂未同步到历史活跃项目目录；先在电脑端对应文件夹打开一次工具会话后即可在此选用。";
+                capabilityHint.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                capabilityHint.Visibility = Visibility.Collapsed;
+            }
+
+            SyncStartButton();
+        }
+
+        async Task SubmitAsync()
+        {
+            if (submitting) return;
+            var comp = SelectedComputer();
+            var tools = DevPreviewPolicy.SupportedToolsFor(comp);
+            var projId = SelectedProjectId();
+            var prompt = promptBox.Text;
+            if (!tools.Contains(selectedTool) || !MonitorSecurity.Matches(projId, "[0-9a-f]{24}") || string.IsNullOrWhiteSpace(prompt))
+                return;
+
+            submitting = true;
+            devCombo.IsEnabled = false;
+            projCombo.IsEnabled = false;
+            promptBox.IsReadOnly = true;
+            statusText.Foreground = UiKit.AccentBrush;
+            statusText.Text = "正在向电脑发送新建任务请求…";
+            statusText.Visibility = Visibility.Visible;
+            SyncStartButton();
+
+            var (createdId, error) = await controller.StartNewTaskAsync(
+                comp.Id,
+                projId,
+                selectedTool,
+                prompt,
+                msg =>
+                {
+                    statusText.Foreground = UiKit.AccentBrush;
+                    statusText.Text = msg;
+                    statusText.Visibility = Visibility.Visible;
+                },
+                cts.Token);
+
+            if (cts.IsCancellationRequested) return;
+
+            if (!string.IsNullOrWhiteSpace(createdId))
+            {
+                win.Close();
+                onTaskCreated(createdId!);
+                return;
+            }
+
+            submitting = false;
+            devCombo.IsEnabled = true;
+            projCombo.IsEnabled = projCombo.Items.Count > 0 && !string.IsNullOrEmpty(SelectedProjectId());
+            promptBox.IsReadOnly = false;
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                statusText.Foreground = UiKit.WarningBrush;
+                statusText.Text = error!;
+                statusText.Visibility = Visibility.Visible;
+            }
+            SyncStartButton();
+        }
+
+        devCombo.SelectionChanged += (_, _) => RebuildComputerContext();
+        projCombo.SelectionChanged += (_, _) => SyncStartButton();
+        promptBox.TextChanged += (_, _) => SyncStartButton();
+        promptBox.KeyDown += async (_, e) =>
+        {
+            if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+            {
+                e.Handled = true;
+                await SubmitAsync();
+            }
+        };
+
+        var actions = new DockPanel { Margin = new Thickness(0, 4, 0, 0) };
+        actions.Children.Add(UiKit.SecondaryButton("取消", () => win.Close(), textBrush: UiKit.MutedBrush));
+        startBtn = UiKit.PrimaryButton("启动新任务", async () => await SubmitAsync());
+        DockPanel.SetDock(startBtn, Dock.Right);
+        startBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        actions.Children.Add(startBtn);
+        root.Children.Add(actions);
+
+        RebuildComputerContext();
+        PresentModal(win, root);
+    }
+
     public static void OpenBundledMiSansLicense()
     {
         try

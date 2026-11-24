@@ -155,6 +155,7 @@ class AgentConfig:
     sync_output: bool = False
     allow_insecure_lan: bool = False
     antigravity_v1: bool = field(default=False, init=False, repr=False)
+    workspace_meta_v1: bool = field(default=False, init=False, repr=False)
 
 
 def default_state_dir() -> Path:
@@ -499,7 +500,7 @@ def pair_qr(
 def _collect_snapshot(*, include_output: bool, codex_growth: CodexGrowthTracker | None = None) -> dict[str, Any]:
     from .collector import collect_snapshot
 
-    return collect_snapshot(include_output=include_output, codex_growth=codex_growth)
+    return collect_snapshot(include_output=include_output, codex_growth=codex_growth, include_runtime=True)
 
 
 def heartbeat(client: HubClient, config: AgentConfig, snapshot: dict[str, Any]) -> bool:
@@ -509,26 +510,48 @@ def heartbeat(client: HubClient, config: AgentConfig, snapshot: dict[str, Any]) 
     if not isinstance(sources, (list, dict)):
         raise RemoteAgentError("采集结果格式无效，本次未上传")
     tasks = snapshot["tasks"]
-    # An older hub rejects the whole heartbeat on a new provider enum. Start
-    # with the legacy providers until this authenticated hub advertises support.
-    legacy_tasks = [task for task in tasks if not isinstance(task, dict) or task.get("tool") != "antigravity"]
+    # An older hub rejects the whole heartbeat on a new provider enum or new
+    # workspace metadata fields. Start with legacy fields until advertised.
+    legacy_tasks = [
+        ({k: v for k, v in task.items() if k != "project_id"} if isinstance(task, dict) else task)
+        for task in tasks
+        if not isinstance(task, dict) or task.get("tool") != "antigravity"
+    ]
     legacy_sources = ([source for source in sources
                        if not isinstance(source, dict) or source.get("tool") != "antigravity"]
                       if isinstance(sources, list) else sources)
     legacy = {"tasks": legacy_tasks, "sources": legacy_sources}
+    active_tasks = tasks if config.antigravity_v1 else [
+        task for task in tasks if not isinstance(task, dict) or task.get("tool") != "antigravity"
+    ]
+    if not config.workspace_meta_v1:
+        active_tasks = [
+            ({k: v for k, v in task.items() if k != "project_id"} if isinstance(task, dict) else task)
+            for task in active_tasks
+        ]
+    active_sources = sources if config.antigravity_v1 else legacy_sources
+    modern: dict[str, Any] = {"tasks": active_tasks, "sources": active_sources}
+    if config.workspace_meta_v1:
+        for meta_key in ("collected_at", "projects", "dev_ports", "preview_hosts"):
+            if snapshot.get(meta_key) is not None:
+                modern[meta_key] = snapshot[meta_key]
     new_provider = len(legacy_tasks) != len(tasks) or len(legacy_sources) != len(sources)
-    send_new = config.antigravity_v1 and new_provider
+    send_new = (config.antigravity_v1 and new_provider) or (
+        config.workspace_meta_v1 and any(snapshot.get(k) is not None for k in ("projects", "dev_ports", "preview_hosts"))
+    )
     try:
-        result = client.post("/api/agent/heartbeat", {"tasks": tasks, "sources": sources} if send_new else legacy,
+        result = client.post("/api/agent/heartbeat", modern if send_new else legacy,
                              token=config.token)
     except RemoteAgentError as exc:
         # Handle an older hub restored while this connector is still running.
         if not send_new or not isinstance(exc.__cause__, urllib.error.HTTPError) or exc.__cause__.code != 422:
             raise
         config.antigravity_v1 = False
+        config.workspace_meta_v1 = False
         result = client.post("/api/agent/heartbeat", legacy, token=config.token)
     sync_output = _output_setting(result, config.sync_output)
     config.antigravity_v1 = result.get("antigravity_v1") is True
+    config.workspace_meta_v1 = result.get("workspace_meta_v1") is True
     return sync_output
 
 
@@ -683,16 +706,25 @@ def _run(
                             raise RemoteAgentError("采集结果格式无效，本次未上传")
                         if not all(isinstance(task, dict) for task in snapshot["tasks"]):
                             raise RemoteAgentError("采集结果格式无效，本次未上传")
-                        snapshot = {**snapshot, "tasks": [
-                            {key: value for key, value in task.items() if key in fields}
-                            for task in snapshot["tasks"]
-                        ]}
+                        snapshot = {
+                            "tasks": [
+                                {key: value for key, value in task.items() if key in fields}
+                                for task in snapshot["tasks"]
+                            ],
+                            "sources": snapshot.get("sources", {}),
+                        }
                 except (OSError, ValueError, TypeError) as exc:
                     raise RemoteAgentError("暂时无法读取本机任务状态") from exc
                 had_antigravity_support = config.antigravity_v1
+                had_workspace_meta = config.workspace_meta_v1
                 sync_output = heartbeat(client, config, snapshot)
-                if not had_antigravity_support and config.antigravity_v1 and any(
-                        isinstance(task, dict) and task.get("tool") == "antigravity" for task in snapshot["tasks"]):
+                needs_resend = (
+                    (not had_antigravity_support and config.antigravity_v1 and any(
+                        isinstance(task, dict) and task.get("tool") == "antigravity" for task in snapshot["tasks"]))
+                    or (not had_workspace_meta and config.workspace_meta_v1 and any(
+                        snapshot.get(k) is not None for k in ("projects", "dev_ports", "preview_hosts")))
+                )
+                if needs_resend:
                     sync_output = heartbeat(client, config, snapshot)
                 if usage is not None:
                     usage.start()

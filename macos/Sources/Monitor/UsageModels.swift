@@ -321,6 +321,48 @@ struct UsageQuota: Codable, Identifiable {
         if isExpired(now: now) { return "已到重置时间，等待新额度" }
         return UsageFormat.reset(resetDate, now: now, stale: failed || isStale(now: now))
     }
+    func pace(now: Date = Date(), failed: Bool = false) -> QuotaPace? {
+        guard !failed, !isStale(now: now),
+              let rem = remaining, rem.isFinite,
+              let reset = resetDate,
+              let winMin = windowMinutes, winMin > 0, winMin <= 100800 else { return nil }
+        let windowSec = Double(winMin) * 60.0
+        let remSec = reset.timeIntervalSince(now)
+        guard remSec > 0, remSec <= windowSec else { return nil }
+        let clampedRem = min(100.0, max(0.0, rem))
+        let usedPct = 100.0 - clampedRem
+        let elapsedSec = windowSec - remSec
+        let idealRem = min(100.0, max(0.0, (remSec / windowSec) * 100.0))
+        let delta = clampedRem - idealRem
+        if clampedRem <= 0.05 {
+            return QuotaPace(idealRemainingPercent: idealRem, deltaPercent: delta, state: "exhausted", label: "额度已用尽")
+        }
+        if elapsedSec < max(180.0, windowSec * 0.03) {
+            return QuotaPace(idealRemainingPercent: idealRem, deltaPercent: delta, state: "steady", label: "窗口刚开启")
+        }
+        if delta >= 5.0 {
+            return QuotaPace(idealRemainingPercent: idealRem, deltaPercent: delta, state: "ahead", label: "富余 +\(Int(delta.rounded()))%")
+        }
+        if delta >= -5.0 {
+            return QuotaPace(idealRemainingPercent: idealRem, deltaPercent: delta, state: "steady", label: "配速均衡")
+        }
+        let ratePerSec = usedPct / max(1.0, elapsedSec)
+        if ratePerSec > 0 {
+            let secToEmpty = clampedRem / ratePerSec
+            if secToEmpty < remSec {
+                return QuotaPace(idealRemainingPercent: idealRem, deltaPercent: delta, state: "behind", label: "超速 · 约 \(UsageFormat.paceDuration(secToEmpty))耗尽")
+            }
+        }
+        return QuotaPace(idealRemainingPercent: idealRem, deltaPercent: delta, state: "behind", label: "偏快 \(Int(delta.rounded()))%")
+    }
+}
+
+struct QuotaPace: Equatable {
+    let idealRemainingPercent: Double
+    let deltaPercent: Double
+    let state: String
+    let label: String
+    var isWarning: Bool { state == "behind" || state == "exhausted" }
 }
 
 struct UsageSource: Identifiable {
@@ -483,6 +525,20 @@ enum UsageFormat {
         let duration = minutes >= 1440 ? "\(minutes / 1440) 天 \(minutes % 1440 / 60) 小时"
             : minutes >= 60 ? "\(minutes / 60) 小时 \(minutes % 60) 分钟" : "\(minutes) 分钟"
         return (stale ? "预计 " : "") + duration + "后重置" + (stale ? " · 待更新" : "")
+    }
+    static func paceDuration(_ seconds: Double) -> String {
+        let minutes = max(1, Int((seconds / 60.0).rounded()))
+        if minutes >= 1440 {
+            let days = minutes / 1440
+            let hours = (minutes % 1440) / 60
+            return hours > 0 ? "\(days) 天 \(hours) 小时" : "\(days) 天"
+        }
+        if minutes >= 60 {
+            let hours = minutes / 60
+            let rem = minutes % 60
+            return rem > 0 ? "\(hours) 小时 \(rem) 分钟" : "\(hours) 小时"
+        }
+        return "\(minutes) 分钟"
     }
     static func quotaCheck(_ state: String) -> String {
         switch state {

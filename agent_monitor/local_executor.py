@@ -26,7 +26,7 @@ import uuid
 
 from . import collector
 from .codex_async_questions import CodexAsyncQuestions
-from .task_results import resolve_local_session, _unlinked
+from .task_results import LocalSession, resolve_local_project, resolve_local_session, _unlinked
 from .failure_reasons import (
     FAILURE_LABELS, failure_code_for_antigravity, failure_code_for_claude,
     failure_code_for_codex, has_codex_error_info,
@@ -34,6 +34,8 @@ from .failure_reasons import (
 from .model_capabilities import antigravity_catalog_rows, normalize_catalog, selected_settings
 from .provider_controls import normalize_request, UnsupportedControl
 from .session_controls import ModelSelection, reply_fingerprint
+
+NEW_SOURCE_RE = re.compile(r"^(codex|claude|antigravity):new_([0-9a-f]{24})\Z")
 
 MAX_PROMPT_CHARS = 8_000
 MAX_LINE_BYTES = 1024 * 1024
@@ -302,6 +304,7 @@ class _Target:
     claude_original_mode: str | None = None
     directory_identity: tuple = ()
     status: str = ""
+    is_new: bool = False
 
 
 def _codex_resume_checkpoint(target):
@@ -486,9 +489,29 @@ def _antigravity_locked(base_dir: Path, session_id: str, conv_db: Path) -> bool:
         return True
 
 
-def _resolve_target(source_id, resolver):
+def _resolve_target(source_id, resolver, *, project_resolver=resolve_local_project):
     if not isinstance(source_id, str) or len(source_id) > 200:
         raise ExecutionIssue("invalid")
+    new_match = NEW_SOURCE_RE.fullmatch(source_id)
+    if new_match is not None:
+        tool, project_id = new_match.group(1), new_match.group(2)
+        cwd = project_resolver(project_id) if project_resolver else None
+        if cwd is None:
+            raise ExecutionIssue("unavailable")
+        try:
+            if not _unlinked(cwd) or not cwd.is_dir():
+                raise ExecutionIssue("unavailable")
+            if tool == "antigravity":
+                agy_base = Path.home() / ".gemini" / "antigravity"
+                agy_index = agy_base / "conversation_summaries.db"
+                if not _unlinked(agy_base) or not agy_base.is_dir():
+                    raise ExecutionIssue("unavailable")
+                path = agy_index if (agy_index.exists() and _unlinked(agy_index)) else agy_index
+            else:
+                path = cwd
+            return LocalSession(path, cwd, "new_" + project_id, tool, source_id)
+        except OSError as exc:
+            raise ExecutionIssue("unavailable") from exc
     resolved = resolver(source_id)
     if resolved is None or resolved.source_id != source_id or resolved.tool not in {"codex", "claude", "antigravity"}:
         raise ExecutionIssue("unavailable")
@@ -502,8 +525,25 @@ def _resolve_target(source_id, resolver):
         raise ExecutionIssue("unavailable") from exc
 
 
-def _inspect(source_id, *, resolver=resolve_local_session, status_reader=None, executable_finder=find_executable) -> _Target:
-    resolved = _resolve_target(source_id, resolver)
+def _inspect(source_id, *, resolver=resolve_local_session, project_resolver=resolve_local_project,
+             status_reader=None, executable_finder=find_executable) -> _Target:
+    resolved = _resolve_target(source_id, resolver, project_resolver=project_resolver)
+    if NEW_SOURCE_RE.fullmatch(source_id):
+        try:
+            executable = executable_finder(resolved.tool)
+            if not executable:
+                raise ExecutionIssue("cli")
+            directory = resolved.cwd.stat()
+            dir_id = (directory.st_dev, directory.st_ino)
+            profile = _permission_profile({"sandbox_policy": {"type": "workspace-write"}}, resolved.cwd) if resolved.tool == "codex" else None
+            claude_mode = "dontAsk" if resolved.tool == "claude" else None
+            original_mode = "default" if resolved.tool == "claude" else None
+            return _Target(
+                source_id, resolved.tool, resolved.session_id, resolved.path, resolved.cwd, dir_id, executable,
+                profile, None, None, claude_mode, original_mode, dir_id, "idle", is_new=True,
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            raise ExecutionIssue("unavailable") from exc
     try:
         before = _stamp(resolved.path)
         if resolved.tool == "antigravity":
@@ -605,7 +645,8 @@ def _command(target: _Target, *, interactive=False, settings=None) -> tuple[list
         mode = target.claude_original_mode if interactive else target.claude_mode
         if mode not in ({"default", "plan", "dontAsk", "acceptEdits"} if interactive else {"plan", "dontAsk"}):
             raise ExecutionIssue("permissions")
-        argv = [target.executable, "--print", "--resume", target.session_id, "--output-format", "stream-json",
+        session_flag = "--session-id" if target.is_new else "--resume"
+        argv = [target.executable, "--print", session_flag, target.session_id, "--output-format", "stream-json",
                 "--verbose", "--permission-mode", mode]
         if mode == "plan":
             argv += ["--disallowedTools", "ExitPlanMode"]
@@ -859,6 +900,12 @@ class _Run:
     fingerprint: str = ""
     selection: dict | None = None
     applied: dict | None = None
+    created_source_id: str = ""
+
+
+def _catalog_session_id(run, target) -> str:
+    raw = getattr(run, "source_id", "")
+    return raw.partition(":")[2] if isinstance(raw, str) and ":" in raw else target.session_id
 
 
 def _build_applied(model=None, effort=None, service_tier=None, collaboration_mode=None) -> dict | None:
@@ -874,13 +921,32 @@ def _build_applied(model=None, effort=None, service_tier=None, collaboration_mod
     return result or None
 
 
+def _record_claude_hook(event_name: str, session_id: str, cwd: Path, *, error_code: str = "") -> None:
+    try:
+        from .claude_hook import record_event
+        payload: dict = {"hook_event_name": event_name, "session_id": session_id, "cwd": str(cwd)}
+        if event_name == "Stop":
+            payload["background_tasks"] = []
+            payload["session_crons"] = []
+        elif event_name == "StopFailure" and error_code:
+            payload["error"] = error_code
+        record_event(payload)
+    except Exception:
+        pass
+
+
 class LocalReplyExecutor:
     def __init__(self, emit: Callable[[dict], None], *, timeout_seconds=1800, resolver=resolve_local_session,
-                 status_reader=None, executable_finder=find_executable, process_factory=_Process,
-                 interaction_handler=None, catalog_provider=None, report_applied: bool = False):
+                 project_resolver=resolve_local_project, status_reader=None, executable_finder=find_executable,
+                 process_factory=_Process, interaction_handler=None, catalog_provider=None, report_applied: bool = False):
         self.emit = emit
         self.timeout = max(.05, min(float(timeout_seconds), 3600))
-        self.inspect_options = {"resolver": resolver, "status_reader": status_reader, "executable_finder": executable_finder}
+        self.inspect_options = {
+            "resolver": resolver,
+            "project_resolver": project_resolver,
+            "status_reader": status_reader,
+            "executable_finder": executable_finder,
+        }
         self.process_factory = process_factory
         self.interaction_handler, self.catalog_provider = interaction_handler, catalog_provider
         self.report_applied = bool(report_applied)
@@ -892,6 +958,8 @@ class LocalReplyExecutor:
         res = {"command_id": run.command_id, "state": run.state, "reason": run.reason, "error_code": run.error_code}
         if self.report_applied and run.applied:
             res["applied"] = dict(run.applied)
+        if run.created_source_id:
+            res["created_source_id"] = run.created_source_id
         return res
 
     def _record_applied(self, run, applied):
@@ -901,6 +969,13 @@ class LocalReplyExecutor:
             run.applied = applied
         if self.report_applied:
             self._emit(self._result(run))
+
+    def _record_created(self, run, created_source_id: str):
+        if not created_source_id or not isinstance(run, _Run):
+            return
+        with self.lock:
+            run.created_source_id = created_source_id
+        self._emit(self._result(run))
 
     def _emit(self, value):
         try: self.emit(dict(value))
@@ -981,22 +1056,27 @@ class LocalReplyExecutor:
             self._fresh(target)
             if run.cancelled.is_set(): raise ExecutionIssue("cancelled", "uncertain")
             settings = None
+            catalog_session = _catalog_session_id(run, target)
             if run.selection and (self.catalog_provider is not None or target.tool != "antigravity"):
                 catalog = (self.catalog_provider(target.source_id) if self.catalog_provider else
                            discover_reply_catalog(target.source_id, process_factory=self.process_factory, **self.inspect_options))
-                try: settings = selected_settings(run.selection, catalog, provider=target.tool, session_id=target.session_id)
+                try: settings = selected_settings(run.selection, catalog, provider=target.tool, session_id=catalog_session)
                 except (ValueError, TypeError, KeyError): raise ExecutionIssue("changed")
                 self._fresh(target)
                 if run.cancelled.is_set(): raise ExecutionIssue("cancelled", "uncertain")
             interactive = self.interaction_handler is not None
-            argv, profile_name = _command(target, interactive=interactive, settings=settings)
-            process = self.process_factory(argv, target.cwd)
+            exec_target = target
+            if target.tool == "claude" and getattr(target, "is_new", False):
+                new_sid = str(uuid.uuid4())
+                exec_target = replace(target, session_id=new_sid, source_id="claude:" + new_sid)
+            argv, profile_name = _command(exec_target, interactive=interactive, settings=settings)
+            process = self.process_factory(argv, exec_target.cwd)
             transport = _Transport(process, run.cancelled, self.timeout)
             self._emit(self._result(run))
-            if target.tool == "codex": self._codex(transport, target, profile_name, prompt, run, settings)
-            elif target.tool == "antigravity": self._antigravity(transport, target, prompt, run, settings)
-            elif interactive: self._claude_controlled(transport, target, prompt, run, settings)
-            else: self._claude(transport, target, prompt, run)
+            if exec_target.tool == "codex": self._codex(transport, exec_target, profile_name, prompt, run, settings)
+            elif exec_target.tool == "antigravity": self._antigravity(transport, exec_target, prompt, run, settings)
+            elif interactive: self._claude_controlled(transport, exec_target, prompt, run, settings)
+            else: self._claude(transport, exec_target, prompt, run)
             state, reason, code = "succeeded", "", ""
         except ExecutionIssue as exc:
             state, reason, code = exc.state, REASONS[exc.code], exc.code
@@ -1017,28 +1097,57 @@ class LocalReplyExecutor:
         _rpc_response(transport, 1)
         transport.send({"method": "initialized", "params": {}})
         collaboration_modes = None
+        is_new = bool(getattr(target, "is_new", False))
+        catalog_session = _catalog_session_id(run, target)
         if settings:
             try:
                 rows = _codex_model_rows(transport)
                 collaboration_modes = _codex_collaboration_modes(transport)
                 current = normalize_catalog("codex", rows, collaboration_modes=collaboration_modes)
-                settings = selected_settings(run.selection, current, provider="codex", session_id=target.session_id)
+                settings = selected_settings(run.selection, current, provider="codex", session_id=catalog_session)
             except (ValueError, KeyError, TypeError): raise ExecutionIssue("changed")
-        params = {"threadId": target.session_id, "cwd": str(target.cwd), "permissions": profile,
-                  "approvalPolicy": "untrusted", "approvalsReviewer": "user", "excludeTurns": True}
-        if target.model: params["model"] = target.model
-        checkpoint = _codex_resume_checkpoint(target)
-        transport.send({"id": 2, "method": "thread/resume", "params": params})
-        resumed = _rpc_response(transport, 2)
-        thread = resumed.get("thread", {})
-        if thread.get("id") != target.session_id or not isinstance(resumed.get("cwd"), str) or not _same_path(resumed["cwd"], target.cwd):
-            raise ExecutionIssue("protocol", "uncertain")
-        if thread.get("status", {}).get("type") != "idle": raise ExecutionIssue("busy")
-        if resumed.get("activePermissionProfile", {}).get("id") != profile or resumed.get("approvalPolicy") != "untrusted" or resumed.get("approvalsReviewer") != "user":
-            raise ExecutionIssue("permissions")
-        if resumed.get("sandbox", {}).get("networkAccess", True) is not False:
-            raise ExecutionIssue("permissions")
-        target = self._fresh_after_codex_resume(target, checkpoint, resumed)
+        if is_new:
+            self._directory_current(target)
+            start_params = {
+                "cwd": str(target.cwd),
+                "approvalPolicy": "untrusted",
+                "approvalsReviewer": "user",
+            }
+            if settings and settings.get("model"):
+                start_params["model"] = settings["model"]
+            transport.send({"id": 2, "method": "thread/start", "params": start_params})
+            resumed = _rpc_response(transport, 2)
+            thread = resumed.get("thread", {})
+            new_sid = thread.get("id")
+            try:
+                valid_sid = isinstance(new_sid, str) and str(uuid.UUID(new_sid)) == new_sid.lower()
+            except ValueError:
+                valid_sid = False
+            if not valid_sid or not isinstance(resumed.get("cwd"), str) or not _same_path(resumed["cwd"], target.cwd):
+                raise ExecutionIssue("protocol", "uncertain")
+            if resumed.get("activePermissionProfile", {}).get("id") != profile or resumed.get("approvalPolicy") != "untrusted" or resumed.get("approvalsReviewer") != "user":
+                raise ExecutionIssue("permissions")
+            if resumed.get("sandbox", {}).get("networkAccess", True) is not False:
+                raise ExecutionIssue("permissions")
+            self._directory_current(target)
+            target = replace(target, session_id=new_sid, source_id="codex:" + new_sid)
+            self._record_created(run, target.source_id)
+        else:
+            params = {"threadId": target.session_id, "cwd": str(target.cwd), "permissions": profile,
+                      "approvalPolicy": "untrusted", "approvalsReviewer": "user", "excludeTurns": True}
+            if target.model: params["model"] = target.model
+            checkpoint = _codex_resume_checkpoint(target)
+            transport.send({"id": 2, "method": "thread/resume", "params": params})
+            resumed = _rpc_response(transport, 2)
+            thread = resumed.get("thread", {})
+            if thread.get("id") != target.session_id or not isinstance(resumed.get("cwd"), str) or not _same_path(resumed["cwd"], target.cwd):
+                raise ExecutionIssue("protocol", "uncertain")
+            if thread.get("status", {}).get("type") != "idle": raise ExecutionIssue("busy")
+            if resumed.get("activePermissionProfile", {}).get("id") != profile or resumed.get("approvalPolicy") != "untrusted" or resumed.get("approvalsReviewer") != "user":
+                raise ExecutionIssue("permissions")
+            if resumed.get("sandbox", {}).get("networkAccess", True) is not False:
+                raise ExecutionIssue("permissions")
+            target = self._fresh_after_codex_resume(target, checkpoint, resumed)
         environments = thread.get("environments")
         local_approval_environment = _codex_local_approval_environment(environments, target.cwd)
         params = {"threadId": target.session_id, "input": [{"type": "text", "text": prompt}],
@@ -1076,7 +1185,10 @@ class LocalReplyExecutor:
             # and effort. Repeat the validated choice here without custom instructions.
             params["collaborationMode"] = {"mode": mode, "settings": {
                 "model": model, "reasoning_effort": effort, "developer_instructions": None}}
-            self._fresh(target)
+            if is_new:
+                self._directory_current(target)
+            else:
+                self._fresh(target)
         transport.send({"id": 3, "method": "turn/start", "params": params})
         pending = []
         started = _rpc_response(transport, 3, pending)
@@ -1143,7 +1255,11 @@ class LocalReplyExecutor:
                                  "failed" if turn.get("status") == "failed" else "uncertain")
 
     def _claude(self, transport, target, prompt, run=None):
-        self._fresh(target)
+        is_new = bool(getattr(target, "is_new", False))
+        if is_new:
+            self._directory_current(target)
+        else:
+            self._fresh(target)
         transport.send_bytes(prompt.encode("utf-8"), close=True)
         initialized = False
         while True:
@@ -1154,14 +1270,24 @@ class LocalReplyExecutor:
                 if session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
                 if message.get("permissionMode") != target.claude_mode: raise ExecutionIssue("permissions")
                 initialized = True
+                if is_new:
+                    if run is not None:
+                        self._record_created(run, target.source_id)
+                    _record_claude_hook("UserPromptSubmit", target.session_id, target.cwd)
                 if run is not None:
                     applied = _build_applied(model=message.get("model") or target.model)
                     self._record_applied(run, applied)
             if message.get("type") != "result": continue
             if not initialized or session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
             if message.get("permission_denials"): raise ExecutionIssue("approval")
-            if message.get("subtype") == "success" and message.get("is_error") is False: return
-            raise ExecutionIssue(failure_code_for_claude(message.get("error_type")) or "failed", "failed")
+            if message.get("subtype") == "success" and message.get("is_error") is False:
+                if is_new:
+                    _record_claude_hook("Stop", target.session_id, target.cwd)
+                return
+            err_code = failure_code_for_claude(message.get("error_type")) or "failed"
+            if is_new:
+                _record_claude_hook("StopFailure", target.session_id, target.cwd, error_code=err_code)
+            raise ExecutionIssue(err_code, "failed")
 
     def _directory_current(self, target):
         if not _unlinked(target.cwd) or not target.cwd.is_dir(): raise ExecutionIssue("changed")
@@ -1257,12 +1383,16 @@ class LocalReplyExecutor:
                 self._resolve_control(request, "cancelled", outcome="handled_on_desktop" if desktop_handled else "")
 
     def _antigravity(self, transport, target, prompt, run, settings=None):
-        transcript = (_antigravity_base_dir(target.path) / "brain" / target.session_id
-                      / ".system_generated" / "logs" / "transcript.jsonl")
-        try:
-            transcript_stamp = _stamp(transcript) if transcript.exists() else None
-        except OSError:
-            raise ExecutionIssue("changed") from None
+        is_new = bool(getattr(target, "is_new", False))
+        base_dir = _antigravity_base_dir(target.path)
+        transcript = (base_dir / "brain" / target.session_id / ".system_generated" / "logs" / "transcript.jsonl")
+        if not is_new:
+            try:
+                transcript_stamp = _stamp(transcript) if transcript.exists() else None
+            except OSError:
+                raise ExecutionIssue("changed") from None
+        else:
+            transcript_stamp = None
         capabilities = {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
         if self.interaction_handler:
             capabilities["elicitation"] = {"form": {}}
@@ -1270,11 +1400,27 @@ class LocalReplyExecutor:
             "protocolVersion": 1, "clientInfo": {"name": "agent_monitor_local_reply", "version": "1"},
             "clientCapabilities": capabilities}})
         _rpc_response(transport, 1, error_mapper=failure_code_for_antigravity)
-        transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/resume", "params": {
-            "sessionId": target.session_id, "cwd": str(target.cwd), "mcpServers": []}})
-        resumed = _rpc_response(transport, 2, error_mapper=failure_code_for_antigravity)
-        if resumed.get("sessionId") != target.session_id:
-            raise ExecutionIssue("protocol", "uncertain")
+        if is_new:
+            self._directory_current(target)
+            transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {
+                "cwd": str(target.cwd), "mcpServers": []}})
+            resumed = _rpc_response(transport, 2, error_mapper=failure_code_for_antigravity)
+            new_sid = resumed.get("sessionId")
+            try:
+                valid_sid = isinstance(new_sid, str) and str(uuid.UUID(new_sid)) == new_sid.lower()
+            except ValueError:
+                valid_sid = False
+            if not valid_sid:
+                raise ExecutionIssue("protocol", "uncertain")
+            target = replace(target, session_id=new_sid, source_id="antigravity:" + new_sid)
+            transcript = (base_dir / "brain" / target.session_id / ".system_generated" / "logs" / "transcript.jsonl")
+            self._record_created(run, target.source_id)
+        else:
+            transport.send({"jsonrpc": "2.0", "id": 2, "method": "session/resume", "params": {
+                "sessionId": target.session_id, "cwd": str(target.cwd), "mcpServers": []}})
+            resumed = _rpc_response(transport, 2, error_mapper=failure_code_for_antigravity)
+            if resumed.get("sessionId") != target.session_id:
+                raise ExecutionIssue("protocol", "uncertain")
         modes = resumed.get("modes")
         mode = modes.get("currentModeId") if isinstance(modes, dict) else None
         if mode not in {"default", "accept-edits", "plan"}:
@@ -1288,10 +1434,15 @@ class LocalReplyExecutor:
             try:
                 rows, cur_model, cur_effort = antigravity_catalog_rows(resumed)
                 current = normalize_catalog("antigravity", rows, current_model=cur_model, current_effort=cur_effort)
-                settings = selected_settings(run.selection, current, provider="antigravity", session_id=target.session_id)
+                settings = selected_settings(
+                    run.selection, current, provider="antigravity", session_id=_catalog_session_id(run, target)
+                )
             except (ValueError, KeyError, TypeError):
                 raise ExecutionIssue("changed")
-        self._fresh_after_antigravity_resume(target, transcript_stamp)
+        if is_new:
+            self._directory_current(target)
+        else:
+            self._fresh_after_antigravity_resume(target, transcript_stamp)
         rpc_id = 3
         if not self.interaction_handler and mode == "accept-edits":
             _antigravity_set_config(transport, rpc_id, target.session_id, "mode", "default")
@@ -1356,13 +1507,17 @@ class LocalReplyExecutor:
                 _antigravity_abort_session(transport, target.session_id, prompt_id + 2)
 
     def _claude_controlled(self, transport, target, prompt, run, settings):
+        is_new = bool(getattr(target, "is_new", False))
         initialized = _claude_initialize(transport)
         if settings:
             try:
                 current = normalize_catalog("claude", initialized.get("models"))
-                selected_settings(run.selection, current, provider="claude", session_id=target.session_id)
+                selected_settings(run.selection, current, provider="claude", session_id=_catalog_session_id(run, target))
             except (ValueError, KeyError, TypeError): raise ExecutionIssue("changed")
-        self._fresh(target)
+        if is_new:
+            self._directory_current(target)
+        else:
+            self._fresh(target)
         transport.send({"type": "user", "session_id": target.session_id, "uuid": run.command_id,
                         "message": {"role": "user", "content": prompt}})
         pending, seen = [], {}
@@ -1379,6 +1534,9 @@ class LocalReplyExecutor:
                 # alias. Do not abort an already-started turn for a valid alias
                 # resolution, or infer a mapping/applied effort from this field.
                 session_initialized = True
+                if is_new:
+                    self._record_created(run, target.source_id)
+                    _record_claude_hook("UserPromptSubmit", target.session_id, target.cwd)
                 applied_cl = _build_applied(
                     model=message.get("model") or (settings or {}).get("model") or target.model,
                     effort=(settings or {}).get("effort"),
@@ -1392,9 +1550,17 @@ class LocalReplyExecutor:
                 if "error" in message: failure_code = failure_code_for_claude(message.get("error"))
             if message.get("type") != "result": continue
             if not session_initialized or session != target.session_id: raise ExecutionIssue("protocol", "uncertain")
-            if message.get("permission_denials"): raise ExecutionIssue("approval")
-            if message.get("subtype") == "success" and message.get("is_error") is False: return
+            if message.get("permission_denials"):
+                if is_new:
+                    _record_claude_hook("Stop", target.session_id, target.cwd)
+                raise ExecutionIssue("approval")
+            if message.get("subtype") == "success" and message.get("is_error") is False:
+                if is_new:
+                    _record_claude_hook("Stop", target.session_id, target.cwd)
+                return
             if "error_type" in message: failure_code = failure_code_for_claude(message.get("error_type"))
+            if is_new:
+                _record_claude_hook("StopFailure", target.session_id, target.cwd, error_code=failure_code or "failed")
             raise ExecutionIssue(failure_code or "failed", "failed")
 
     def cancel(self, command_id: str) -> bool:
@@ -1517,6 +1683,8 @@ def _antigravity_set_config(transport, rpc_id, session_id, config_id, value):
 
 def _catalog_observation(resolved):
     """A missing or changing observation cannot invalidate the provider's list."""
+    if NEW_SOURCE_RE.fullmatch(getattr(resolved, "source_id", "")):
+        return None, None
     try:
         model = effort = None
         if resolved.tool == "antigravity":
@@ -1579,8 +1747,9 @@ def _cleanup_antigravity_probe(cli_root: Path, session_id: str | None) -> None:
         shutil.rmtree(brain, ignore_errors=True)
 
 
-def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_reader=None,
-                           executable_finder=find_executable, process_factory=_Process, timeout_seconds=15, cancelled=None):
+def discover_reply_catalog(source_id, *, resolver=resolve_local_session, project_resolver=resolve_local_project,
+                           status_reader=None, executable_finder=find_executable, process_factory=_Process,
+                           timeout_seconds=15, cancelled=None):
     """Capability handshake only. No user message, turn/start, or config read/write.
 
     An unavailable/unsupported catalog is represented as None, never synthesized.
@@ -1591,7 +1760,7 @@ def discover_reply_catalog(source_id, *, resolver=resolve_local_session, status_
     probe_session_id = None
     graceful_close = False
     try:
-        target = _resolve_target(source_id, resolver)
+        target = _resolve_target(source_id, resolver, project_resolver=project_resolver)
         executable = executable_finder(target.tool)
         if not executable:
             return None

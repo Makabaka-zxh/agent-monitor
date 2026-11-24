@@ -212,6 +212,9 @@ private struct UsageOfficialQuotaCard: View {
         if let source {
             for quota in source.visibleQuotas(now: now) {
                 var text = quota.displayTitle + "\n" + quota.usedText(now: now, failed: failed) + "（" + quota.remainingText(now: now, failed: failed) + "）\n" + quota.resetText(now: now, failed: failed)
+                if let pace = quota.pace(now: now, failed: failed) {
+                    text += "\n线性基准剩余 " + UsageFormat.percentage(pace.idealRemainingPercent) + " · " + pace.label
+                }
                 if let observed = quota.observedDate { text += "\n记录于 " + UsageViewText.observed(observed) }
                 parts.append(text)
             }
@@ -398,6 +401,7 @@ private struct UsageQuotaRow: View {
     private var tone: Color { old || expired ? .secondary : (remaining ?? 100) <= 10 ? .orange : .primary }
 
     var body: some View {
+        let pace = quota.pace(now: now, failed: failed)
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(quota.displayTitle).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
@@ -408,11 +412,22 @@ private struct UsageQuotaRow: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
             .font(.custom("MiSans-Regular", size: 12.5))
-            UsageRemainingBar(value: remaining, stale: old)
+            UsageRemainingBar(value: remaining, stale: old, idealRemaining: pace?.idealRemainingPercent, warningTick: pace?.isWarning == true)
             HStack(spacing: 6) {
                 Text(quota.usedText(now: now, failed: failed))
                 Text("·")
                 Text(quota.resetText(now: now, failed: failed))
+                if let pace {
+                    Spacer(minLength: 6)
+                    Text(pace.label)
+                        .fontWeight(pace.isWarning ? .medium : .regular)
+                        .foregroundStyle(
+                            pace.state == "exhausted" ? Color.red :
+                            pace.isWarning ? Color.orange :
+                            pace.state == "ahead" ? Color.green : Color.secondary
+                        )
+                        .lineLimit(1)
+                }
             }
             .font(.custom("MiSans-Regular", size: 11))
             .foregroundStyle(.secondary)
@@ -506,18 +521,30 @@ private struct UsageChartBar: View {
 private struct UsageRemainingBar: View {
     let value: Double?
     let stale: Bool
+    var idealRemaining: Double? = nil
+    var warningTick: Bool = false
     private var tint: Color { stale ? .secondary : (value ?? 100) <= 10 ? .orange : .accentColor }
     var body: some View {
         GeometryReader { geometry in
+            let width = max(0, geometry.size.width)
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.075))
+                Capsule().fill(Color.primary.opacity(0.075)).frame(height: 7)
                 if let value, value.isFinite, value > 0 {
                     Capsule().fill(tint.opacity(stale ? 0.42 : 0.85))
-                        .frame(width: geometry.size.width * min(100, max(0, value)) / 100)
+                        .frame(width: width * min(100, max(0, value)) / 100, height: 7)
+                }
+                if !stale, let idealRemaining, idealRemaining.isFinite {
+                    let clamped = min(98.5, max(1.5, idealRemaining))
+                    let x = max(0, width * clamped / 100 - 1.1)
+                    RoundedRectangle(cornerRadius: 1.1, style: .continuous)
+                        .fill(warningTick ? Color.orange : Color.primary.opacity(0.78))
+                        .frame(width: 2.2, height: 10)
+                        .offset(x: x)
                 }
             }
+            .frame(maxHeight: .infinity)
         }
-        .frame(height: 7)
+        .frame(height: 10)
         .accessibilityHidden(true)
     }
 }
