@@ -35,10 +35,12 @@ import java.util.function.Consumer;
 public final class NativeGlassNavigation extends FrameLayout {
     private static final String[] KEYS = {"tasks", "usage", "account"};
     private static final String[] LABELS = {"任务", "用量", "我的"};
+    private static final int DOWNSAMPLE_FACTOR = 4;
+    private static final int MAX_RASTER_WIDTH = 320;
+    private static final int MAX_RASTER_HEIGHT = 80;
     private static final int MAX_SAMPLE_WIDTH = 192;
     private static final int MAX_SAMPLE_HEIGHT = 48;
-    private static final long SAMPLE_INTERVAL_MS = 120L;
-    private static final long SAMPLE_BUDGET_MS = 12L;
+    private static final long SAMPLE_BUDGET_MS = 48L;
     private final NativeUi ui;
     private final View backdrop;
     private final View backgroundHost;
@@ -55,7 +57,6 @@ public final class NativeGlassNavigation extends FrameLayout {
     private final ViewTreeObserver.OnScrollChangedListener scrollListener = this::refreshBackdrop;
     private final ViewTreeObserver.OnGlobalLayoutListener layoutListener = this::refreshBackdrop;
     private final Runnable capture = this::captureBackdrop;
-    private final Runnable settledCapture = this::refreshBackdrop;
     private final ContentObserver preferenceObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
         @Override public void onChange(boolean selfChange) {
             readAccessibilityPreferences();
@@ -68,14 +69,15 @@ public final class NativeGlassNavigation extends FrameLayout {
         }
     };
     private ViewTreeObserver observedTree;
+    private Bitmap rasterSample;
+    private Canvas rasterCanvas;
+    private int[] rasterPixels;
     private Bitmap sample;
-    private Canvas sampleCanvas;
     private int[] pixels, scratchPixels;
     private LinearGradient material, rim, trayMaterial;
     private ValueAnimator selectionAnimator;
     private int selectedIndex, slowSamples;
     private float visualIndex;
-    private long lastSampleAt;
     private boolean captureQueued, samplingUnavailable, reduceTransparency, highContrast;
 
     public NativeGlassNavigation(NativeUi ui, View backdrop, View backgroundHost, String selected, Consumer<String> navigate) {
@@ -133,15 +135,14 @@ public final class NativeGlassNavigation extends FrameLayout {
             });
             selectionAnimator.start();
         } else { visualIndex = next; invalidate(); }
-        removeCallbacks(settledCapture);
-        if (isAttachedToWindow()) { refreshBackdrop(); postDelayed(settledCapture, 340); }
+        if (isAttachedToWindow()) refreshBackdrop();
     }
 
-    /** Coalesced, event-driven refresh. Scrolling never schedules an unbounded animation loop. */
+    /** VSync-coalesced, event-driven refresh: zero 120ms stutter during scroll, zero idle animation loop. */
     public void refreshBackdrop() {
         if (ui == null || !isAttachedToWindow() || !isShown() || !hasWindowFocus() || captureQueued) return;
         captureQueued = true;
-        postDelayed(capture, Math.max(0, SAMPLE_INTERVAL_MS - (SystemClock.uptimeMillis() - lastSampleAt)));
+        postOnAnimation(capture);
     }
 
     private void readAccessibilityPreferences() {
@@ -191,11 +192,11 @@ public final class NativeGlassNavigation extends FrameLayout {
     @Override public void onWindowFocusChanged(boolean hasWindowFocus) {
         super.onWindowFocusChanged(hasWindowFocus);
         if (hasWindowFocus) { readAccessibilityPreferences(); refreshBackdrop(); invalidate(); }
-        else { cancelPendingCapture(); releaseSample(); }
+        else cancelPendingCapture();
     }
 
     private void cancelPendingCapture() {
-        removeCallbacks(capture); removeCallbacks(settledCapture); captureQueued = false;
+        removeCallbacks(capture); captureQueued = false;
     }
 
     /** Rejects an ancestor as the backdrop so rendering cannot include or recurse into this bar. */
@@ -227,7 +228,8 @@ public final class NativeGlassNavigation extends FrameLayout {
                 new float[]{0, .55f, 1}, Shader.TileMode.CLAMP);
         trayMaterial = new LinearGradient(0, bar.top, 0, bar.bottom,
                 ui.dark ? 0xE2587087 : 0xF2FFFFFF, ui.dark ? 0xC1405365 : 0xD7E1EAF2, Shader.TileMode.CLAMP);
-        releaseSample(); refreshBackdrop();
+        // Retain the previous sample until the next VSync capture replaces it in-place (prevents 1-frame flash).
+        refreshBackdrop();
     }
 
     @Override protected void onDraw(Canvas canvas) {
@@ -266,7 +268,7 @@ public final class NativeGlassNavigation extends FrameLayout {
     }
 
     private void captureBackdrop() {
-        captureQueued = false; lastSampleAt = SystemClock.uptimeMillis();
+        captureQueued = false;
         if (!isAttachedToWindow() || !isShown() || !hasWindowFocus()) return;
         readAccessibilityPreferences();
         if (reduceTransparency || samplingUnavailable || !safeBackdrop() || !safeBackgroundHost() || bar.isEmpty()
@@ -277,71 +279,120 @@ public final class NativeGlassNavigation extends FrameLayout {
         long started = SystemClock.uptimeMillis();
         try {
             getLocationInWindow(ownLocation); backdrop.getLocationInWindow(bodyLocation);
-            float sourceLeft = ownLocation[0] - bodyLocation[0] + bar.left;
-            float sourceTop = ownLocation[1] - bodyLocation[1] + bar.top;
+            // Strip transient page-transition translation so tab switches never cause a delayed horizontal snap.
+            float ownLayoutX = ownLocation[0] - getTranslationX();
+            float ownLayoutY = ownLocation[1] - getTranslationY();
+            float bodyLayoutX = bodyLocation[0] - backdrop.getTranslationX();
+            float bodyLayoutY = bodyLocation[1] - backdrop.getTranslationY();
+            float sourceLeft = ownLayoutX - bodyLayoutX + bar.left;
+            float sourceTop = ownLayoutY - bodyLayoutY + bar.top;
             // The body may not extend under the bar on a compact/keyboard layout.
             if (sourceLeft >= backdrop.getWidth() || sourceTop >= backdrop.getHeight()
                     || sourceLeft + bar.width() <= 0 || sourceTop + bar.height() <= 0) {
                 releaseSample(); invalidate(); return;
             }
-            int sampleWidth = Math.max(1, Math.min(MAX_SAMPLE_WIDTH, Math.round(bar.width() / 4f)));
-            int sampleHeight = Math.max(1, Math.min(MAX_SAMPLE_HEIGHT, Math.round(bar.height() * sampleWidth / bar.width())));
-            ensureSample(sampleWidth, sampleHeight);
-            sample.eraseColor(ui.bg);
-            drawHostBackground(sampleWidth, sampleHeight);
-            int saved = sampleCanvas.save();
+            int sampleWidth = Math.max(1, Math.min(MAX_RASTER_WIDTH / DOWNSAMPLE_FACTOR, Math.round(bar.width() / 10f)));
+            int sampleHeight = Math.max(1, Math.min(MAX_RASTER_HEIGHT / DOWNSAMPLE_FACTOR, Math.round(bar.height() * sampleWidth / bar.width())));
+            int rasterWidth = sampleWidth * DOWNSAMPLE_FACTOR;
+            int rasterHeight = sampleHeight * DOWNSAMPLE_FACTOR;
+            ensureSample(sampleWidth, sampleHeight, rasterWidth, rasterHeight);
+            rasterSample.eraseColor(ui.bg);
+            drawHostBackground(ownLayoutX, ownLayoutY, rasterWidth, rasterHeight);
+            int saved = rasterCanvas.save();
             try {
-                sampleCanvas.scale(sampleWidth / bar.width(), sampleHeight / bar.height());
-                sampleCanvas.translate(-sourceLeft, -sourceTop);
-                sampleCanvas.clipRect(sourceLeft, sourceTop, sourceLeft + bar.width(), sourceTop + bar.height());
-                backdrop.draw(sampleCanvas);
-            } finally { sampleCanvas.restoreToCount(saved); }
-            sample.getPixels(pixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight);
+                rasterCanvas.scale(rasterWidth / bar.width(), rasterHeight / bar.height());
+                rasterCanvas.translate(-sourceLeft, -sourceTop);
+                rasterCanvas.clipRect(sourceLeft, sourceTop, sourceLeft + bar.width(), sourceTop + bar.height());
+                backdrop.draw(rasterCanvas);
+            } finally { rasterCanvas.restoreToCount(saved); }
+            rasterSample.getPixels(rasterPixels, 0, rasterWidth, 0, 0, rasterWidth, rasterHeight);
+            // Energy-conserving 4x4 box integration + two separable blur passes (= 3-box B-spline Gaussian kernel)
+            // eliminates sub-pixel line/glyph dropout shimmer during slow 1px scrolling.
+            downsampleArea4x(rasterPixels, pixels, sampleWidth, sampleHeight);
+            blurPass(pixels, scratchPixels, sampleWidth, sampleHeight, true);
+            blurPass(scratchPixels, pixels, sampleWidth, sampleHeight, false);
             blurPass(pixels, scratchPixels, sampleWidth, sampleHeight, true);
             blurPass(scratchPixels, pixels, sampleWidth, sampleHeight, false);
             sample.setPixels(pixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight);
             if (SystemClock.uptimeMillis() - started > SAMPLE_BUDGET_MS) slowSamples++; else slowSamples = 0;
-            if (slowSamples >= 2) { samplingUnavailable = true; releaseSample(); }
+            if (slowSamples >= 6) { samplingUnavailable = true; releaseSample(); }
         } catch (RuntimeException | OutOfMemoryError unavailable) {
             samplingUnavailable = true; releaseSample();
         }
         invalidate();
     }
 
-    private void drawHostBackground(int sampleWidth, int sampleHeight) {
+    private void drawHostBackground(float ownLayoutX, float ownLayoutY, int rasterWidth, int rasterHeight) {
         // Read the current drawable each time so wallpaper replacement cannot retain an old image.
-        // No drawable reference survives this call or needs separate lifecycle cleanup.
+        // Never mutate bounds when already sized, avoiding Drawable.Callback root invalidation loops.
         Drawable background = backgroundHost.getBackground();
         if (background == null) return;
         backgroundHost.getLocationInWindow(backgroundLocation);
-        float sourceLeft = ownLocation[0] - backgroundLocation[0] + bar.left;
-        float sourceTop = ownLocation[1] - backgroundLocation[1] + bar.top;
-        Rect previousBounds = new Rect(background.getBounds());
-        int saved = sampleCanvas.save();
+        float hostLayoutX = backgroundLocation[0] - backgroundHost.getTranslationX();
+        float hostLayoutY = backgroundLocation[1] - backgroundHost.getTranslationY();
+        float sourceLeft = ownLayoutX - hostLayoutX + bar.left;
+        float sourceTop = ownLayoutY - hostLayoutY + bar.top;
+        int hostW = backgroundHost.getWidth(), hostH = backgroundHost.getHeight();
+        Rect bounds = background.getBounds();
+        boolean needsBounds = bounds.left != 0 || bounds.top != 0 || bounds.right != hostW || bounds.bottom != hostH;
+        Rect previousBounds = needsBounds ? new Rect(bounds) : null;
+        int saved = rasterCanvas.save();
         try {
-            sampleCanvas.scale(sampleWidth / bar.width(), sampleHeight / bar.height());
-            sampleCanvas.translate(-sourceLeft, -sourceTop);
-            sampleCanvas.clipRect(sourceLeft, sourceTop, sourceLeft + bar.width(), sourceTop + bar.height());
-            sampleCanvas.clipRect(0, 0, backgroundHost.getWidth(), backgroundHost.getHeight());
-            background.setBounds(0, 0, backgroundHost.getWidth(), backgroundHost.getHeight());
-            background.draw(sampleCanvas);
+            rasterCanvas.scale(rasterWidth / bar.width(), rasterHeight / bar.height());
+            rasterCanvas.translate(-sourceLeft, -sourceTop);
+            rasterCanvas.clipRect(sourceLeft, sourceTop, sourceLeft + bar.width(), sourceTop + bar.height());
+            rasterCanvas.clipRect(0, 0, hostW, hostH);
+            if (needsBounds) background.setBounds(0, 0, hostW, hostH);
+            background.draw(rasterCanvas);
         } finally {
-            try { background.setBounds(previousBounds); }
-            finally { sampleCanvas.restoreToCount(saved); }
+            try { if (previousBounds != null && !previousBounds.isEmpty()) background.setBounds(previousBounds); }
+            finally { rasterCanvas.restoreToCount(saved); }
         }
     }
 
-    private void ensureSample(int width, int height) {
-        if (sample != null && sample.getWidth() == width && sample.getHeight() == height) return;
+    private void ensureSample(int sampleWidth, int sampleHeight, int rasterWidth, int rasterHeight) {
+        if (sample != null && sample.getWidth() == sampleWidth && sample.getHeight() == sampleHeight
+                && rasterSample != null && rasterSample.getWidth() == rasterWidth && rasterSample.getHeight() == rasterHeight) {
+            return;
+        }
         releaseSample();
-        sample = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888); sample.setHasAlpha(false);
-        sampleCanvas = new Canvas(sample); pixels = new int[width * height]; scratchPixels = new int[width * height];
+        rasterSample = Bitmap.createBitmap(rasterWidth, rasterHeight, Bitmap.Config.ARGB_8888); rasterSample.setHasAlpha(false);
+        rasterCanvas = new Canvas(rasterSample);
+        rasterPixels = new int[rasterWidth * rasterHeight];
+        sample = Bitmap.createBitmap(sampleWidth, sampleHeight, Bitmap.Config.ARGB_8888); sample.setHasAlpha(false);
+        pixels = new int[sampleWidth * sampleHeight]; scratchPixels = new int[sampleWidth * sampleHeight];
     }
 
     private void releaseSample() {
-        sampleCanvas = null;
+        rasterCanvas = null;
+        if (rasterSample != null) { rasterSample.recycle(); rasterSample = null; }
+        rasterPixels = null;
         if (sample != null) { sample.recycle(); sample = null; }
         pixels = null; scratchPixels = null;
+    }
+
+    static void downsampleArea4x(int[] hiInput, int[] loOutput, int loWidth, int loHeight) {
+        int hiWidth = loWidth * DOWNSAMPLE_FACTOR;
+        for (int ly = 0; ly < loHeight; ly++) {
+            int baseY = ly * DOWNSAMPLE_FACTOR;
+            for (int lx = 0; lx < loWidth; lx++) {
+                int baseX = lx * DOWNSAMPLE_FACTOR;
+                int red = 0, green = 0, blue = 0;
+                for (int dy = 0; dy < DOWNSAMPLE_FACTOR; dy++) {
+                    int rowOffset = (baseY + dy) * hiWidth + baseX;
+                    for (int dx = 0; dx < DOWNSAMPLE_FACTOR; dx++) {
+                        int color = hiInput[rowOffset + dx];
+                        red += (color >>> 16) & 255;
+                        green += (color >>> 8) & 255;
+                        blue += color & 255;
+                    }
+                }
+                loOutput[ly * loWidth + lx] = 0xFF000000
+                        | (((red + 8) >> 4) << 16)
+                        | (((green + 8) >> 4) << 8)
+                        | ((blue + 8) >> 4);
+            }
+        }
     }
 
     static int indexOf(String selected) {
