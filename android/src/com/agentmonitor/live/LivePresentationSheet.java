@@ -49,17 +49,28 @@ final class LivePresentationSheet extends Dialog {
             }
         };
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(ui.dp(20), ui.dp(14), ui.dp(20), ui.dp(20));
-        panel.setBackground(ui.rounded(ui.bg, 24)); panel.setClipToOutline(true);
+        panel.setPadding(ui.dp(20), ui.dp(10), ui.dp(20), ui.dp(20));
+        panel.setBackground(ui.bordered(ui.surface, 26)); panel.setClipToOutline(true);
+
+        View dragHandle = new View(activity);
+        dragHandle.setBackground(ui.rounded(ui.line, 2));
+        dragHandle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(4));
+        handleLp.gravity = Gravity.CENTER_HORIZONTAL;
+        handleLp.bottomMargin = ui.dp(10);
+        panel.addView(dragHandle, handleLp);
+
         content = ui.column();
         header = ui.row();
-        TextView heading = ui.text(title, 20, true);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView heading = ui.text(title, 19, true);
         if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         View close = ui.iconButton("close", closeDescription, this::cancel);
-        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48));
-        closeParams.rightMargin = -ui.dp(12);
-        header.addView(close, closeParams); panel.addView(header); panel.addView(ui.space(8));
+        close.setBackground(ui.ripple(ui.soft, 18));
+        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36));
+        closeParams.setMarginStart(ui.dp(8));
+        header.addView(close, closeParams); panel.addView(header); panel.addView(ui.space(12));
         pinned = ui.column(); panel.addView(pinned, new LinearLayout.LayoutParams(-1, -2));
         sheet = new ScrollView(activity);
         sheet.setVerticalScrollBarEnabled(false); sheet.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
@@ -86,14 +97,45 @@ final class LivePresentationSheet extends Dialog {
     }
     void action(String text, Runnable action) {
         TextView row = ui.button(text, false, () -> { dismiss(); action.run(); });
-        row.setTypeface(ui.regular); row.setTextColor(ui.text);
-        row.setMinHeight(ui.dp(52)); row.setPadding(0, ui.dp(12), 0, ui.dp(12));
-        row.setBackground(ui.ripple(Color.TRANSPARENT, 10));
+        row.setTypeface(ui.medium); row.setTextColor(ui.text);
+        row.setMinHeight(ui.dp(48)); row.setPaddingRelative(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12));
+        row.setBackground(ui.borderedRipple(ui.bg, 14));
         row.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        content.addView(row, new LinearLayout.LayoutParams(-1, -2));
-        View rule = new View(activity); rule.setBackgroundColor(ui.line);
-        rule.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        content.addView(rule, new LinearLayout.LayoutParams(-1, ui.dp(1)));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.bottomMargin = ui.dp(8);
+        content.addView(row, lp);
+    }
+
+    static LivePresentationSheet confirm(Activity activity, String title, String message,
+                                         String positiveLabel, boolean danger, Runnable onConfirm) {
+        NativeUi ui = new NativeUi(activity);
+        LivePresentationSheet sheet = new LivePresentationSheet(activity, title, "取消并关闭");
+        LinearLayout body = ui.column();
+        TextView msgView = ui.body(message, 15);
+        msgView.setLineSpacing(ui.dp(4), 1.12f);
+        body.addView(msgView, new LinearLayout.LayoutParams(-1, -2));
+        body.addView(ui.space(20));
+
+        LinearLayout buttons = ui.row();
+        TextView cancelBtn = ui.button("取消", false, sheet::cancel);
+        cancelBtn.setTextColor(ui.muted);
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, -2, 1);
+        cancelLp.setMarginEnd(ui.dp(10));
+        buttons.addView(cancelBtn, cancelLp);
+
+        TextView okBtn = ui.button(positiveLabel, !danger, () -> {
+            sheet.dismiss();
+            if (onConfirm != null) onConfirm.run();
+        });
+        if (danger) {
+            okBtn.setTextColor(ui.danger);
+            okBtn.setBackground(ui.borderedRipple(ui.dark ? 0xFF3E292E : 0xFFFAEBEB, NativeUi.CONTROL_RADIUS));
+        }
+        buttons.addView(okBtn, new LinearLayout.LayoutParams(0, -2, 1));
+        body.addView(buttons, new LinearLayout.LayoutParams(-1, -2));
+        sheet.body(body);
+        sheet.show();
+        return sheet;
     }
     /** A choice uses the same palette and touch rhythm as the settings sheet. */
     void choice(String label, String count, boolean selected, Runnable action) {
@@ -175,8 +217,8 @@ final class LivePresentationSheet extends Dialog {
         if (activity.isFinishing() || activity.isDestroyed()) return;
         closing = false; super.show(); Window window = getWindow(); if (window == null) return;
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.22f);
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.28f);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         WindowManager.LayoutParams attributes = window.getAttributes();
         attributes.width = Math.min(ui.dp(520), Math.max(ui.dp(120), availableBounds().width() - ui.dp(24)));

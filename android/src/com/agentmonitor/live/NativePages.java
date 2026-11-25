@@ -275,22 +275,22 @@ public final class NativePages {
     public static final class TaskDetail {
         public final LinearLayout view;
         private final NativeUi ui;
-        private final TextView note, state, continuation, time, project;
+        private final TextView note, state, continuation, project;
+        final TextView time;
         final LinearLayout projectRow, errorSection, noteSection;
         private final LinearLayout errorCard;
         private final TextView errorUnavailable, errorSummary, errorLocation, errorSuggestion, errorEvidence;
         public TaskDetail(NativeUi ui) {
             this.ui = ui; view = ui.column();
             LinearLayout statusLine = ui.row();
-            state = ui.text("", 13, false); state.setPadding(0, ui.dp(4), 0, ui.dp(4));
+            statusLine.setGravity(Gravity.CENTER_VERTICAL);
+            state = ui.text("", 12, false); state.setPadding(ui.dp(9), ui.dp(4), ui.dp(9), ui.dp(4));
             statusLine.addView(state, new LinearLayout.LayoutParams(-2, -2));
             continuation = ui.text("", 12, false);
             LinearLayout.LayoutParams contParams = new LinearLayout.LayoutParams(-2, -2);
             contParams.setMarginStart(ui.dp(8));
             statusLine.addView(continuation, contParams);
-            time = ui.text("", 12); time.setTextColor(ui.muted); time.setGravity(Gravity.END);
-            LinearLayout.LayoutParams stamp = new LinearLayout.LayoutParams(0, -2, 1);
-            stamp.setMarginStart(ui.dp(10)); statusLine.addView(time, stamp);
+            time = ui.text("", 12); time.setTextColor(ui.muted); time.setSingleLine(true); time.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
             view.addView(statusLine, matchWrap());
             noteSection = ui.column(); noteSection.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
             noteSection.setBackground(ui.rounded(ui.soft, 16));
@@ -336,8 +336,9 @@ public final class NativePages {
                                 : "任务正在等待回答或批准")
                         : "";
             setText(note, noteText); noteSection.setVisibility(noteText.isEmpty() ? View.GONE : View.VISIBLE);
-            String updated = absolute(value(task, "updated_at", ""));
-            setText(time, "尚未更新".equals(updated) ? updated : "更新于 " + updated);
+            String updated = relative(value(task, "updated_at", ""));
+            setText(time, "尚未更新".equals(updated) ? "" : updated);
+            time.setVisibility("尚未更新".equals(updated) ? View.GONE : View.VISIBLE);
             String projectValue = value(task, "project", ""); setText(project, projectValue); projectRow.setVisibility(projectValue.isEmpty() ? View.GONE : View.VISIBLE);
             NativeErrorPresentation.Detail error = NativeErrorPresentation.from(task, syncOutput, code);
             errorSection.setVisibility(error.visible ? View.VISIBLE : View.GONE);
@@ -368,13 +369,19 @@ public final class NativePages {
     }
     private static void bindStatus(NativeUi ui, TextView label, String state, JSONObject task) {
         boolean attention = "waiting".equals(state) || "error".equals(state);
+        boolean running = "running".equals(state) || "online".equals(state);
         setText(label, "waiting".equals(state) ? NativeListPresentation.waitingLabel(NativeListPresentation.pendingKind(task)) : statusLabel(state));
-        label.setTextColor(attention ? statusColor(ui, state) : ui.muted);
-        label.setTypeface(attention ? ui.medium : ui.regular);
+        label.setTextColor(attention || running ? statusColor(ui, state) : ui.muted);
+        label.setTypeface(attention || running ? ui.medium : ui.regular);
         if (!state.equals(label.getTag())) {
-            int fill = "waiting".equals(state) ? (ui.dark ? 0xFF423B2C : 0xFFF3EBDC) : (ui.dark ? 0xFF443237 : 0xFFF5E4E4);
-            label.setPadding(attention ? ui.dp(8) : 0, ui.dp(4), attention ? ui.dp(8) : 0, ui.dp(4));
-            label.setBackground(attention ? ui.rounded(fill, 8) : null); label.setTag(state);
+            int fill = "waiting".equals(state)
+                    ? (ui.dark ? 0xFF423B2C : 0xFFF3EBDC)
+                    : "error".equals(state)
+                        ? (ui.dark ? 0xFF443237 : 0xFFF5E4E4)
+                        : ui.soft;
+            label.setPadding(ui.dp(8), ui.dp(4), ui.dp(8), ui.dp(4));
+            label.setBackground(ui.rounded(fill, 8));
+            label.setTag(state);
         }
     }
     private static void bindContinuation(NativeUi ui, TextView label, String mode) {

@@ -4446,23 +4446,25 @@ public partial class MainWindow : Window
         mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        _taskDetailHeaderHost = new StackPanel { Margin = new Thickness(28, 20, 28, 0) };
-        Grid.SetRow(_taskDetailHeaderHost, 0);
-        mainGrid.Children.Add(_taskDetailHeaderHost);
+        var headerOuter = new Border { Padding = new Thickness(30, 20, 30, 0) };
+        _taskDetailHeaderHost = new StackPanel { MaxWidth = 720, HorizontalAlignment = HorizontalAlignment.Stretch };
+        headerOuter.Child = _taskDetailHeaderHost;
+        Grid.SetRow(headerOuter, 0);
+        mainGrid.Children.Add(headerOuter);
 
         var scroll = new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Padding = new Thickness(28, 16, 28, 24)
+            Padding = new Thickness(30, 16, 30, 24)
         };
-        _taskDetailCardsHost = new StackPanel { MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Stretch };
+        _taskDetailCardsHost = new StackPanel { MaxWidth = 720, HorizontalAlignment = HorizontalAlignment.Stretch };
         scroll.Content = _taskDetailCardsHost;
         Grid.SetRow(scroll, 1);
         mainGrid.Children.Add(scroll);
 
         if (task.SupportsReply)
         {
-            var dockStack = new StackPanel();
+            var dockStack = new StackPanel { MaxWidth = 720, HorizontalAlignment = HorizontalAlignment.Stretch };
 
             // Reserved Row 1: Quick-Action / Next-Step Suggestion Chips (#5)
             _replyQuickChipsHost = new WrapPanel
@@ -4574,7 +4576,7 @@ public partial class MainWindow : Window
                 Background = UiKit.GlassHeaderBrush,
                 BorderBrush = UiKit.GlassSubtleRimBrush,
                 BorderThickness = new Thickness(0, 1, 0, 0),
-                Padding = new Thickness(28, 13, 28, 15),
+                Padding = new Thickness(30, 13, 30, 15),
                 SnapsToDevicePixels = true,
                 Child = dockStack
             };

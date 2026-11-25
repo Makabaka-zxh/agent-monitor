@@ -71,9 +71,10 @@ public final class NativeTaskResults {
     /** Sticky bottom Liquid Glass composer dock with Quick-Action Chips (#5) & Model Capsule. */
     public final LinearLayout composerView;
     private final boolean interactive;
-    private final LinearLayout outputActions, fileRows, replyCard, suggestionRow;
+    private final LinearLayout outputActions, fileRows, replyCard, suggestionRow, resultPod, modelCapsuleBox;
     private final HorizontalScrollView suggestionScroll;
     private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle, replyReceiptBadge, replyAppliedLabel, modelCapsule;
+    private final NativeUi.Icon modelCapsuleIcon;
     private final EditText replyInput;
     private final View resultHeading, refreshButton;
     private final ResultRefresh resultRefresh = new ResultRefresh();
@@ -110,27 +111,62 @@ public final class NativeTaskResults {
         attentionView = interactive ? controls.view : ui.column();
 
         LinearLayout resultCard = ui.card();
-        LinearLayout title = ui.row(); resultHeading = title;
-        title.addView(ui.heading("最终结果", 18), new LinearLayout.LayoutParams(0, -2, 1));
+        resultCard.setBackground(ui.bordered(ui.surface, 20));
+        resultCard.setPadding(ui.dp(18), ui.dp(16), ui.dp(18), ui.dp(18));
+
+        LinearLayout title = ui.row();
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        resultHeading = title;
+        title.addView(ui.heading("最终结果", 17), new LinearLayout.LayoutParams(0, -2, 1));
+
+        outputActions = ui.row();
+        outputActions.setGravity(Gravity.CENTER_VERTICAL);
+        copyButton = quietAction("复制", this::copy);
+        txtButton = quietAction("TXT", this::chooseTxt);
+        for (TextView action : new TextView[]{copyButton, txtButton}) {
+            action.setTextSize(12.5f);
+            action.setMinHeight(ui.dp(32));
+            action.setMinWidth(0);
+            action.setPadding(ui.dp(10), ui.dp(5), ui.dp(10), ui.dp(5));
+            action.setBackground(ui.ripple(ui.soft, 10));
+            action.setTextColor(ui.accent);
+            LinearLayout.LayoutParams aLp = new LinearLayout.LayoutParams(-2, -2);
+            aLp.setMarginEnd(ui.dp(6));
+            outputActions.addView(action, aLp);
+        }
+        outputActions.setVisibility(View.GONE);
+        title.addView(outputActions, new LinearLayout.LayoutParams(-2, -2));
+
         refreshButton = ui.iconButton("refresh", "刷新最终结果", this::refreshNow);
+        refreshButton.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
+        refreshButton.setMinimumWidth(ui.dp(36));
+        refreshButton.setMinimumHeight(ui.dp(36));
         title.addView(refreshButton);
         resultCard.addView(title, wrap());
+
         expand = resultToggle("展开全文");
         resultCard.addView(expand, wrap());
-        resultCard.addView(ui.space(10));
-        resultText = ui.text("输出同步已关闭", 15);
-        resultText.setTextIsSelectable(true); resultText.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG); resultText.setLineSpacing(ui.dp(6), 1.1f); resultText.setTextColor(ui.muted);
-        resultCard.addView(resultText, wrap());
+
+        resultPod = ui.column();
+        LinearLayout.LayoutParams podSpace = wrap();
+        podSpace.topMargin = ui.dp(12);
+        resultText = ui.text("输出同步已关闭", 14.5f);
+        resultText.setTextIsSelectable(true);
+        resultText.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+        resultText.setLineSpacing(ui.dp(5.5f), 1.12f);
+        resultText.setTextColor(ui.muted);
+        resultPod.addView(resultText, wrap());
+        resultCard.addView(resultPod, podSpace);
+
         collapseAtEnd = resultToggle("收起全文");
         resultCard.addView(collapseAtEnd, wrap());
-        outputActions = ui.row(); outputActions.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); copyButton = quietAction("复制", this::copy); txtButton = quietAction("保存 TXT", this::chooseTxt);
-        for (TextView action : new TextView[]{copyButton, txtButton}) {
-            action.setMinWidth(ui.dp(48)); action.setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(8));
-            outputActions.addView(action, new LinearLayout.LayoutParams(-2, -2));
-        }
-        LinearLayout.LayoutParams actionsSpace = wrap(); actionsSpace.topMargin = ui.dp(6); resultCard.addView(outputActions, actionsSpace); outputActions.setVisibility(View.GONE);
-        resultNote = ui.text("", 13); resultNote.setTextColor(ui.warning); resultNote.setPadding(0, ui.dp(10), 0, 0); resultNote.setVisibility(View.GONE); resultCard.addView(resultNote, wrap());
-        fileRows = ui.column(); resultCard.addView(fileRows, wrap());
+        resultNote = ui.text("", 12.5f);
+        resultNote.setTextColor(ui.warning);
+        resultNote.setPadding(0, ui.dp(10), 0, 0);
+        resultNote.setVisibility(View.GONE);
+        resultCard.addView(resultNote, wrap());
+        fileRows = ui.column();
+        resultCard.addView(fileRows, wrap());
         view.addView(resultCard, wrap());
 
         diffSlot = ui.column();
@@ -175,17 +211,31 @@ public final class NativeTaskResults {
         LinearLayout metaRow = ui.row();
         metaRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams metaSpace = wrap(); metaSpace.topMargin = ui.dp(8);
+
+        modelCapsuleBox = ui.row();
+        modelCapsuleBox.setGravity(Gravity.CENTER_VERTICAL);
+        modelCapsuleBox.setPaddingRelative(ui.dp(11), ui.dp(6), ui.dp(11), ui.dp(6));
+        modelCapsuleBox.setBackground(ui.borderedRipple(ui.surface, 12));
+        modelCapsuleBox.setFocusable(true);
+        modelCapsuleBox.setClickable(true);
+        modelCapsuleBox.setContentDescription("模型与思考强度设置");
+        modelCapsuleBox.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        modelCapsuleBox.setOnClickListener(v -> showModelSettings());
+
+        modelCapsuleIcon = (NativeUi.Icon) ui.icon("settings", 14);
+        modelCapsuleIcon.setInk(ui.accent);
+        LinearLayout.LayoutParams mIconLp = new LinearLayout.LayoutParams(ui.dp(14), ui.dp(14));
+        mIconLp.setMarginEnd(ui.dp(6));
+        modelCapsuleBox.addView(modelCapsuleIcon, mIconLp);
+
         modelCapsule = ui.text("继承电脑 ▾", 12, true);
         modelCapsule.setSingleLine(true);
         modelCapsule.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        modelCapsule.setMaxWidth(ui.dp(196));
-        modelCapsule.setPadding(ui.dp(10), ui.dp(5), ui.dp(10), ui.dp(5));
-        modelCapsule.setBackground(ui.ripple(ui.soft, 10));
+        modelCapsule.setMaxWidth(ui.dp(190));
         modelCapsule.setTextColor(ui.text);
-        modelCapsule.setContentDescription("模型与思考强度设置");
-        modelCapsule.setAccessibilityDelegate(NativeUi.buttonAccessibility());
-        modelCapsule.setOnClickListener(v -> showModelSettings());
-        metaRow.addView(modelCapsule, new LinearLayout.LayoutParams(-2, -2));
+        modelCapsule.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        modelCapsuleBox.addView(modelCapsule, new LinearLayout.LayoutParams(-2, -2));
+        metaRow.addView(modelCapsuleBox, new LinearLayout.LayoutParams(-2, -2));
 
         LinearLayout statusCol = ui.column();
         statusCol.setGravity(Gravity.END);
@@ -410,8 +460,16 @@ public final class NativeTaskResults {
         boolean syncChanged = syncEnabled != syncOutput;
         if (syncChanged) {
             syncEnabled = syncOutput; resultRefresh.reset();
-            if (!syncEnabled) { result = null; fullText = ""; resultSignature = ""; fileRows.removeAllViews(); outputActions.setVisibility(View.GONE); expand.setVisibility(View.GONE); collapseAtEnd.setVisibility(View.GONE); setText(resultText, "输出同步已关闭"); resultText.setTextColor(ui.muted); setResultNote(""); }
-            else if (result == null) setText(resultText, "正在读取最终结果");
+            if (!syncEnabled) {
+                result = null; fullText = ""; resultSignature = "";
+                fileRows.removeAllViews(); outputActions.setVisibility(View.GONE);
+                expand.setVisibility(View.GONE); collapseAtEnd.setVisibility(View.GONE);
+                styleResultWell(false);
+                setText(resultText, "输出同步已关闭"); resultText.setTextColor(ui.muted); setResultNote("");
+            } else if (result == null) {
+                styleResultWell(false);
+                setText(resultText, "正在读取最终结果…");
+            }
         }
         String marker = task.optString("final_result_id") + "|" + task.optString("final_result_at") + "|" + task.optString("status");
         boolean changed = !marker.equals(snapshotMarker); snapshotMarker = marker;
@@ -487,6 +545,16 @@ public final class NativeTaskResults {
             if (resultRefresh.awaitingText) setResultNote("正在确认最新结果，稍后自动更新");
         });
     }
+    private void styleResultWell(boolean hasBody) {
+        if (hasBody) {
+            resultPod.setBackground(ui.bordered(ui.bg, 14));
+            resultPod.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12));
+        } else {
+            resultPod.setBackground(null);
+            resultPod.setPadding(0, ui.dp(2), 0, ui.dp(2));
+        }
+    }
+
     private void renderResult() {
         if (result == null) return;
         String signature = result.toString();
@@ -494,8 +562,12 @@ public final class NativeTaskResults {
         resultSignature = signature;
         fullText = result.optBoolean("available") ? result.optString("text") : "";
         if (fullText.isEmpty()) {
+            styleResultWell(false);
             setText(resultText, result.optString("reason", "本轮还没有最终结果")); resultText.setTextColor(ui.muted); expand.setVisibility(View.GONE); collapseAtEnd.setVisibility(View.GONE);
-        } else renderText();
+        } else {
+            styleResultWell(true);
+            renderText();
+        }
         outputActions.setVisibility(fullText.isEmpty() ? View.GONE : View.VISIBLE);
         setResultNote(result.optBoolean("truncated") ? "结果超出同步上限，完整内容请在电脑查看" : "");
         fileRows.removeAllViews(); filesPending = false; JSONArray files = result.optJSONArray("files");
@@ -660,8 +732,9 @@ public final class NativeTaskResults {
         replyInput.setEnabled(!sendBusy && !pending); replyInput.setAlpha(sendBusy || pending ? .7f : 1f);
         boolean retry = pending && canRetryOriginal();
         boolean selectionReady = controls.canSendReply();
-        setText(modelCapsule, "⚙ " + controls.compactCapsuleLabel());
+        setText(modelCapsule, controls.compactCapsuleLabel());
         modelCapsule.setTextColor(selectionReady ? ui.text : ui.warning);
+        modelCapsuleIcon.setInk(selectionReady ? ui.accent : ui.warning);
 
         String receiptTrail = requestId.isEmpty() && !sendBusy
                 ? "" : NativeReplyPresentationPolicy.replyReceipt(sendBusy, commandState, commandDelivered);

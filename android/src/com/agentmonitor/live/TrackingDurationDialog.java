@@ -1,7 +1,6 @@
 package com.agentmonitor.live;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Color;
@@ -69,7 +68,7 @@ public final class TrackingDurationDialog {
         final TextView start;
         final TextView validation;
         final ScrollView scroll;
-        AlertDialog helpDialog;
+        Dialog helpDialog;
         boolean untilTaskEnd;
         boolean dismissed;
         boolean committed;
@@ -90,15 +89,29 @@ public final class TrackingDurationDialog {
             dialog.setCanceledOnTouchOutside(true);
 
             LinearLayout content = ui.column();
-            content.setPadding(ui.dp(20), ui.dp(14), ui.dp(20), ui.dp(20));
-            content.setBackground(ui.bordered(ui.surface, 24));
+            content.setPadding(ui.dp(20), ui.dp(10), ui.dp(20), ui.dp(20));
+            content.setBackground(ui.bordered(ui.surface, 26));
             content.setClipToOutline(true);
 
+            View dragHandle = new View(activity);
+            dragHandle.setBackground(ui.rounded(ui.line, 2));
+            dragHandle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(4));
+            handleLp.gravity = Gravity.CENTER_HORIZONTAL;
+            handleLp.bottomMargin = ui.dp(10);
+            content.addView(dragHandle, handleLp);
+
             LinearLayout header = ui.row();
-            TextView title = ui.text("跟踪时长", 20, true);
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            TextView title = ui.text("实况跟踪时长", 19, true);
             if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
             header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             header.addView(ui.quietButton("时长规则", this::showHelp));
+            View closeBtn = ui.iconButton("close", "关闭时长选择", dialog::cancel);
+            closeBtn.setBackground(ui.ripple(ui.soft, 18));
+            LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36));
+            closeLp.setMarginStart(ui.dp(4));
+            header.addView(closeBtn, closeLp);
             content.addView(header);
             content.addView(ui.space(12));
 
@@ -333,19 +346,10 @@ public final class TrackingDurationDialog {
 
         void showHelp() {
             if (helpDialog != null || dismissed) return;
-            AlertDialog help = new AlertDialog.Builder(new ContextThemeWrapper(activity,
-                    ui.dark ? android.R.style.Theme_Material_Dialog_Alert : android.R.style.Theme_Material_Light_Dialog_Alert))
-                    .setTitle("跟踪时长")
-                    .setMessage("定时：到时或任务停止运行即结束。\n\n直至任务结束：等待批准或在线状态待确认时继续跟踪；任务完成、失败、空闲、归档或电脑离线时停止。\n\n两种模式下，状态超过 45 秒无法确认都会停止。Android 15 及以上可能限制后台运行时长，系统结束跟踪时会提示。")
-                    .setPositiveButton("知道了", null)
-                    .create();
+            NativeHelpDialog help = new NativeHelpDialog(activity, ui, "跟踪时长规则",
+                    "定时：到时或任务停止运行即结束。\n\n直至任务结束：等待批准或在线状态待确认时继续跟踪；任务完成、失败、空闲、归档或电脑离线时停止。\n\n两种模式下，状态超过 45 秒无法确认都会停止。Android 15 及以上可能限制后台运行时长，系统结束跟踪时会提示。");
             helpDialog = help;
             help.setOnDismissListener(ignored -> { if (helpDialog == help) helpDialog = null; });
-            help.setOnShowListener(ignored -> {
-                Window window = help.getWindow();
-                if (window != null) ui.applyFont(window.getDecorView());
-                help.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(ui.accent);
-            });
             help.show();
         }
     }

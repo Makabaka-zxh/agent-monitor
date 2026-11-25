@@ -1,20 +1,21 @@
 package com.agentmonitor.live;
 
-import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
+import android.graphics.Color;
 import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -39,7 +40,7 @@ public final class NativeSessionControls {
     /** One stable pending-interaction root, mounted separately from the task's result/reply body. */
     public final LinearLayout view;
     private LinearLayout settingsView;
-    private AlertDialog settingsDialog, optionDialog;
+    private LivePresentationSheet settingsSheet, approvalSheet;
     private final Map<String, QuestionDraft> drafts = new LinkedHashMap<>();
     private final Map<String, DecisionMemo> sessionMemos = new LinkedHashMap<>();
     private JSONObject response, selection, fastNext, planNext, records = new JSONObject();
@@ -96,8 +97,8 @@ public final class NativeSessionControls {
     }
     public void pause() {
         observedAt = 0; nextFetch = 0;
-        if (optionDialog != null) optionDialog.dismiss();
-        if (settingsDialog != null) settingsDialog.dismiss();
+        if (approvalSheet != null) { approvalSheet.dismiss(); approvalSheet = null; }
+        if (settingsSheet != null) { settingsSheet.dismiss(); settingsSheet = null; settingsView = null; }
     }
     public void dispose() { disposed = true; drafts.clear(); sessionMemos.clear(); response = null; selection = null; fastNext = null; planNext = null; records = new JSONObject(); }
     public void setReplyLocked(boolean value) { if (replyLocked == value) return; replyLocked = value; renderSettings(); }
@@ -169,35 +170,125 @@ public final class NativeSessionControls {
     }
     private boolean validCatalog() { return catalogState() == NativeSessionControlPolicy.CatalogState.READY; }
     public void openSettings() {
-        if (!active() || settingsDialog != null) return;
-        ScrollView scroll = new ScrollView(ui.activity);
+        if (!active() || settingsSheet != null) return;
+        LivePresentationSheet sheet = new LivePresentationSheet(ui.activity, "模型与回复偏好", "关闭模型设置");
+        settingsSheet = sheet;
         settingsView = ui.column();
-        settingsView.setPadding(ui.dp(24), ui.dp(8), ui.dp(24), ui.dp(8));
-        scroll.addView(settingsView);
         settingsKey = "";
         renderSettings();
-        settingsDialog = new AlertDialog.Builder(ui.activity).setTitle("模型设置")
-            .setView(scroll).setPositiveButton("完成", null).create();
-        settingsDialog.setOnDismissListener(dialog -> { settingsDialog = null; settingsView = null; });
-        settingsDialog.show();
+        sheet.body(settingsView);
+        sheet.setOnDismissListener(dialog -> {
+            if (settingsSheet == sheet) {
+                settingsSheet = null;
+                settingsView = null;
+            }
+        });
+        sheet.show();
         tick();
     }
 
     private String modelName(JSONObject model) {
         return NativeUsageFormat.modelName(model.optString("label", model.optString("id")));
     }
-    private void optionButton(String label, Runnable action) {
-        TextView button = ui.button(label, false, action);
-        button.setEnabled(!replyLocked); button.setAlpha(replyLocked ? .5f : 1);
-        settingsView.addView(button, spaced(8));
+
+    private TextView sectionLabel(String title) {
+        TextView label = ui.text(title, 12, true);
+        label.setTextColor(ui.muted);
+        label.setPadding(ui.dp(2), 0, ui.dp(2), 0);
+        return label;
     }
+
+    private View buildModelRow(String title, String subtitle, boolean selected, boolean enabled, Runnable onSelect) {
+        LinearLayout row = ui.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(ui.dp(48));
+        row.setPaddingRelative(ui.dp(14), ui.dp(10), ui.dp(12), ui.dp(10));
+        row.setBackground(ui.ripple(selected ? ui.soft : Color.TRANSPARENT, 12));
+        row.setSelected(selected);
+        row.setEnabled(enabled);
+        row.setAlpha(enabled ? 1f : .5f);
+        row.setFocusable(enabled);
+        row.setClickable(enabled);
+        row.setContentDescription(subtitle.isEmpty() ? title : title + "，" + subtitle);
+        row.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View hostView, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(hostView, info);
+                info.setClassName("android.widget.RadioButton");
+                info.setCheckable(true);
+                info.setChecked(hostView.isSelected());
+            }
+        });
+
+        LinearLayout words = ui.column();
+        TextView name = ui.text(title, 15, selected);
+        name.setTextColor(selected ? ui.accent : ui.text);
+        name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        words.addView(name, wrap());
+        if (!subtitle.isEmpty()) {
+            TextView sub = ui.text(subtitle, 12, false);
+            sub.setTextColor(ui.muted);
+            sub.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams subLp = wrap();
+            subLp.topMargin = ui.dp(2);
+            words.addView(sub, subLp);
+        }
+        row.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
+
+        if (selected) {
+            NativeUi.Icon check = (NativeUi.Icon) ui.icon("check", 18);
+            check.setInk(ui.accent);
+            check.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams checkLp = new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18));
+            checkLp.setMarginStart(ui.dp(10));
+            row.addView(check, checkLp);
+        }
+        if (enabled && onSelect != null) {
+            row.setOnClickListener(v -> onSelect.run());
+        }
+        return row;
+    }
+
+    private View buildTurnToggleCard(String title, String subtitle, boolean activeChoice, boolean enabled, Runnable onToggle) {
+        LinearLayout row = ui.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(ui.dp(50));
+        row.setPaddingRelative(ui.dp(14), ui.dp(10), ui.dp(12), ui.dp(10));
+        row.setBackground(ui.borderedRipple(activeChoice ? ui.soft : ui.bg, 14));
+        row.setEnabled(enabled);
+        row.setAlpha(enabled ? 1f : .5f);
+        row.setFocusable(enabled);
+        row.setClickable(enabled);
+        row.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+
+        LinearLayout words = ui.column();
+        TextView name = ui.text(title, 14, true);
+        name.setTextColor(activeChoice ? ui.accent : ui.text);
+        words.addView(name, wrap());
+        TextView desc = ui.text(subtitle, 12, false);
+        desc.setTextColor(ui.muted);
+        LinearLayout.LayoutParams dLp = wrap(); dLp.topMargin = ui.dp(2);
+        words.addView(desc, dLp);
+        row.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
+
+        TextView pill = ui.text(activeChoice ? "已开启" : "默认", 12, activeChoice);
+        pill.setTextColor(activeChoice ? (ui.dark ? ui.bg : Color.WHITE) : ui.muted);
+        pill.setPadding(ui.dp(10), ui.dp(4), ui.dp(10), ui.dp(4));
+        pill.setBackground(ui.rounded(activeChoice ? ui.accent : ui.soft, 10));
+        LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(-2, -2);
+        pLp.setMarginStart(ui.dp(10));
+        row.addView(pill, pLp);
+
+        if (enabled && onToggle != null) row.setOnClickListener(v -> onToggle.run());
+        return row;
+    }
+
     private void renderSettings() {
         if (settingsView == null) return;
         JSONObject catalog = catalog();
         NativeSessionControlPolicy.CatalogState state = catalogState();
         boolean valid = state == NativeSessionControlPolicy.CatalogState.READY;
         String message = NativeSessionControlPolicy.catalogMessage(state, response);
-        // Renewing only the expiry should not rebuild buttons during a touch.
+        // Renewing only the expiry should not rebuild controls during a touch.
         String catalogOptions = !valid ? "" : NativeSessionControlPolicy.nullableText(catalog, "provider") + "\n"
                 + NativeSessionControlPolicy.nullableText(catalog, "catalog_revision") + "\n"
                 + NativeSessionControlPolicy.nullableText(catalog, "current_model") + "\n"
@@ -206,163 +297,258 @@ public final class NativeSessionControls {
                 + String.valueOf(catalog.optJSONArray("models"));
         String signature = catalogOptions + state + message + String.valueOf(selection) + selectionCorrupt
                 + String.valueOf(fastNext) + fastCorrupt + String.valueOf(planNext) + planCorrupt + replyLocked + lastAppliedSummary;
-        if (signature.equals(settingsKey)) return; settingsKey = signature;
+        if (signature.equals(settingsKey)) return;
+        settingsKey = signature;
         settingsView.removeAllViews();
-        settingsView.addView(note("此任务的回复设置"), wrap());
+
         if (!lastAppliedSummary.isEmpty()) {
-            TextView appliedNote = ui.text(lastAppliedSummary, 13, true);
+            TextView appliedNote = ui.text(lastAppliedSummary, 12, true);
             appliedNote.setTextColor(ui.accent);
-            settingsView.addView(appliedNote, spaced(8));
+            appliedNote.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+            appliedNote.setBackground(ui.rounded(ui.soft, 12));
+            settingsView.addView(appliedNote, wrap());
+            settingsView.addView(ui.space(10));
         }
+
         String selectedId = NativeSessionControlPolicy.nullableText(selection, "model");
         if (valid) {
+            final JSONObject snapshotCatalog = copy(catalog);
             String current = NativeSessionControlPolicy.nullableText(catalog, "current_model");
             JSONObject currentModel = NativeSessionControlPolicy.model(catalog, current);
-            String effort = NativeSessionControlPolicy.nullableText(catalog, "current_effort");
-            if (!current.isEmpty()) settingsView.addView(note("最近使用  " + (currentModel == null ? NativeUsageFormat.modelName(current) : modelName(currentModel)) +
-                (effort.isEmpty() ? "" : " · " + NativeSessionControlPolicy.effortLabel(effort))), spaced(8));
-            JSONObject model = NativeSessionControlPolicy.effortModel(catalog, selection, selectionCorrupt, now());
-            String selectedLabel = selection == null ? "继承电脑设置" : model == null ? "重新选择" : modelName(model);
-            optionButton("模型 · " + (selectionCorrupt ? "重新选择" : selectedLabel), this::chooseModel);
-            if (model != null && model.optJSONArray("efforts").length() > 0) {
-                String selectedEffort = NativeSessionControlPolicy.nullableText(selection, "effort");
-                optionButton("思考强度 · " + (selection == null ? "继承电脑设置" : selectedEffort.isEmpty() ? "模型默认" : NativeSessionControlPolicy.effortLabel(selectedEffort)), this::chooseEffort);
-            } else {
-                settingsView.addView(note(model == null ? "请先选择模型，再查看可用的思考强度" : "此模型未提供可选的思考强度"), spaced(10));
+            String currentEffort = NativeSessionControlPolicy.nullableText(catalog, "current_effort");
+            String desktopCurrentDesc = current.isEmpty()
+                    ? "不改动电脑端原有模型配置"
+                    : "电脑当前：" + (currentModel == null ? NativeUsageFormat.modelName(current) : modelName(currentModel))
+                        + (currentEffort.isEmpty() ? "" : " · " + NativeSessionControlPolicy.effortLabel(currentEffort));
+
+            // Section 1: Codex / Claude style inline Model Picker List
+            settingsView.addView(sectionLabel("模型选择"), wrap());
+            settingsView.addView(ui.space(6));
+
+            LinearLayout modelGroup = ui.column();
+            modelGroup.setBackground(ui.bordered(ui.bg, 16));
+            modelGroup.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
+            modelGroup.setClipToOutline(true);
+
+            boolean inheritSelected = selection == null && !selectionCorrupt;
+            modelGroup.addView(buildModelRow("继承电脑当前设置", desktopCurrentDesc, inheritSelected, !replyLocked,
+                    () -> selectModelInline(snapshotCatalog, null)), wrap());
+
+            final JSONArray models = snapshotCatalog.optJSONArray("models");
+            boolean selectedValid = selection != null && NativeSessionControlPolicy.selection(selection, catalog, now());
+            java.util.Set<String> ambiguous = new java.util.HashSet<>(), seen = new java.util.HashSet<>();
+            if (models != null) {
+                for (int i = 0; i < models.length(); i++) {
+                    JSONObject item = models.optJSONObject(i);
+                    if (item == null) continue;
+                    String nm = modelName(item);
+                    if (!seen.add(nm)) ambiguous.add(nm);
+                }
+                for (int i = 0; i < models.length(); i++) {
+                    final JSONObject item = models.optJSONObject(i);
+                    if (item == null) continue;
+                    final String itemId = item.optString("id");
+                    String display = modelName(item);
+                    String sub = ambiguous.contains(display) ? itemId : "";
+                    boolean itemSelected = selectedValid && itemId.equals(selectedId);
+
+                    View divider = new View(ui.activity);
+                    divider.setBackgroundColor(ui.line);
+                    LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(0.6f)));
+                    divLp.setMarginStart(ui.dp(12));
+                    divLp.setMarginEnd(ui.dp(12));
+                    modelGroup.addView(divider, divLp);
+
+                    modelGroup.addView(buildModelRow(display, sub, itemSelected, !replyLocked,
+                            () -> selectModelInline(snapshotCatalog, itemId)), wrap());
+                }
             }
-            if (NativeSessionControlPolicy.stageFast(catalog, selection, selectionCorrupt, now()) != null) {
-                boolean fast = NativeSessionControlPolicy.fastReply(catalog, selection, fastNext, now()) != null;
-                optionButton("速度 · " + (fast ? "快速" : "继承电脑设置"), () -> chooseOneTurn(false));
+            settingsView.addView(modelGroup, wrap());
+
+            // Section 2: Inline Segmented Effort Bar (Codex / Claude style)
+            JSONObject effortModel = NativeSessionControlPolicy.effortModel(catalog, selection, selectionCorrupt, now());
+            if (effortModel != null && effortModel.optJSONArray("efforts") != null && effortModel.optJSONArray("efforts").length() > 0) {
+                final JSONObject originalSel = copy(selection);
+                final String targetModelId = effortModel.optString("id");
+                final JSONArray efforts = effortModel.optJSONArray("efforts");
+                String prevEffort = NativeSessionControlPolicy.nullableText(selection, "effort");
+
+                settingsView.addView(ui.space(14));
+                settingsView.addView(sectionLabel("思考强度"), wrap());
+                settingsView.addView(ui.space(6));
+
+                LinearLayout effortTrack = ui.row();
+                effortTrack.setBackground(ui.rounded(ui.soft, 14));
+                effortTrack.setPadding(ui.dp(3), ui.dp(3), ui.dp(3), ui.dp(3));
+
+                int totalPills = efforts.length() + 1;
+                for (int i = 0; i < totalPills; i++) {
+                    final String effortVal = i == 0 ? null : efforts.optString(i - 1);
+                    String pillText = i == 0 ? "默认" : NativeSessionControlPolicy.effortLabel(effortVal);
+                    boolean pillActive = i == 0 ? prevEffort.isEmpty() : prevEffort.equals(effortVal);
+
+                    TextView pillBtn = ui.button(pillText, false, () -> selectEffortInline(snapshotCatalog, originalSel, targetModelId, effortVal));
+                    pillBtn.setTextSize(13);
+                    pillBtn.setMinHeight(ui.dp(38));
+                    pillBtn.setPadding(ui.dp(4), ui.dp(7), ui.dp(4), ui.dp(7));
+                    pillBtn.setBackground(pillActive ? ui.bordered(ui.surface, 11) : ui.ripple(Color.TRANSPARENT, 11));
+                    pillBtn.setTextColor(pillActive ? ui.accent : ui.muted);
+                    pillBtn.setTypeface(pillActive ? ui.strong : ui.regular);
+                    pillBtn.setEnabled(!replyLocked);
+                    pillBtn.setAlpha(replyLocked ? .5f : 1f);
+                    effortTrack.addView(pillBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                }
+                settingsView.addView(effortTrack, wrap());
+            }
+
+            // Section 3: Next-Turn Mode Switches (Fast / Plan)
+            boolean canStageFast = NativeSessionControlPolicy.stageFast(catalog, selection, selectionCorrupt, now()) != null;
+            boolean canStagePlan = NativeSessionControlPolicy.stagePlan(catalog, selection, selectionCorrupt, now()) != null;
+            if (canStageFast || canStagePlan) {
+                settingsView.addView(ui.space(14));
+                settingsView.addView(sectionLabel("下一轮附加模式"), wrap());
+                settingsView.addView(ui.space(6));
+                if (canStageFast) {
+                    boolean fastActive = NativeSessionControlPolicy.fastReply(catalog, selection, fastNext, now()) != null;
+                    settingsView.addView(buildTurnToggleCard("Fast 快速层", "仅下一条回复启用优先快速推理", fastActive, !replyLocked,
+                            () -> toggleOneTurnInline(false)), wrap());
+                }
+                if (canStagePlan) {
+                    if (canStageFast) settingsView.addView(ui.space(8));
+                    boolean planActive = NativeSessionControlPolicy.planReply(catalog, selection, planNext, now()) != null;
+                    settingsView.addView(buildTurnToggleCard("Plan 规划模式", "仅下一条回复先输出方案或提问确认", planActive, !replyLocked,
+                            () -> toggleOneTurnInline(true)), wrap());
+                }
             } else if (NativeSessionControlPolicy.fastModel(catalog, selection, selectionCorrupt, now()) != null) {
-                settingsView.addView(note("当前思考强度无法用于快速模式，请先选择可用的思考强度"), spaced(8));
-            }
-            if (NativeSessionControlPolicy.stagePlan(catalog, selection, selectionCorrupt, now()) != null) {
-                boolean plan = NativeSessionControlPolicy.planReply(catalog, selection, planNext, now()) != null;
-                optionButton("回复模式 · " + (plan ? "计划" : "继承电脑设置"), () -> chooseOneTurn(true));
-                settingsView.addView(note("计划只用于下一次回复；Codex 提出的选项会出现在任务详情"), spaced(8));
-            } else if (NativeSessionControlPolicy.advertisesPlan(catalog)) {
-                settingsView.addView(note("请先选择可用的模型和思考强度，再使用计划模式"), spaced(8));
+                settingsView.addView(note("当前思考强度不支持 Fast 快速层，切换思考强度后即可启用"), spaced(10));
             }
         } else {
-            settingsView.addView(ui.text(message, 15, false), spaced(14));
-            if (!selectedId.isEmpty()) settingsView.addView(note("上次选择  " + NativeUsageFormat.modelName(selectedId)), spaced(8));
+            LinearLayout statusPod = ui.column();
+            statusPod.setBackground(ui.bordered(ui.bg, 16));
+            statusPod.setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14));
+            statusPod.addView(ui.text(message, 14, false), wrap());
+            if (!selectedId.isEmpty()) {
+                statusPod.addView(note("上次选择：" + NativeUsageFormat.modelName(selectedId)), spaced(6));
+            }
             if (state != NativeSessionControlPolicy.CatalogState.LOADING) {
-                settingsView.addView(ui.button("重新获取", false, () -> {
+                statusPod.addView(ui.button("重新获取模型列表", false, () -> {
                     if (fetching) host.notice("正在读取模型列表");
                     else if (sending || SystemClock.elapsedRealtime() < Math.max(retryAt, nextFetch)) host.notice("请稍后再试");
                     else refresh();
                 }), spaced(12));
             }
+            settingsView.addView(statusPod, wrap());
         }
+
         if (fastCorrupt || fastNext != null && (!valid || NativeSessionControlPolicy.fastReply(catalog, selection, fastNext, now()) == null))
             settingsView.addView(note("上次的快速模式选择需要重新确认"), spaced(8));
         if (planCorrupt || planNext != null && (!valid || NativeSessionControlPolicy.planReply(catalog, selection, planNext, now()) == null))
             settingsView.addView(note("上次的计划模式选择需要重新确认"), spaced(8));
-        if (selection != null || selectionCorrupt || fastNext != null || fastCorrupt || planNext != null || planCorrupt)
-            optionButton("恢复为继承电脑设置", () -> saveSelection(null, true));
-        if (replyLocked) settingsView.addView(note("等待已发送的回复确认后即可修改"), spaced(10));
-        if (valid) settingsView.addView(note(NativeSessionControlPolicy.fastModel(catalog, selection, selectionCorrupt, now()) == null
-                ? "选择保存在手机上，随下次回复提交，此会话后续可能继续沿用"
-                : "模型和思考强度保存在手机上，随回复提交。快速模式只用于下一次回复"), spaced(10));
-    }
-    private void chooseModel() {
-        if (!active() || replyLocked || !validCatalog()) { refresh(); return; }
-        final JSONObject catalog = copy(catalog()); final JSONArray models = catalog.optJSONArray("models");
-        String[] labels = new String[models.length() + 1]; labels[0] = "继承电脑设置";
-        int selectedIndex = selection == null && !selectionCorrupt ? 0 : -1;
-        boolean selectedValid = selection != null && NativeSessionControlPolicy.selection(selection, catalog, now());
-        for (int i = 0; i < models.length(); i++) {
-            JSONObject item = models.optJSONObject(i);
-            labels[i + 1] = modelName(item);
-            if (selectedValid && item.optString("id").equals(selection.optString("model"))) selectedIndex = i + 1;
+        if (replyLocked)
+            settingsView.addView(note("等待上一条回复确认后即可修改模型设置"), spaced(8));
+
+        boolean hasAnyOverride = selection != null || selectionCorrupt || fastNext != null || fastCorrupt || planNext != null || planCorrupt;
+        if (hasAnyOverride && (!valid || selectionCorrupt || fastCorrupt || planCorrupt)) {
+            TextView resetBtn = ui.button("恢复继承电脑默认设置", false, () -> saveSelection(null, true));
+            resetBtn.setEnabled(!replyLocked);
+            resetBtn.setAlpha(replyLocked ? .5f : 1f);
+            settingsView.addView(resetBtn, spaced(10));
         }
-        java.util.Set<String> ambiguous = new java.util.HashSet<>(), seen = new java.util.HashSet<>();
-        for (String label : labels) if (!seen.add(label)) ambiguous.add(label);
-        for (int i = 1; i < labels.length; i++) if (ambiguous.contains(labels[i])) labels[i] += " · " + models.optJSONObject(i - 1).optString("id");
-        optionDialog = new AlertDialog.Builder(ui.activity).setTitle("下次回复的模型").setSingleChoiceItems(labels, selectedIndex, (dialog, which) -> {
-            dialog.dismiss();
-            if (!active() || replyLocked || !validCatalog() || !catalog.optString("catalog_revision").equals(catalog().optString("catalog_revision"))) { host.notice("模型选项已变化，请重新打开选择"); return; }
-            if (which == 0) { saveSelection(null, true); return; }
-            String id = models.optJSONObject(which - 1).optString("id");
-            if (selection != null && id.equals(selection.optString("model")) && NativeSessionControlPolicy.selection(selection, catalog(), now())) return;
-            try { saveSelection(override(catalog, id, null), true); }
-            catch (Exception invalid) { host.notice("无法保存模型选择"); }
-        }).setNegativeButton("取消", null).show();
+
+        settingsView.addView(note("更改保存在手机端，随下一条回复发往电脑"), spaced(12));
+        TextView doneBtn = ui.button("完成", () -> {
+            if (settingsSheet != null) settingsSheet.dismiss();
+        });
+        settingsView.addView(doneBtn, spaced(12));
     }
+
+    private void selectModelInline(JSONObject snapshotCatalog, String modelId) {
+        if (!active() || replyLocked || !validCatalog()
+                || !snapshotCatalog.optString("catalog_revision").equals(catalog().optString("catalog_revision"))) {
+            host.notice("模型目录已更新，请重新选择");
+            refresh();
+            return;
+        }
+        if (modelId == null) {
+            saveSelection(null, true);
+            return;
+        }
+        if (selection != null && modelId.equals(selection.optString("model"))
+                && NativeSessionControlPolicy.selection(selection, catalog(), now())) {
+            return;
+        }
+        try {
+            saveSelection(override(snapshotCatalog, modelId, null), true);
+        } catch (Exception invalid) {
+            host.notice("无法保存模型选择");
+        }
+    }
+
     private JSONObject override(JSONObject catalog, String model, String effort) throws org.json.JSONException {
         return new JSONObject().put("provider", catalog.optString("provider")).put("catalog_revision", catalog.optString("catalog_revision"))
             .put("model", model).put("effort", effort == null ? JSONObject.NULL : effort).put("apply_at", "next_message");
     }
-    private void chooseEffort() {
+
+    private void selectEffortInline(JSONObject observed, JSONObject original, String modelId, String effortValue) {
         if (!active() || replyLocked || !validCatalog()) return;
-        final JSONObject observed = copy(catalog()), original = copy(selection);
-        JSONObject model = NativeSessionControlPolicy.effortModel(observed, original, selectionCorrupt, now());
-        if (model == null) return;
-        final String id = model.optString("id");
-        final JSONArray efforts = model.optJSONArray("efforts");
-        String[] labels = new String[efforts.length() + 1];
-        labels[0] = original == null ? "继承电脑设置" : "使用模型默认值";
-        String previous = NativeSessionControlPolicy.nullableText(original, "effort");
-        int selectedIndex = 0;
-        for (int i = 0; i < efforts.length(); i++) {
-            labels[i + 1] = NativeSessionControlPolicy.effortLabel(efforts.optString(i));
-            if (previous.equals(efforts.optString(i))) selectedIndex = i + 1;
+        JSONObject latest = NativeSessionControlPolicy.effortModel(catalog(), selection, selectionCorrupt, now());
+        if (!String.valueOf(original).equals(String.valueOf(selection))
+                || latest == null || !modelId.equals(latest.optString("id"))) {
+            host.notice("模型选项已变化，请重新选择");
+            renderSettings();
+            return;
         }
-        optionDialog = new AlertDialog.Builder(ui.activity).setTitle(modelName(model) + " · 思考强度").setSingleChoiceItems(labels, selectedIndex, (dialog, which) -> {
-            dialog.dismiss();
-            JSONObject latest = NativeSessionControlPolicy.effortModel(catalog(), selection, selectionCorrupt, now());
-            if (!active() || replyLocked || !String.valueOf(original).equals(String.valueOf(selection)) || !validCatalog() ||
-                    latest == null || !id.equals(latest.optString("id"))) { host.notice("模型选项已变化，请重新选择"); return; }
-            if (original == null && which == 0) return;
-            try { saveSelection(override(observed, id, which == 0 ? null : efforts.optString(which - 1))); }
-            catch (Exception invalid) { host.notice("无法保存思考强度"); }
-        }).setNegativeButton("取消", null).show();
+        if (original == null && effortValue == null) return;
+        try {
+            saveSelection(override(observed, modelId, effortValue));
+        } catch (Exception invalid) {
+            host.notice("无法保存思考强度");
+        }
     }
+
     private JSONObject stageOneTurn(JSONObject catalog, JSONObject selected, boolean plan) {
         long time = now();
         return plan ? NativeSessionControlPolicy.stagePlan(catalog, selected, selectionCorrupt, time)
                 : NativeSessionControlPolicy.stageFast(catalog, selected, selectionCorrupt, time);
     }
     private JSONObject oneTurnPreference(boolean plan) { return plan ? planNext : fastNext; }
-    private void chooseOneTurn(boolean plan) {
+
+    private void toggleOneTurnInline(boolean plan) {
         if (!active() || replyLocked) return;
-        String label = plan ? "回复模式" : "速度选项";
+        String label = plan ? "规划模式" : "快速模式";
         if (!validCatalog()) {
-            host.notice("正在重新确认" + label + "，请稍后重试"); refresh(); return;
+            host.notice("正在重新确认" + label + "，请稍后重试");
+            refresh();
+            return;
         }
-        JSONObject observed = copy(catalog()), original = copy(selection), originalOption = copy(oneTurnPreference(plan));
-        JSONObject proposed = stageOneTurn(observed, original, plan);
-        if (proposed == null) { host.notice(label + "已变化，请重新选择"); renderSettings(); return; }
-        boolean activeChoice = (plan ? NativeSessionControlPolicy.planReply(observed, original, originalOption, now())
-                : NativeSessionControlPolicy.fastReply(observed, original, originalOption, now())) != null;
-        optionDialog = new AlertDialog.Builder(ui.activity).setTitle(plan ? "下次回复的模式" : "下次回复的速度")
-            .setSingleChoiceItems(new String[]{"继承电脑设置", plan ? "计划" : "快速"}, activeChoice ? 1 : 0, (dialog, which) -> {
-                if (!active() || replyLocked || which < 0 || which > 1) { dialog.dismiss(); return; }
-                AlertDialog picker = (AlertDialog) dialog;
-                if (!validCatalog()) {
-                    picker.getListView().setItemChecked(activeChoice ? 1 : 0, true);
-                    picker.setTitle(label + "暂不可用，请稍后重试");
-                    refresh();
-                    return;
-                }
-                JSONObject latest = stageOneTurn(catalog(), selection, plan);
-                if (latest == null || !proposed.optString("model").equals(latest.optString("model"))
-                        || !proposed.optString("catalog_revision").equals(latest.optString("catalog_revision"))
-                        || !String.valueOf(original).equals(String.valueOf(selection))
-                        || !String.valueOf(originalOption).equals(String.valueOf(oneTurnPreference(plan)))) {
-                    dialog.dismiss(); renderSettings(); host.notice(label + "已变化，请重新选择"); return;
-                }
-                JSONObject selected = which == 0 ? null : latest;
-                try {
-                    String preferenceKey = key + (plan ? ":plan_next" : ":fast_next");
-                    SharedPreferences.Editor editor = preferences.edit();
-                    if (selected == null) editor.remove(preferenceKey); else editor.putString(preferenceKey, selected.toString());
-                    if (!editor.commit()) { picker.getListView().setItemChecked(activeChoice ? 1 : 0, true); host.notice("无法保存设置，请稍后再试"); return; }
-                } catch (Exception invalid) { picker.getListView().setItemChecked(activeChoice ? 1 : 0, true); host.notice("无法保存" + label); return; }
-                if (plan) { planNext = selected; planCorrupt = false; }
-                else { fastNext = selected; fastCorrupt = false; }
-                dialog.dismiss(); renderSettings(); changed.run();
-            }).setNegativeButton("取消", null).show();
+        JSONObject latestCatalog = catalog();
+        JSONObject proposed = stageOneTurn(latestCatalog, selection, plan);
+        if (proposed == null) {
+            host.notice(label + "已变化，请重新选择");
+            renderSettings();
+            return;
+        }
+        boolean currentlyActive = (plan
+                ? NativeSessionControlPolicy.planReply(latestCatalog, selection, planNext, now())
+                : NativeSessionControlPolicy.fastReply(latestCatalog, selection, fastNext, now())) != null;
+        JSONObject nextVal = currentlyActive ? null : proposed;
+        try {
+            String preferenceKey = key + (plan ? ":plan_next" : ":fast_next");
+            SharedPreferences.Editor editor = preferences.edit();
+            if (nextVal == null) editor.remove(preferenceKey);
+            else editor.putString(preferenceKey, nextVal.toString());
+            if (!editor.commit()) {
+                host.notice("无法保存设置，请稍后再试");
+                return;
+            }
+        } catch (Exception invalid) {
+            host.notice("无法保存" + label);
+            return;
+        }
+        if (plan) { planNext = nextVal; planCorrupt = false; }
+        else { fastNext = nextVal; fastCorrupt = false; }
+        renderSettings();
+        changed.run();
     }
     private void saveSelection(JSONObject selected) { saveSelection(selected, false); }
 
@@ -390,16 +576,29 @@ public final class NativeSessionControls {
         boolean hasPending = pending != null && pending.length() > 0;
         if (!hasPending && !waiting && feedback.isEmpty()) { view.setVisibility(View.GONE); return; }
         view.setVisibility(View.VISIBLE);
-        LinearLayout heading = ui.row(); heading.addView(ui.text(needsAction || !pendingKind.isEmpty() && response == null ? "待你处理" : "交互记录", 16, true), new LinearLayout.LayoutParams(0, -2, 1));
-        heading.addView(ui.iconButton("refresh", "刷新提问和批准状态", this::refresh)); view.addView(heading, wrap());
-        if (!feedback.isEmpty()) view.addView(note(feedback), spaced(8));
-        if (recordsCorrupt) view.addView(note("原发送记录无法确认，手机已停用操作；请到电脑核对"), spaced(8));
+        LinearLayout containerCard = ui.card();
+        containerCard.setBackground(ui.bordered(ui.surface, 20));
+        containerCard.setPadding(ui.dp(18), ui.dp(16), ui.dp(18), ui.dp(16));
+        LinearLayout heading = ui.row();
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.addView(ui.text(needsAction || !pendingKind.isEmpty() && response == null ? "待你处理" : "交互记录", 16, true), new LinearLayout.LayoutParams(0, -2, 1));
+        View refBtn = ui.iconButton("refresh", "刷新提问和批准状态", this::refresh);
+        refBtn.setLayoutParams(new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
+        refBtn.setMinimumWidth(ui.dp(36)); refBtn.setMinimumHeight(ui.dp(36));
+        heading.addView(refBtn);
+        containerCard.addView(heading, wrap());
+        if (!feedback.isEmpty()) containerCard.addView(note(feedback), spaced(8));
+        if (recordsCorrupt) containerCard.addView(note("原发送记录无法确认，手机已停用操作；请到电脑核对"), spaced(8));
         if (!hasPending) {
-            String reason = response == null && "question".equals(pendingKind) ? "正在读取电脑提出的问题和选项"
-                    : response == null ? "正在确认任务的交互能力" : NativeSessionControlPolicy.nullableText(response, "reason");
-            view.addView(note(reason.isEmpty() ? "尚未收到可在手机处理的请求\n可先到电脑查看" : reason), spaced(8));
-        } else if (pending.length() > 20) view.addView(note("请求数量超出显示范围，请到电脑查看"), spaced(8));
-        else {
+            String reason = response == null && "question".equals(pendingKind) ? "正在读取电脑提出的问题和选项…"
+                    : response == null ? "正在确认任务的交互能力…" : NativeSessionControlPolicy.nullableText(response, "reason");
+            containerCard.addView(note(reason.isEmpty() ? "尚未收到可在手机处理的请求，可先到电脑查看" : reason), spaced(8));
+            view.addView(containerCard, wrap());
+        } else if (pending.length() > 20) {
+            containerCard.addView(note("请求数量超出显示范围，请到电脑查看"), spaced(8));
+            view.addView(containerCard, wrap());
+        } else {
+            view.addView(containerCard, wrap());
             Map<String, Boolean> seen = new LinkedHashMap<>();
             for (int i = 0; i < pending.length(); i++) {
                 JSONObject request = pending.optJSONObject(i);
@@ -407,7 +606,6 @@ public final class NativeSessionControls {
                 addRequest(request);
             }
         }
-        view.addView(ui.space(24));
     }
     private void addRequest(JSONObject request) {
         String id = request.optString("id");
@@ -481,11 +679,41 @@ public final class NativeSessionControls {
     }
     private void confirmApproval(JSONObject request, String fingerprint) {
         if (!usable(request, fingerprint)) return;
-        TextView content = ui.text(request.optString("operation") + "\n\n允许后，电脑可执行以上操作，仅限这一次请求", 15, false);
-        content.setPadding(ui.dp(24), ui.dp(12), ui.dp(24), ui.dp(8)); content.setTextIsSelectable(true);
-        android.widget.ScrollView scroll = new android.widget.ScrollView(ui.activity); scroll.addView(content);
-        new AlertDialog.Builder(ui.activity).setTitle("确认本次批准").setView(scroll).setNegativeButton("取消", null)
-            .setPositiveButton("仅允许这一次", (dialog, which) -> sendDecision(request, payload(request, "allow_once", new JSONArray()), fingerprint, false)).show();
+        if (approvalSheet != null) { approvalSheet.dismiss(); approvalSheet = null; }
+        LivePresentationSheet sheet = new LivePresentationSheet(ui.activity, "确认本次批准", "取消并关闭");
+        approvalSheet = sheet;
+        LinearLayout body = ui.column();
+
+        LinearLayout codePod = ui.column();
+        codePod.setBackground(ui.bordered(ui.bg, 14));
+        codePod.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12));
+        TextView opText = ui.text(request.optString("operation"), 14, false);
+        opText.setTextIsSelectable(true);
+        opText.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+        opText.setLineSpacing(ui.dp(4), 1.12f);
+        codePod.addView(opText, wrap());
+        body.addView(codePod, wrap());
+
+        body.addView(note("允许后，电脑将执行以上操作，仅限这一次请求生效。"), spaced(12));
+        body.addView(ui.space(18));
+
+        LinearLayout actions = ui.row();
+        TextView cancelBtn = ui.button("取消", false, sheet::cancel);
+        cancelBtn.setTextColor(ui.muted);
+        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(0, -2, 1);
+        cancelLp.setMarginEnd(ui.dp(10));
+        actions.addView(cancelBtn, cancelLp);
+
+        TextView allowBtn = ui.button("仅允许这一次", () -> {
+            sheet.dismiss();
+            sendDecision(request, payload(request, "allow_once", new JSONArray()), fingerprint, false);
+        });
+        actions.addView(allowBtn, new LinearLayout.LayoutParams(0, -2, 1));
+        body.addView(actions, wrap());
+
+        sheet.body(body);
+        sheet.setOnDismissListener(ignored -> { if (approvalSheet == sheet) approvalSheet = null; });
+        sheet.show();
     }
     private void addQuestions(LinearLayout card, JSONObject request, String fingerprint, boolean enabled) {
         QuestionDraft draft = drafts.get(fingerprint);

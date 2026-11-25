@@ -2,7 +2,6 @@ package com.agentmonitor.live;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -1118,10 +1117,18 @@ public final class MainActivity extends Activity {
         container.setVisibility(View.VISIBLE);
 
         if (isTaskPage) {
+            View topRule = new View(this);
+            topRule.setBackgroundColor(ui.line);
+            LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(0.6f)));
+            ruleLp.topMargin = ui.dp(12);
+            ruleLp.bottomMargin = ui.dp(10);
+            container.addView(topRule, ruleLp);
+
             for (int i = 0; i < items.size(); i++) {
                 final NativeDevPreviewPolicy.PreviewItem item = items.get(i);
                 LinearLayout bar = ui.row();
-                bar.setBackground(ui.bordered(ui.surface, 14));
+                bar.setGravity(Gravity.CENTER_VERTICAL);
+                bar.setBackground(ui.bordered(ui.bg, 14));
                 bar.setPaddingRelative(ui.dp(12), ui.dp(9), ui.dp(10), ui.dp(9));
                 NativeUi.Icon globe = (NativeUi.Icon) ui.icon("globe", 17);
                 globe.setInk(item.loopbackOnly() ? ui.warning : ui.accent);
@@ -1155,7 +1162,7 @@ public final class MainActivity extends Activity {
                     bar.setOnLongClickListener(v -> { showDevPreviewOptions(item, true); return true; });
                 }
                 LinearLayout.LayoutParams barLp = wrap();
-                barLp.topMargin = ui.dp(i == 0 ? 10 : 8);
+                if (i > 0) barLp.topMargin = ui.dp(8);
                 container.addView(bar, barLp);
             }
             return;
@@ -1410,13 +1417,21 @@ public final class MainActivity extends Activity {
         view.setClipToPadding(false);
         view.setVerticalScrollBarEnabled(false);
         LinearLayout column = ui.column();
-        column.setPadding(ui.dp(20), ui.dp(14), ui.dp(20), ui.dp(24));
-        view.addView(column);
+        column.setPadding(ui.dp(18), ui.dp(12), ui.dp(18), ui.dp(24));
+        view.addView(column, new FrameLayout.LayoutParams(-1, -2));
         frame.addView(view, new LinearLayout.LayoutParams(-1, 0, 1));
         scroll = view;
         pageColumn = column;
 
-        // Zone 1: Compact Task Hero + Single-Row Dev Preview Strip
+        // Zone 1: Cohesive Task Overview Card (Identity + Timestamp, Title, Status Pills, Live Tracking, Dev Previews)
+        LinearLayout heroCard = ui.column();
+        heroCard.setBackground(ui.bordered(ui.surface, 20));
+        heroCard.setPadding(ui.dp(18), ui.dp(16), ui.dp(18), ui.dp(16));
+
+        taskDetail = new NativePages.TaskDetail(ui);
+
+        LinearLayout topMetaRow = ui.row();
+        topMetaRow.setGravity(Gravity.CENTER_VERTICAL);
         taskHeadingTool = ui.taskIdentity(task.optString("tool"), device == null ? "未知电脑" : device.optString("name", "未知电脑"));
         if (device != null) {
             final String devId = task.optString("device_id");
@@ -1424,24 +1439,34 @@ public final class MainActivity extends Activity {
             taskHeadingTool.setFocusable(true);
             taskHeadingTool.setOnClickListener(v -> navigate("device", devId));
         }
-        column.addView(taskHeadingTool, wrap());
-        column.addView(ui.space(8));
-        taskHeadingTitle = ui.heading(task.optString("title", "未命名任务"), 23);
-        taskHeadingTitle.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
-        taskHeadingTitle.setLineSpacing(ui.dp(5), 1.06f);
-        column.addView(taskHeadingTitle, wrap());
-        column.addView(ui.space(10));
-        taskDetail = new NativePages.TaskDetail(ui);
-        column.addView(taskDetail.view(), wrap());
+        topMetaRow.addView(taskHeadingTool, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams timeLp = new LinearLayout.LayoutParams(-2, -2);
+        timeLp.setMarginStart(ui.dp(8));
+        topMetaRow.addView(taskDetail.time, timeLp);
+        heroCard.addView(topMetaRow, wrap());
 
-        // Top-level Live Notification Tracking Strip (1-tap accessible right in Task Detail)
-        LinearLayout trackingCard = ui.row();
-        trackingCard.setBackground(ui.bordered(ui.surface, 16));
-        trackingCard.setPaddingRelative(ui.dp(14), ui.dp(10), ui.dp(12), ui.dp(10));
+        heroCard.addView(ui.space(10));
+        taskHeadingTitle = ui.heading(task.optString("title", "未命名任务"), 20);
+        taskHeadingTitle.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+        taskHeadingTitle.setLineSpacing(ui.dp(5), 1.08f);
+        heroCard.addView(taskHeadingTitle, wrap());
+
+        heroCard.addView(ui.space(12));
+        heroCard.addView(taskDetail.view(), wrap());
+
+        View heroDivider = new View(this);
+        heroDivider.setBackgroundColor(ui.line);
+        LinearLayout.LayoutParams hDivLp = new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(0.6f)));
+        hDivLp.topMargin = ui.dp(14);
+        hDivLp.bottomMargin = ui.dp(12);
+        heroCard.addView(heroDivider, hDivLp);
+
+        LinearLayout trackingRow = ui.row();
+        trackingRow.setGravity(Gravity.CENTER_VERTICAL);
         View bellIcon = ui.icon("bell", 18);
         LinearLayout.LayoutParams bellLp = new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18));
         bellLp.setMarginEnd(ui.dp(10));
-        trackingCard.addView(bellIcon, bellLp);
+        trackingRow.addView(bellIcon, bellLp);
 
         LinearLayout trackWords = ui.column();
         trackWords.addView(ui.text("实况通知追踪", 14, true), wrap());
@@ -1449,7 +1474,7 @@ public final class MainActivity extends Activity {
         trackingNote.setTextColor(ui.muted);
         LinearLayout.LayoutParams tnLp = wrap(); tnLp.topMargin = ui.dp(2);
         trackWords.addView(trackingNote, tnLp);
-        trackingCard.addView(trackWords, new LinearLayout.LayoutParams(0, -2, 1));
+        trackingRow.addView(trackWords, new LinearLayout.LayoutParams(0, -2, 1));
 
         trackingButton = ui.button("开启实况追踪", false, () -> {
             if (selectedId.equals(TrackingService.trackedId)) {
@@ -1462,14 +1487,14 @@ public final class MainActivity extends Activity {
         trackingButton.setTextSize(13);
         LinearLayout.LayoutParams tbLp = new LinearLayout.LayoutParams(-2, -2);
         tbLp.setMarginStart(ui.dp(10));
-        trackingCard.addView(trackingButton, tbLp);
-        LinearLayout.LayoutParams trackCardLp = wrap();
-        trackCardLp.topMargin = ui.dp(12);
-        column.addView(trackingCard, trackCardLp);
+        trackingRow.addView(trackingButton, tbLp);
+        heroCard.addView(trackingRow, wrap());
 
         taskPreviewSection = ui.column();
         taskPreviewSection.setVisibility(View.GONE);
-        column.addView(taskPreviewSection, wrap());
+        heroCard.addView(taskPreviewSection, wrap());
+
+        column.addView(heroCard, wrap());
 
         final String resultTaskId = selectedId, resultToken = loadedToken; final long resultSession = sessionEpoch, resultPage = pageEpoch;
         final boolean interactive = NativeSessionControlPolicy.provider(task.optString("tool"));
@@ -1510,20 +1535,21 @@ public final class MainActivity extends Activity {
         column.addView(taskDetail.errorSection, wrap());
 
         // Zone 3: Primary Reading Card (Final Result + Deliverables + Reserved Diff Slot)
-        column.addView(ui.space(16));
+        column.addView(ui.space(14));
         column.addView(taskResults.view, wrap());
         taskResults.update(task, syncOutput());
         if (hasPendingDocumentResult) { hasPendingDocumentResult = false; taskResults.documentResult(pendingDocumentCode, pendingDocumentResult); pendingDocumentResult = null; }
 
-        // Zone 4 (in-scroll): Default-Collapsed「会话详情」Accordion Card (Token, Directory, Live Tracking, Management)
+        // Zone 4 (in-scroll): Default-Collapsed「会话详情」Accordion Card (Token, Directory, Management)
         column.addView(ui.space(14));
         LinearLayout accordionCard = ui.column();
-        accordionCard.setBackground(ui.bordered(ui.surface, 18));
+        accordionCard.setBackground(ui.bordered(ui.surface, 20));
         accordionCard.setClipToOutline(true);
 
         LinearLayout accordionHeader = ui.row();
-        accordionHeader.setMinimumHeight(ui.dp(54));
-        accordionHeader.setPaddingRelative(ui.dp(16), ui.dp(12), ui.dp(14), ui.dp(12));
+        accordionHeader.setGravity(Gravity.CENTER_VERTICAL);
+        accordionHeader.setMinimumHeight(ui.dp(56));
+        accordionHeader.setPaddingRelative(ui.dp(18), ui.dp(13), ui.dp(16), ui.dp(13));
         accordionHeader.setBackground(ui.ripple(Color.TRANSPARENT, 0));
         accordionHeader.setFocusable(true);
         accordionHeader.setClickable(true);
@@ -2407,8 +2433,12 @@ public final class MainActivity extends Activity {
     private void placeholder(LinearLayout column, String text) { LinearLayout placeholder = NativePages.empty(ui, text, "tasks"); column.addView(placeholder, wrap()); }
     private void notice(String message) { if (!isDestroyed()) Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
     private void confirm(String title, String message, String positive, Runnable action) {
+        if (!visible || isFinishing() || isDestroyed()) return;
         final long revision = pageEpoch, epoch = sessionEpoch; final String token = loadedToken;
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(title).setMessage(message).setNegativeButton("取消", null).setPositiveButton(positive, (target, which) -> { if (samePage(revision) && valid(token, epoch)) action.run(); }).create(); dialog.show(); ui.applyFont(dialog.getWindow().getDecorView());
+        boolean danger = positive != null && (positive.contains("移除") || positive.contains("退出") || positive.contains("删除") || positive.contains("清除"));
+        LivePresentationSheet.confirm(this, title, message, positive, danger, () -> {
+            if (samePage(revision) && valid(token, epoch)) action.run();
+        });
     }
     private void showHelp(String heading, String message) {
         if (!visible || isFinishing() || isDestroyed() || helpDialog != null || loadedToken.isEmpty()) return;

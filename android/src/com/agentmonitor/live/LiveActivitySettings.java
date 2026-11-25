@@ -1,12 +1,10 @@
 package com.agentmonitor.live;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.content.Intent;
-import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -194,20 +192,18 @@ final class LiveActivitySettings {
     }
 
     private void showSamsungHelp() {
-        showDialog(builder().setTitle("三星实况通知")
-                .setMessage("若已允许通知仍不显示，请在开发者选项开启「所有应用程序的实时通知」\n\n"
-                        + "此选项作用于全机符合条件的通知")
-                .setNeutralButton("通知权限", (target, which) -> openNotificationPermissions())
-                .setNegativeButton("取消", null)
-                .setPositiveButton("开发者选项", (target, which) -> openDevelopmentSettings()));
+        LivePresentationSheet sheet = new LivePresentationSheet(activity, "三星实况通知");
+        sheet.note("若已允许通知仍不显示，请在开发者选项开启「所有应用程序的实时通知」。\n\n此选项作用于全机符合条件的通知。");
+        sheet.action("打开开发者选项", this::openDevelopmentSettings);
+        sheet.action("检查通知权限", this::openNotificationPermissions);
+        showSheet(sheet);
     }
 
     private void showClearAllHelp() {
-        showDialog(builder().setTitle("清理时保留实况")
-                .setMessage("一键清除后恢复正在跟踪的实况；单独划走或点「停止跟踪」仍会关闭\n\n"
-                        + "需要通知访问权限\n系统授权范围较广，Monitor 的代码只处理自己的实况通知，不保存或上传其他应用的通知")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("打开授权设置", (target, which) -> openClearAllSettings()));
+        LivePresentationSheet sheet = new LivePresentationSheet(activity, "清理时保留实况");
+        sheet.note("一键清除后恢复正在跟踪的实况；单独划走或点「停止追踪」仍会关闭。\n\n需要通知访问权限。系统授权范围较广，Monitor 的代码只处理自己的实况通知，不保存或上传其他应用的通知。");
+        sheet.action("打开授权设置", this::openClearAllSettings);
+        showSheet(sheet);
     }
 
     private void openClearAllSettings() {
@@ -242,12 +238,13 @@ final class LiveActivitySettings {
     }
 
     private void showDevelopmentHelp(String message) {
-        showDialog(builder().setTitle("开发者选项").setMessage(message)
-                .setNegativeButton("关闭", null)
-                .setPositiveButton("打开系统设置", (target, which) -> {
-                    try { activity.startActivity(new Intent(Settings.ACTION_SETTINGS)); }
-                    catch (Exception ignored) { notice("请手动打开系统设置，查找开发者选项"); }
-                }));
+        LivePresentationSheet sheet = new LivePresentationSheet(activity, "开发者选项");
+        sheet.note(message);
+        sheet.action("打开系统设置", () -> {
+            try { activity.startActivity(new Intent(Settings.ACTION_SETTINGS)); }
+            catch (Exception ignored) { notice("请手动打开系统设置，查找开发者选项"); }
+        });
+        showSheet(sheet);
     }
 
     void openPromotionSettings() {
@@ -285,21 +282,6 @@ final class LiveActivitySettings {
                     .setData(Uri.parse("package:" + activity.getPackageName()))); }
             catch (Exception ignored) { notice("请在系统设置中打开 Monitor 的通知权限"); }
         }
-    }
-
-    private AlertDialog.Builder builder() {
-        boolean dark = (activity.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-        return new AlertDialog.Builder(activity, dark ? android.R.style.Theme_Material_Dialog_Alert : android.R.style.Theme_Material_Light_Dialog_Alert);
-    }
-
-    private void showDialog(AlertDialog.Builder builder) {
-        if (activity.isFinishing() || activity.isDestroyed()) return;
-        dismiss();
-        AlertDialog current = builder.create();
-        dialog = current;
-        current.setOnDismissListener(target -> { if (dialog == current) dialog = null; });
-        current.show();
-        applyFont.accept(current.getWindow().getDecorView());
     }
 
     void dismiss() { if (dialog != null) dialog.dismiss(); }

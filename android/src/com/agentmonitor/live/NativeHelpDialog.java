@@ -32,15 +32,26 @@ public final class NativeHelpDialog extends Dialog {
         setCanceledOnTouchOutside(true);
 
         LinearLayout content = ui.column();
-        content.setPadding(ui.dp(20), ui.dp(14), ui.dp(20), ui.dp(20));
-        content.setBackground(ui.bordered(ui.surface, 24));
+        content.setPadding(ui.dp(20), ui.dp(10), ui.dp(20), ui.dp(20));
+        content.setBackground(ui.bordered(ui.surface, 26));
+
+        View dragHandle = new View(activity);
+        dragHandle.setBackground(ui.rounded(ui.line, 2));
+        dragHandle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(4));
+        handleLp.gravity = Gravity.CENTER_HORIZONTAL;
+        handleLp.bottomMargin = ui.dp(10);
+        content.addView(dragHandle, handleLp);
 
         LinearLayout header = ui.row();
-        TextView heading = ui.heading(title, 20);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView heading = ui.heading(title, 19);
         if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
         header.addView(heading, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        View close = ui.headerIconButton("close", "关闭说明", this::cancel);
-        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48));
+        View close = ui.iconButton("close", "关闭说明", this::cancel);
+        close.setBackground(ui.ripple(ui.soft, 18));
+        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36));
+        closeParams.setMarginStart(ui.dp(8));
         header.addView(close, closeParams);
         content.addView(header);
         content.addView(ui.space(12));

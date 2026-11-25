@@ -181,42 +181,77 @@ public final class UsageAlerts {
     public static Dialog showSettings(Activity activity) {
         dismissSettings(activity);
         NativeUi ui = new NativeUi(activity); SharedPreferences p = prefs(activity);
-        Dialog dialog = new Dialog(activity, android.R.style.Theme_Material_Dialog_NoActionBar);
-        LinearLayout column = ui.column(); column.setPadding(ui.dp(20), ui.dp(20), ui.dp(20), ui.dp(20));
-        column.setBackground(ui.bordered(ui.surface, 24)); column.addView(ui.text("额度提醒", 20, true)); column.addView(ui.space(16));
-        Switch toggle = new Switch(activity); toggle.setText("开启提醒"); toggle.setTextColor(ui.text); toggle.setTypeface(ui.regular);
-        toggle.setMinHeight(ui.dp(48)); toggle.setChecked(p.getBoolean("enabled", false)); column.addView(toggle);
+        LivePresentationSheet sheet = new LivePresentationSheet(activity, "官方额度提醒", "关闭额度提醒设置");
+        LinearLayout column = ui.column();
+
+        Switch toggle = new Switch(activity);
+        toggle.setText("开启官方额度提醒");
+        toggle.setTextColor(ui.text); toggle.setTextSize(15); toggle.setTypeface(ui.medium);
+        toggle.setShowText(false); toggle.setSwitchPadding(ui.dp(16));
+        toggle.setMinHeight(ui.dp(48)); toggle.setPaddingRelative(ui.dp(14), ui.dp(10), ui.dp(14), ui.dp(10));
+        toggle.setBackground(ui.bordered(ui.bg, 14));
+        toggle.setThumbTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{ui.accent, ui.muted}));
+        toggle.setTrackTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{ui.soft, ui.line}));
+        toggle.setChecked(p.getBoolean("enabled", false));
+        column.addView(toggle, new LinearLayout.LayoutParams(-1, -2));
         toggle.setOnCheckedChangeListener((v, checked) -> {
             p.edit().putBoolean("enabled", checked).apply(); sync(activity);
             if (checked && Build.VERSION.SDK_INT >= 33 && activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                 activity.requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 25);
         });
-        column.addView(ui.space(12)); column.addView(ui.text("额度低于", 14));
+
+        column.addView(ui.space(16));
+        TextView lowTitle = ui.text("剩余额度低于阈值时提醒", 13, true); lowTitle.setTextColor(ui.muted);
+        column.addView(lowTitle); column.addView(ui.space(8));
         choices(ui, column, p, "low", new int[]{0, 5, 10, 20}, new String[]{"关闭", "5%", "10%", "20%"}, 10);
-        column.addView(ui.space(16)); column.addView(ui.text("重置前", 14));
+
+        column.addView(ui.space(16));
+        TextView resetTitle = ui.text("窗口重置前提醒", 13, true); resetTitle.setTextColor(ui.muted);
+        column.addView(resetTitle); column.addView(ui.space(8));
         choices(ui, column, p, "reset", new int[]{0, 5, 15, 30}, new String[]{"关闭", "5 分钟", "15 分钟", "30 分钟"}, 15);
-        column.addView(ui.space(16)); TextView note = ui.text("按最近获取的真实额度提醒\n后台检查由系统安排，省电状态下可能延后\n锁屏隐藏额度提醒", 13); note.setTextColor(ui.muted); column.addView(note);
-        if (!permitted(activity)) { column.addView(ui.space(8)); column.addView(ui.button("系统通知设置", false, () -> openNotificationSettings(activity))); }
-        column.addView(ui.space(10)); column.addView(ui.button("发送测试提醒", false, () -> sendTest(activity)));
-        column.addView(ui.space(16)); column.addView(ui.button("完成", () -> { sync(activity); dialog.dismiss(); }));
-        ScrollView scroll = new ScrollView(activity); scroll.setFillViewport(false); scroll.addView(column); dialog.setContentView(scroll);
-        owner = new WeakReference<>(activity); settings = dialog; dialog.show();
-        Window w = dialog.getWindow(); if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT)); w.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            w.setDimAmount(.22f); WindowManager.LayoutParams a = w.getAttributes();
-            a.width = Math.min(ui.dp(520), activity.getResources().getDisplayMetrics().widthPixels - ui.dp(24));
-            a.height = ViewGroup.LayoutParams.WRAP_CONTENT; a.y = ui.dp(12); w.setAttributes(a);
+
+        column.addView(ui.space(14));
+        TextView note = ui.text("按最近获取的真实额度提醒；后台检查由系统调度，锁屏自动隐藏额度提醒。", 13);
+        note.setTextColor(ui.muted); note.setLineSpacing(ui.dp(3), 1.1f);
+        column.addView(note);
+
+        if (!permitted(activity)) {
+            column.addView(ui.space(12));
+            column.addView(ui.button("打开系统通知设置", false, () -> openNotificationSettings(activity)), new LinearLayout.LayoutParams(-1, -2));
         }
-        return dialog;
+        column.addView(ui.space(12));
+        column.addView(ui.button("发送测试提醒", false, () -> sendTest(activity)), new LinearLayout.LayoutParams(-1, -2));
+        column.addView(ui.space(10));
+        column.addView(ui.button("完成", () -> { sync(activity); sheet.dismiss(); }), new LinearLayout.LayoutParams(-1, -2));
+
+        sheet.body(column);
+        owner = new WeakReference<>(activity); settings = sheet; sheet.show();
+        return sheet;
     }
     private static void choices(NativeUi ui, LinearLayout parent, SharedPreferences p, String key, int[] values, String[] labels, int fallback) {
-        LinearLayout row = ui.row(); final TextView[] buttons = new TextView[values.length];
-        Runnable paint = () -> { for (int i = 0; i < values.length; i++) buttons[i].setBackground(ui.rounded(p.getInt(key, fallback) == values[i] ? ui.soft : ui.surface, 12)); };
+        LinearLayout track = ui.row();
+        track.setBackground(ui.rounded(ui.soft, 14));
+        track.setPadding(ui.dp(3), ui.dp(3), ui.dp(3), ui.dp(3));
+        final TextView[] buttons = new TextView[values.length];
+        Runnable paint = () -> {
+            int cur = p.getInt(key, fallback);
+            for (int i = 0; i < values.length; i++) {
+                boolean active = cur == values[i];
+                buttons[i].setBackground(active ? ui.bordered(ui.surface, 11) : ui.ripple(Color.TRANSPARENT, 11));
+                buttons[i].setTextColor(active ? ui.accent : ui.muted);
+                buttons[i].setTypeface(active ? ui.strong : ui.regular);
+            }
+        };
         for (int i = 0; i < values.length; i++) {
-            final int value = values[i]; TextView button = ui.button(labels[i], false, () -> { p.edit().putInt(key, value).apply(); paint.run(); });
-            button.setTextSize(13); button.setPadding(ui.dp(4), ui.dp(10), ui.dp(4), ui.dp(10)); buttons[i] = button;
-            row.addView(button, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            final int value = values[i];
+            TextView button = ui.button(labels[i], false, () -> { p.edit().putInt(key, value).apply(); paint.run(); });
+            button.setTextSize(13); button.setMinHeight(ui.dp(38));
+            button.setPadding(ui.dp(4), ui.dp(8), ui.dp(4), ui.dp(8));
+            buttons[i] = button;
+            track.addView(button, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         }
-        paint.run(); parent.addView(row);
+        paint.run(); parent.addView(track, new LinearLayout.LayoutParams(-1, -2));
     }
 }
