@@ -737,7 +737,8 @@ public readonly record struct MainShellPlan(
     double TaskListWidth,
     int UsageColumns,
     int DevicesColumns,
-    bool AccountTwoColumnBento);
+    bool AccountTwoColumnBento,
+    bool TaskDetailInspector = false);
 
 public static class ResponsiveLayoutPolicy
 {
@@ -854,10 +855,12 @@ public static class ResponsiveLayoutPolicy
         var collapseRail = w < 940.0;
         var railW = collapseRail ? 72.0 : 208.0;
         var contentW = Math.Max(480.0, w - railW - 24.0);
-        var taskListW = w < 840.0 ? 284.0 : w < 1080.0 ? 342.0 : 396.0;
+        var taskListW = w < 840.0 ? 284.0 : w < 1080.0 ? 342.0 : w < 1320.0 ? 364.0 : 392.0;
+        var taskDetailW = contentW - taskListW;
         var usageCols = contentW >= 1040.0 ? 3 : contentW >= 660.0 ? 2 : 1;
         var devCols = contentW >= 820.0 ? 2 : 1;
         var accountBento = contentW >= 1020.0;
+        var detailInspector = taskDetailW >= 600.0;
 
         return new MainShellPlan(
             CollapseSidebar: collapseRail,
@@ -865,7 +868,8 @@ public static class ResponsiveLayoutPolicy
             TaskListWidth: taskListW,
             UsageColumns: usageCols,
             DevicesColumns: devCols,
-            AccountTwoColumnBento: accountBento);
+            AccountTwoColumnBento: accountBento,
+            TaskDetailInspector: detailInspector);
     }
 
     /// <summary>

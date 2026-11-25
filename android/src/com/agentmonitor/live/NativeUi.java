@@ -318,6 +318,9 @@ public final class NativeUi {
             switch (name) {
                 case "back": path.moveTo(14.5f, 5.5f); path.lineTo(8, 12); path.lineTo(14.5f, 18.5f); break;
                 case "chevron": path.moveTo(9.5f, 6.5f); path.lineTo(15, 12); path.lineTo(9.5f, 17.5f); break;
+                case "chevron-down": path.moveTo(6.5f, 9.5f); path.lineTo(12, 15); path.lineTo(17.5f, 9.5f); break;
+                case "chevron-up": path.moveTo(6.5f, 14.5f); path.lineTo(12, 9); path.lineTo(17.5f, 14.5f); break;
+                case "more": paint.setStyle(Paint.Style.FILL); canvas.drawCircle(6, 12, 1.65f, paint); canvas.drawCircle(12, 12, 1.65f, paint); canvas.drawCircle(18, 12, 1.65f, paint); paint.setStyle(Paint.Style.STROKE); break;
                 case "plus": path.moveTo(12, 5.5f); path.lineTo(12, 18.5f); path.moveTo(5.5f, 12); path.lineTo(18.5f, 12); break;
                 case "close": path.moveTo(6.5f, 6.5f); path.lineTo(17.5f, 17.5f); path.moveTo(17.5f, 6.5f); path.lineTo(6.5f, 17.5f); break;
                 case "check": path.moveTo(5, 12.5f); path.lineTo(9.5f, 17); path.lineTo(19, 7.5f); break;

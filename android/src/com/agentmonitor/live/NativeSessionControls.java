@@ -113,6 +113,36 @@ public final class NativeSessionControls {
                 && (fastNext == null && planNext == null || validCatalog()
                     && NativeSessionControlPolicy.oneTurnSettings(catalog(), selection, fastNext, planNext, now()) != null);
     }
+    public String compactCapsuleLabel() {
+        if (!canSendReply()) return "模型需重选 ▾";
+        JSONObject catalog = catalog();
+        boolean valid = validCatalog();
+        boolean fast = valid && NativeSessionControlPolicy.fastReply(catalog, selection, fastNext, now()) != null;
+        boolean plan = valid && NativeSessionControlPolicy.planReply(catalog, selection, planNext, now()) != null;
+        if (selection == null) {
+            String base = "继承电脑";
+            if (valid) {
+                String current = NativeSessionControlPolicy.nullableText(catalog, "current_model");
+                if (!current.isEmpty()) {
+                    JSONObject cm = NativeSessionControlPolicy.model(catalog, current);
+                    String formatted = cm == null ? NativeUsageFormat.modelName(current) : modelName(cm);
+                    if (!formatted.isEmpty() && formatted.length() <= 18) base = formatted;
+                }
+            }
+            if (fast) base += " · 快";
+            if (plan) base += " · 计划";
+            return base + " ▾";
+        }
+        String modelId = NativeSessionControlPolicy.nullableText(selection, "model");
+        JSONObject model = valid ? NativeSessionControlPolicy.model(catalog, modelId) : null;
+        String label = model != null ? modelName(model) : NativeUsageFormat.modelName(modelId);
+        if (label.isEmpty()) label = "已选模型";
+        String effort = NativeSessionControlPolicy.nullableText(selection, "effort");
+        if (!effort.isEmpty()) label += " · " + NativeSessionControlPolicy.effortLabel(effort);
+        if (fast) label += " · 快";
+        if (plan) label += " · 计划";
+        return label + " ▾";
+    }
     public JSONObject selectionForSend() {
         if (!canSendReply()) throw new IllegalStateException("模型选项已变化，请重新选择或改为继承电脑设置");
         if (fastNext == null && planNext == null) return copy(selection);

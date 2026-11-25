@@ -22,6 +22,8 @@ import android.view.ViewParent;
 import android.view.ViewTreeObserver;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -54,18 +56,30 @@ public final class NativeTaskResults {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable saveDraft = this::persistDraft;
     private final ExecutorService io = Executors.newFixedThreadPool(2);
+    public static final class QuickChip {
+        public final String label, prompt;
+        public QuickChip(String label, String prompt) {
+            this.label = label == null ? "" : label;
+            this.prompt = prompt == null ? "" : prompt;
+        }
+    }
     public final LinearLayout view;
     /** Mount once near the task heading; this is not a child of the result/reply body. */
     public final LinearLayout attentionView;
+    /** Reserved slot directly under Final Result for upcoming Code Diff summary card (#2). */
+    public final LinearLayout diffSlot;
+    /** Sticky bottom Liquid Glass composer dock with Quick-Action Chips (#5) & Model Capsule. */
+    public final LinearLayout composerView;
     private final boolean interactive;
-    private final LinearLayout outputActions, fileRows, replyCard;
-    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle, replyReceiptBadge, replyAppliedLabel;
+    private final LinearLayout outputActions, fileRows, replyCard, suggestionRow;
+    private final HorizontalScrollView suggestionScroll;
+    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle, replyReceiptBadge, replyAppliedLabel, modelCapsule;
     private final EditText replyInput;
     private final View resultHeading, refreshButton;
     private final ResultRefresh resultRefresh = new ResultRefresh();
     private final NativeSessionControls controls;
     private JSONObject result;
-    private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", commandReason = "", capabilityReason = "";
+    private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", commandReason = "", capabilityReason = "", chipsSignature = "";
     private boolean syncEnabled, replyBusy, sendBusy, downloadBusy, expanded, replyAvailable, knownReply, loadingDraft, filesPending, commandDelivered;
     private boolean replyExpanded;
     private ViewTreeObserver replyRevealTree, resultRevealTree;
@@ -94,57 +108,122 @@ public final class NativeTaskResults {
         view = ui.column();
         controls = interactive ? new NativeSessionControls(ui, taskId, host, (method, path, value, done) -> request(method, path, value, done::done), preferences, preferencesKey, this::updateSend) : null;
         attentionView = interactive ? controls.view : ui.column();
-        LinearLayout resultBody = ui.column();
+
+        LinearLayout resultCard = ui.card();
         LinearLayout title = ui.row(); resultHeading = title;
-        title.addView(ui.heading("最终结果", 20), new LinearLayout.LayoutParams(0, -2, 1));
-        refreshButton = ui.iconButton("refresh", "刷新最终结果", () -> { resultRefresh.restart(SystemClock.elapsedRealtime()); fetchResult(); fetchReply(true); });
+        title.addView(ui.heading("最终结果", 18), new LinearLayout.LayoutParams(0, -2, 1));
+        refreshButton = ui.iconButton("refresh", "刷新最终结果", this::refreshNow);
         title.addView(refreshButton);
-        resultBody.addView(title, wrap());
+        resultCard.addView(title, wrap());
         expand = resultToggle("展开全文");
-        resultBody.addView(expand, wrap());
-        resultBody.addView(ui.space(12));
-        resultText = ui.text("输出同步已关闭", 16);
+        resultCard.addView(expand, wrap());
+        resultCard.addView(ui.space(10));
+        resultText = ui.text("输出同步已关闭", 15);
         resultText.setTextIsSelectable(true); resultText.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG); resultText.setLineSpacing(ui.dp(6), 1.1f); resultText.setTextColor(ui.muted);
-        resultBody.addView(resultText, wrap());
+        resultCard.addView(resultText, wrap());
         collapseAtEnd = resultToggle("收起全文");
-        resultBody.addView(collapseAtEnd, wrap());
+        resultCard.addView(collapseAtEnd, wrap());
         outputActions = ui.row(); outputActions.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); copyButton = quietAction("复制", this::copy); txtButton = quietAction("保存 TXT", this::chooseTxt);
         for (TextView action : new TextView[]{copyButton, txtButton}) {
-            action.setMinWidth(ui.dp(48)); action.setPadding(ui.dp(10), ui.dp(10), ui.dp(10), ui.dp(10));
+            action.setMinWidth(ui.dp(48)); action.setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(8));
             outputActions.addView(action, new LinearLayout.LayoutParams(-2, -2));
         }
-        LinearLayout.LayoutParams actionsSpace = wrap(); actionsSpace.topMargin = ui.dp(4); resultBody.addView(outputActions, actionsSpace); outputActions.setVisibility(View.GONE);
-        resultNote = ui.text("", 13); resultNote.setTextColor(ui.warning); resultNote.setPadding(0, ui.dp(12), 0, 0); resultNote.setVisibility(View.GONE); resultBody.addView(resultNote, wrap());
-        view.addView(resultBody, wrap());
-        fileRows = ui.column(); view.addView(fileRows, wrap()); if (interactive) view.addView(ui.space(24));
-        View replyDivider = new View(activity); replyDivider.setBackgroundColor(ui.line); if (interactive) view.addView(replyDivider, new LinearLayout.LayoutParams(-1, ui.dp(1)));
-        LinearLayout replyHeader = ui.row(); replyHeader.setMinimumHeight(ui.dp(48));
-        replyHeader.addView(ui.heading("回复", 18), new LinearLayout.LayoutParams(0, -2, 1));
-        replyToggle = ui.button("继续此会话", this::toggleReply); replyHeader.addView(replyToggle, new LinearLayout.LayoutParams(-2, -2));
-        LinearLayout.LayoutParams replyHeaderSpace = wrap(); replyHeaderSpace.topMargin = ui.dp(18); if (interactive) view.addView(replyHeader, replyHeaderSpace);
-        replyStatus = ui.text("", 13, false); replyStatus.setTextColor(ui.muted);
-        replyStatus.setPadding(0, ui.dp(8), 0, ui.dp(4)); if (interactive) view.addView(replyStatus, wrap());
-        replyAppliedLabel = ui.text("", 13, true); replyAppliedLabel.setTextColor(ui.accent);
-        replyAppliedLabel.setPadding(0, ui.dp(2), 0, ui.dp(6)); replyAppliedLabel.setVisibility(View.GONE);
-        if (interactive) view.addView(replyAppliedLabel, wrap());
-        replyAvailability = ui.text("", 13, false); replyAvailability.setTextColor(ui.muted);
-        replyAvailability.setPadding(0, ui.dp(6), 0, ui.dp(8)); if (interactive) view.addView(replyAvailability, wrap());
-        replyCard = ui.column(); replyInput = new EditText(activity); replyInput.setTypeface(ui.regular); replyInput.setTextColor(ui.text); replyInput.setHintTextColor(ui.muted);
-        replyInput.setTextSize(16); replyInput.setLineSpacing(ui.dp(6), 1.08f); replyInput.setHint("继续这个任务…"); replyInput.setMinLines(2); replyInput.setMaxLines(8); replyInput.setGravity(Gravity.TOP | Gravity.START);
+        LinearLayout.LayoutParams actionsSpace = wrap(); actionsSpace.topMargin = ui.dp(6); resultCard.addView(outputActions, actionsSpace); outputActions.setVisibility(View.GONE);
+        resultNote = ui.text("", 13); resultNote.setTextColor(ui.warning); resultNote.setPadding(0, ui.dp(10), 0, 0); resultNote.setVisibility(View.GONE); resultCard.addView(resultNote, wrap());
+        fileRows = ui.column(); resultCard.addView(fileRows, wrap());
+        view.addView(resultCard, wrap());
+
+        diffSlot = ui.column();
+        diffSlot.setVisibility(View.GONE);
+        LinearLayout.LayoutParams diffSpace = wrap(); diffSpace.topMargin = ui.dp(14);
+        view.addView(diffSlot, diffSpace);
+
+        composerView = ui.column();
+        composerView.setBackground(ui.compactHeaderMaterial(ui.reducedTransparencyEnabled()));
+        composerView.setClickable(true);
+        View dockRule = new View(activity);
+        dockRule.setBackgroundColor(ui.line);
+        composerView.addView(dockRule, new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(1))));
+
+        replyCard = ui.column();
+        replyCard.setPadding(ui.dp(16), ui.dp(10), ui.dp(16), ui.dp(8));
+
+        suggestionScroll = new HorizontalScrollView(activity);
+        suggestionScroll.setHorizontalScrollBarEnabled(false);
+        suggestionScroll.setVisibility(View.GONE);
+        suggestionRow = ui.row();
+        suggestionScroll.addView(suggestionRow, new FrameLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams chipsSpace = wrap(); chipsSpace.bottomMargin = ui.dp(8);
+        replyCard.addView(suggestionScroll, chipsSpace);
+
+        LinearLayout inputRow = ui.row();
+        inputRow.setGravity(Gravity.BOTTOM);
+        replyInput = new EditText(activity); replyInput.setTypeface(ui.regular); replyInput.setTextColor(ui.text); replyInput.setHintTextColor(ui.muted);
+        replyInput.setTextSize(15); replyInput.setLineSpacing(ui.dp(4), 1.06f); replyInput.setHint("继续此会话，告诉它下一步做什么…"); replyInput.setMinLines(1); replyInput.setMaxLines(5); replyInput.setGravity(Gravity.TOP | Gravity.START);
         replyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        replyInput.setFilters(new InputFilter[]{new InputFilter.LengthFilter(8000)}); replyInput.setBackground(ui.bordered(ui.surface, 14)); replyInput.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
+        replyInput.setFilters(new InputFilter[]{new InputFilter.LengthFilter(8000)}); replyInput.setBackground(ui.bordered(ui.surface, 14)); replyInput.setPadding(ui.dp(13), ui.dp(10), ui.dp(13), ui.dp(10));
         replyInput.setText(preferences.getString(preferencesKey + ":draft", draftFallback()));
-        replyCard.addView(replyInput, wrap());
-        sendButton = ui.button("发送回复", this::send);
-        LinearLayout.LayoutParams sendSpace = new LinearLayout.LayoutParams(-1, -2); sendSpace.gravity = Gravity.END; sendSpace.topMargin = ui.dp(10);
-        replyCard.addView(sendButton, sendSpace);
-        replyReceiptBadge = ui.text("", 13, true);
-        replyReceiptBadge.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
-        replyReceiptBadge.setBackground(ui.rounded(ui.soft, 10));
+        inputRow.addView(replyInput, new LinearLayout.LayoutParams(0, -2, 1));
+
+        sendButton = ui.button("发送", this::send);
+        sendButton.setMinHeight(ui.dp(42));
+        sendButton.setPadding(ui.dp(16), ui.dp(10), ui.dp(16), ui.dp(10));
+        LinearLayout.LayoutParams sendSpace = new LinearLayout.LayoutParams(-2, -2); sendSpace.setMarginStart(ui.dp(8));
+        inputRow.addView(sendButton, sendSpace);
+        replyCard.addView(inputRow, wrap());
+
+        LinearLayout metaRow = ui.row();
+        metaRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams metaSpace = wrap(); metaSpace.topMargin = ui.dp(8);
+        modelCapsule = ui.text("继承电脑 ▾", 12, true);
+        modelCapsule.setSingleLine(true);
+        modelCapsule.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        modelCapsule.setMaxWidth(ui.dp(196));
+        modelCapsule.setPadding(ui.dp(10), ui.dp(5), ui.dp(10), ui.dp(5));
+        modelCapsule.setBackground(ui.ripple(ui.soft, 10));
+        modelCapsule.setTextColor(ui.text);
+        modelCapsule.setContentDescription("模型与思考强度设置");
+        modelCapsule.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        modelCapsule.setOnClickListener(v -> showModelSettings());
+        metaRow.addView(modelCapsule, new LinearLayout.LayoutParams(-2, -2));
+
+        LinearLayout statusCol = ui.column();
+        statusCol.setGravity(Gravity.END);
+        LinearLayout.LayoutParams statusColParams = new LinearLayout.LayoutParams(0, -2, 1);
+        statusColParams.setMarginStart(ui.dp(10));
+        replyReceiptBadge = ui.text("", 12, true);
+        replyReceiptBadge.setSingleLine(true);
+        replyReceiptBadge.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        replyReceiptBadge.setGravity(Gravity.END);
         replyReceiptBadge.setVisibility(View.GONE);
-        LinearLayout.LayoutParams badgeSpace = wrap(); badgeSpace.topMargin = ui.dp(10);
-        replyCard.addView(replyReceiptBadge, badgeSpace);
-        if (interactive) view.addView(replyCard, wrap());
+        statusCol.addView(replyReceiptBadge, wrap());
+
+        replyStatus = ui.text("", 12, false);
+        replyStatus.setTextColor(ui.muted);
+        replyStatus.setSingleLine(true);
+        replyStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        replyStatus.setGravity(Gravity.END);
+        statusCol.addView(replyStatus, wrap());
+        metaRow.addView(statusCol, statusColParams);
+        replyCard.addView(metaRow, metaSpace);
+
+        replyAppliedLabel = ui.text("", 12, true);
+        replyAppliedLabel.setTextColor(ui.accent);
+        replyAppliedLabel.setPadding(0, ui.dp(4), 0, 0);
+        replyAppliedLabel.setVisibility(View.GONE);
+        replyCard.addView(replyAppliedLabel, wrap());
+
+        replyAvailability = ui.text("", 12, false);
+        replyAvailability.setTextColor(ui.muted);
+        replyAvailability.setPadding(0, ui.dp(3), 0, 0);
+        replyAvailability.setVisibility(View.GONE);
+        replyCard.addView(replyAvailability, wrap());
+
+        replyToggle = ui.button("继续此会话", this::toggleReply);
+        replyToggle.setVisibility(View.GONE);
+
+        composerView.addView(replyCard, wrap());
+        if (!interactive) composerView.setVisibility(View.GONE);
         replyInput.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             public void onTextChanged(CharSequence s, int start, int before, int count) { if (!loadingDraft) updateSend(); }
@@ -238,6 +317,47 @@ public final class NativeTaskResults {
         replyInput.clearFocus();
         persistDraft();
         updateSend();
+    }
+    public void refreshNow() {
+        resultRefresh.restart(SystemClock.elapsedRealtime());
+        fetchResult();
+        fetchReply(true);
+        if (interactive) controls.refresh();
+    }
+    public void setQuickChips(java.util.List<QuickChip> chips) {
+        if (!interactive) return;
+        StringBuilder sig = new StringBuilder();
+        if (chips != null) {
+            for (QuickChip c : chips) {
+                if (c != null && !c.label.isEmpty() && !c.prompt.isEmpty()) {
+                    sig.append(c.label).append('\n').append(c.prompt).append('\0');
+                }
+            }
+        }
+        String nextSig = sig.toString();
+        if (nextSig.equals(chipsSignature)) return;
+        chipsSignature = nextSig;
+        suggestionRow.removeAllViews();
+        if (chips == null || chips.isEmpty() || nextSig.isEmpty()) {
+            suggestionScroll.setVisibility(View.GONE);
+            return;
+        }
+        for (int i = 0; i < chips.size(); i++) {
+            final QuickChip item = chips.get(i);
+            if (item == null || item.label.isEmpty() || item.prompt.isEmpty()) continue;
+            TextView pill = ui.text("✨ " + item.label, 12, false);
+            pill.setSingleLine(true);
+            pill.setTextColor(ui.accent);
+            pill.setPadding(ui.dp(10), ui.dp(5), ui.dp(10), ui.dp(5));
+            pill.setBackground(ui.borderedRipple(ui.surface, 12));
+            pill.setContentDescription("填入建议指令：" + item.label);
+            pill.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+            pill.setOnClickListener(v -> prefillReply(item.prompt));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            if (suggestionRow.getChildCount() > 0) lp.setMarginStart(ui.dp(8));
+            suggestionRow.addView(pill, lp);
+        }
+        suggestionScroll.setVisibility(suggestionRow.getChildCount() > 0 ? View.VISIBLE : View.GONE);
     }
     public boolean prefillReply(String text) {
         if (!interactive || text == null || text.trim().isEmpty()) return false;
@@ -540,41 +660,29 @@ public final class NativeTaskResults {
         replyInput.setEnabled(!sendBusy && !pending); replyInput.setAlpha(sendBusy || pending ? .7f : 1f);
         boolean retry = pending && canRetryOriginal();
         boolean selectionReady = controls.canSendReply();
+        setText(modelCapsule, "⚙ " + controls.compactCapsuleLabel());
+        modelCapsule.setTextColor(selectionReady ? ui.text : ui.warning);
+
         String receiptTrail = requestId.isEmpty() && !sendBusy
                 ? "" : NativeReplyPresentationPolicy.replyReceipt(sendBusy, commandState, commandDelivered);
         String baseStatus = NativeReplyPresentationPolicy.commandStatus(sendBusy, pending, commandState, retry, commandReason);
         String availability = NativeReplyPresentationPolicy.capabilityStatus(sendBusy, pending, knownReply, replyAvailable, selectionReady, capabilityReason);
-        boolean attention = replyNeedsAttention();
-        boolean showReply = NativeReplyPresentationPolicy.expanded(replyExpanded, attention);
-        String combinedStatus = !showReply && !receiptTrail.isEmpty()
-                ? (baseStatus.isEmpty() ? receiptTrail : receiptTrail + " · " + baseStatus)
-                : baseStatus;
-        setText(replyStatus, combinedStatus); replyStatus.setVisibility(combinedStatus.isEmpty() ? View.GONE : View.VISIBLE);
+        setText(replyStatus, baseStatus.isEmpty() && receiptTrail.isEmpty() && availability.isEmpty() && knownReply && replyAvailable ? "电脑在线可直达" : baseStatus);
+        replyStatus.setVisibility(replyStatus.getText().length() == 0 ? View.GONE : View.VISIBLE);
         setText(replyAppliedLabel, settingsReceiptText);
         replyAppliedLabel.setVisibility(settingsReceiptText.isEmpty() ? View.GONE : View.VISIBLE);
         setText(replyReceiptBadge, receiptTrail);
         replyReceiptBadge.setTextColor("failed".equals(commandState) ? ui.danger
                 : "blocked".equals(commandState) ? ui.warning : commandDelivered ? ui.accent : ui.text);
-        replyReceiptBadge.setVisibility(showReply && !receiptTrail.isEmpty() ? View.VISIBLE : View.GONE);
-        setText(replyAvailability, availability); replyAvailability.setVisibility(availability.isEmpty() ? View.GONE : View.VISIBLE);
+        replyReceiptBadge.setVisibility(receiptTrail.isEmpty() ? View.GONE : View.VISIBLE);
+        setText(replyAvailability, availability);
+        replyAvailability.setVisibility(availability.isEmpty() ? View.GONE : View.VISIBLE);
         replyStatus.setTextColor(commandState.equals("failed") ? ui.danger
                 : commandState.equals("blocked") || commandState.equals("uncertain") || commandState.equals("not_found") ? ui.warning : ui.muted);
-        setText(sendButton, pending ? retry ? "重试原回复" : "查询发送结果" : "发送回复");
+        setText(sendButton, pending ? (retry ? "重试" : "查询") : "发送");
         boolean enabled = !sendBusy && (pending ? !replyBusy : selectionReady && knownReply && replyAvailable && !replyInput.getText().toString().trim().isEmpty());
         sendButton.setEnabled(enabled); sendButton.setAlpha(enabled ? 1f : .5f);
-        boolean hasDraft = replyInput.length() > 0;
-        replyCard.setVisibility(showReply ? View.VISIBLE : View.GONE);
-        String closedLabel = hasDraft ? "继续草稿" : "继续此会话";
-        setText(replyToggle, showReply ? "收起" : closedLabel);
-        replyToggle.setContentDescription(showReply ? "收起回复输入框，保留草稿" : closedLabel + "，展开回复输入框");
-        boolean toggleReady = showReply || hasDraft || (knownReply && replyAvailable);
-        replyToggle.setAlpha(toggleReady ? 1f : .65f);
-        if (!Boolean.valueOf(showReply).equals(replyToggle.getTag())) {
-            replyToggle.setTextColor(showReply ? ui.muted : ui.dark ? ui.bg : android.graphics.Color.WHITE);
-            replyToggle.setBackground(ui.ripple(showReply ? android.graphics.Color.TRANSPARENT : ui.accent, showReply ? 10 : 16));
-            replyToggle.setTag(showReply);
-        }
-        replyToggle.setVisibility(attention ? View.GONE : View.VISIBLE);
+        replyCard.setVisibility(View.VISIBLE);
     }
     private void send() {
         if (!interactive) return;

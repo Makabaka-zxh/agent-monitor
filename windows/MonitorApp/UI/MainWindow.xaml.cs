@@ -73,9 +73,15 @@ public partial class MainWindow : Window
     private ContentControl? _taskDetailRightHost;
     private string? _mountedDetailTaskId;
     private string _mountedTaskCardsSignature = "";
+    private StackPanel? _taskDetailHeaderHost;
     private StackPanel? _taskDetailCardsHost;
-    private TextBlock? _replyHeadingText;
-    private TextBlock? _replyModelSummaryText;
+    private StackPanel? _taskDetailInspectorHost;
+    private ColumnDefinition? _taskDetailInspectorDivCol;
+    private ColumnDefinition? _taskDetailInspectorCol;
+    private WrapPanel? _replyQuickChipsHost;
+    private string _mountedQuickChipsSignature = "";
+    private bool _taskInfoAccordionExpanded;
+    private Button? _replyModelCapsuleBtn;
     private TextBlock? _replyStatusText;
     private Border? _replyReceiptBadge;
     private TextBlock? _replyReceiptText;
@@ -747,7 +753,8 @@ public partial class MainWindow : Window
             _taskListColDef.Width = new GridLength(plan.TaskListWidth);
             if (prev is null
                 || (prev.Value.TaskListWidth < 340) != (plan.TaskListWidth < 340)
-                || (prev.Value.TaskListWidth >= 380) != (plan.TaskListWidth >= 380))
+                || (prev.Value.TaskListWidth >= 380) != (plan.TaskListWidth >= 380)
+                || prev.Value.TaskDetailInspector != plan.TaskDetailInspector)
             {
                 UpdateTasksPageInPlace();
             }
@@ -4141,6 +4148,14 @@ public partial class MainWindow : Window
             _taskDetail = null;
             _mountedDetailTaskId = null;
             _mountedTaskCardsSignature = "";
+            _mountedQuickChipsSignature = "";
+            _taskDetailHeaderHost = null;
+            _taskDetailCardsHost = null;
+            _taskDetailInspectorHost = null;
+            _taskDetailInspectorDivCol = null;
+            _taskDetailInspectorCol = null;
+            _replyQuickChipsHost = null;
+            _replyModelCapsuleBtn = null;
             _replySendBtn = null;
             if (_taskDetailRightHost is not null)
             {
@@ -4215,6 +4230,8 @@ public partial class MainWindow : Window
             _taskDetail.Changed += () => Dispatcher.Invoke(RefreshMountedTaskDetail);
             _mountedDetailTaskId = selectedTask.Id;
             _mountedTaskCardsSignature = "";
+            _mountedQuickChipsSignature = "";
+            _taskInfoAccordionExpanded = false;
             _replySendBtn = null;
             if (_taskDetailRightHost is not null)
                 _taskDetailRightHost.Content = BuildTaskDetailPane(selectedTask, _taskDetail);
@@ -4366,34 +4383,65 @@ public partial class MainWindow : Window
         return UiKit.Card(stack, 18, UiKit.CardRadius);
     }
 
+    private void PrefillTaskReplyComposer(string prompt)
+    {
+        if (_replyInputBox is null || string.IsNullOrWhiteSpace(prompt)) return;
+        _replyInputBox.Text = prompt;
+        _replyInputBox.Focus();
+        _replyInputBox.CaretIndex = _replyInputBox.Text.Length;
+    }
+
     private UIElement BuildTaskDetailPane(MonitorTask task, TaskDetailController detail)
     {
-        var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(28, 22, 28, 30) };
-        var root = new StackPanel { MaxWidth = 840 };
+        var plan = _lastMainPlan ?? CurrentMainShellPlan();
+        var outerSplit = new Grid();
+        outerSplit.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _taskDetailInspectorDivCol = new ColumnDefinition { Width = new GridLength(plan.TaskDetailInspector ? 1 : 0) };
+        _taskDetailInspectorCol = new ColumnDefinition { Width = new GridLength(plan.TaskDetailInspector ? 268 : 0) };
+        outerSplit.ColumnDefinitions.Add(_taskDetailInspectorDivCol);
+        outerSplit.ColumnDefinitions.Add(_taskDetailInspectorCol);
 
-        _taskDetailCardsHost = new StackPanel();
-        root.Children.Add(_taskDetailCardsHost);
+        // Left Column: [Row 0: Pinned Compact Header] + [Row 1: Scrollable Main Canvas] + [Row 2: Sticky Bottom Glass Composer]
+        var mainGrid = new Grid();
+        mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        _taskDetailHeaderHost = new StackPanel { Margin = new Thickness(24, 16, 24, 0) };
+        Grid.SetRow(_taskDetailHeaderHost, 0);
+        mainGrid.Children.Add(_taskDetailHeaderHost);
+
+        var scroll = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Padding = new Thickness(24, 14, 24, 22)
+        };
+        _taskDetailCardsHost = new StackPanel { MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Stretch };
+        scroll.Content = _taskDetailCardsHost;
+        Grid.SetRow(scroll, 1);
+        mainGrid.Children.Add(scroll);
 
         if (task.SupportsReply)
         {
-            var replyStack = new StackPanel();
-            var topRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
-            _replyHeadingText = UiKit.Heading("继续此会话", 18);
-            topRow.Children.Add(_replyHeadingText);
+            var dockStack = new StackPanel();
 
-            var rightTools = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
-            _replyModelSummaryText = UiKit.Body(detail.ModelSettingsSummary, 12, UiKit.MutedBrush);
-            _replyModelSummaryText.VerticalAlignment = VerticalAlignment.Center;
-            _replyModelSummaryText.Margin = new Thickness(0, 0, 10, 0);
-            rightTools.Children.Add(_replyModelSummaryText);
-            rightTools.Children.Add(UiKit.SecondaryButton("模型设置", () => Dialogs.ShowModelSettings(this, task, detail), glyph: "settings"));
-            DockPanel.SetDock(rightTools, Dock.Right);
-            topRow.Children.Add(rightTools);
-            replyStack.Children.Add(topRow);
+            // Reserved Row 1: Quick-Action / Next-Step Suggestion Chips (#5)
+            _replyQuickChipsHost = new WrapPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 0, 0, 8),
+                Visibility = Visibility.Collapsed
+            };
+            dockStack.Children.Add(_replyQuickChipsHost);
 
-            _replyInputBox = UiKit.StyledTextBox(detail.DraftText, "告诉它下一步做什么（Ctrl + Enter 快捷发送）…", multiline: true);
-            _replyInputBox.MinHeight = 96;
-            _replyInputBox.MaxHeight = 190;
+            // Row 2: Input + Send Button
+            var inputGrid = new Grid();
+            inputGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            inputGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            _replyInputBox = UiKit.StyledTextBox(detail.DraftText, "继续此会话，告诉它下一步做什么（Ctrl + Enter 发送）…", multiline: true);
+            _replyInputBox.MinHeight = 42;
+            _replyInputBox.MaxHeight = 132;
             _replyInputBox.TextChanged += (_, _) =>
             {
                 detail.DraftText = _replyInputBox.Text;
@@ -4409,12 +4457,8 @@ public partial class MainWindow : Window
                         _replyInputBox.Text = "";
                 }
             };
-            replyStack.Children.Add(_replyInputBox);
-
-            var footer = new DockPanel { Margin = new Thickness(0, 12, 0, 0) };
-            _replyStatusText = UiKit.Body(detail.ReplyMessage, 12.5, UiKit.MutedBrush);
-            _replyStatusText.VerticalAlignment = VerticalAlignment.Center;
-            footer.Children.Add(_replyStatusText);
+            Grid.SetColumn(_replyInputBox, 0);
+            inputGrid.Children.Add(_replyInputBox);
 
             var sendBtn = UiKit.PrimaryButton("发送回复", async () =>
             {
@@ -4423,15 +4467,38 @@ public partial class MainWindow : Window
                     _replyInputBox.Text = "";
             });
             _replySendBtn = sendBtn;
-            DockPanel.SetDock(sendBtn, Dock.Right);
-            sendBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            footer.Children.Add(sendBtn);
-            replyStack.Children.Add(footer);
+            sendBtn.VerticalAlignment = VerticalAlignment.Bottom;
+            sendBtn.Margin = new Thickness(10, 0, 0, 0);
+            Grid.SetColumn(sendBtn, 1);
+            inputGrid.Children.Add(sendBtn);
+            dockStack.Children.Add(inputGrid);
+
+            // Row 3: Bottom-Left Model Selection Capsule + Right Receipt / Live Status
+            var footer = new DockPanel { Margin = new Thickness(0, 8, 0, 0), LastChildFill = true };
+            _replyModelCapsuleBtn = UiKit.SecondaryButton(
+                detail.ModelSettingsSummary + " ▾",
+                () =>
+                {
+                    var currentTask = _controller.Tasks.FirstOrDefault(t => t.Id == task.Id) ?? task;
+                    Dialogs.ShowModelSettings(this, currentTask, detail);
+                },
+                glyph: "settings");
+            _replyModelCapsuleBtn.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(_replyModelCapsuleBtn, Dock.Left);
+            footer.Children.Add(_replyModelCapsuleBtn);
+
+            var rightStatusStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(12, 0, 0, 0)
+            };
 
             _replyReceiptText = new TextBlock
             {
                 FontFamily = UiKit.AppFont,
-                FontSize = 12.5,
+                FontSize = 11.8,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = UiKit.AccentBrush
             };
@@ -4440,39 +4507,80 @@ public partial class MainWindow : Window
                 Background = UiKit.GlassTrackBrush,
                 BorderBrush = UiKit.GlassSubtleRimBrush,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(9),
-                Padding = new Thickness(11, 6, 11, 6),
-                Margin = new Thickness(0, 10, 0, 0),
-                HorizontalAlignment = HorizontalAlignment.Left,
+                CornerRadius = new CornerRadius(UiKit.ControlRadius),
+                Padding = new Thickness(9, 3.5, 9, 3.5),
+                Margin = new Thickness(0, 0, 8, 0),
+                VerticalAlignment = VerticalAlignment.Center,
                 Visibility = Visibility.Collapsed,
                 Child = _replyReceiptText
             };
-            replyStack.Children.Add(_replyReceiptBadge);
+            rightStatusStack.Children.Add(_replyReceiptBadge);
 
-            _replyAppliedText = UiKit.Body("", 12.5, UiKit.AccentBrush);
+            _replyAppliedText = UiKit.Body("", 11.8, UiKit.AccentBrush);
             _replyAppliedText.FontWeight = FontWeights.SemiBold;
-            _replyAppliedText.Margin = new Thickness(0, 6, 0, 0);
+            _replyAppliedText.VerticalAlignment = VerticalAlignment.Center;
+            _replyAppliedText.Margin = new Thickness(0, 0, 8, 0);
             _replyAppliedText.Visibility = Visibility.Collapsed;
-            replyStack.Children.Add(_replyAppliedText);
+            rightStatusStack.Children.Add(_replyAppliedText);
 
-            var replyCard = UiKit.Card(replyStack, 22);
-            replyCard.Margin = new Thickness(0, 18, 0, 0);
-            root.Children.Add(replyCard);
+            _replyStatusText = UiKit.Body(detail.ReplyMessage, 12, UiKit.MutedBrush);
+            _replyStatusText.VerticalAlignment = VerticalAlignment.Center;
+            rightStatusStack.Children.Add(_replyStatusText);
+
+            footer.Children.Add(rightStatusStack);
+            dockStack.Children.Add(footer);
+
+            var composerDock = new Border
+            {
+                Background = UiKit.GlassHeaderBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(0, 1, 0, 0),
+                Padding = new Thickness(24, 12, 24, 14),
+                SnapsToDevicePixels = true,
+                Child = dockStack
+            };
+            Grid.SetRow(composerDock, 2);
+            mainGrid.Children.Add(composerDock);
         }
 
-        scroll.Content = root;
+        Grid.SetColumn(mainGrid, 0);
+        outerSplit.Children.Add(mainGrid);
+
+        var inspectorDivider = new Border
+        {
+            Background = UiKit.SplitDividerBrush,
+            Margin = new Thickness(0, 14, 0, 14)
+        };
+        Grid.SetColumn(inspectorDivider, 1);
+        outerSplit.Children.Add(inspectorDivider);
+
+        var inspectorScroll = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Padding = new Thickness(16, 16, 18, 22)
+        };
+        _taskDetailInspectorHost = new StackPanel();
+        inspectorScroll.Content = _taskDetailInspectorHost;
+        Grid.SetColumn(inspectorScroll, 2);
+        outerSplit.Children.Add(inspectorScroll);
+
         RefreshMountedTaskDetail();
-        return scroll;
+        return outerSplit;
     }
 
     private void UpdateReplyComposerControls(TaskDetailController detail)
     {
-        if (_replyHeadingText is not null)
-            _replyHeadingText.Text = detail.ReplyAvailable ? "继续此会话" : "继续任务";
-        if (_replyModelSummaryText is not null)
-            _replyModelSummaryText.Text = detail.ModelSettingsSummary;
+        if (_replyModelCapsuleBtn is not null)
+        {
+            UiKit.SetButtonState(_replyModelCapsuleBtn, detail.ModelSettingsSummary + " ▾", !detail.ReplySending, primary: false);
+        }
         if (_replyStatusText is not null)
-            _replyStatusText.Text = detail.ReplyMessage;
+        {
+            var fallback = detail.ReplyAvailable && string.IsNullOrEmpty(detail.ReplyReceiptTrail) && string.IsNullOrEmpty(detail.ReplyMessage)
+                ? "电脑在线可直达"
+                : detail.ReplyMessage;
+            _replyStatusText.Text = fallback;
+        }
         if (_replyReceiptBadge is not null && _replyReceiptText is not null)
         {
             _replyReceiptText.Text = detail.ReplyReceiptTrail;
@@ -4498,10 +4606,62 @@ public partial class MainWindow : Window
         }
     }
 
-    private string ComputeTaskDetailSignature(MonitorTask task, TaskDetailController detail)
+    private void SyncComposerQuickChips(MonitorTask task, Computer? computer)
+    {
+        if (_replyQuickChipsHost is null || !task.SupportsReply) return;
+        var chips = new List<(string Label, string Prompt)>();
+        var previewItems = DevPreviewPolicy.ItemsFor(task, computer, _controller.IsFresh);
+        foreach (var item in previewItems)
+        {
+            if (!string.IsNullOrEmpty(item.LoopbackFixPrompt))
+                chips.Add(($"开放 :{item.Port} 供手机预览", item.LoopbackFixPrompt!));
+        }
+
+        var sig = string.Join("|", chips.Select(c => c.Label + "=" + c.Prompt));
+        if (sig == _mountedQuickChipsSignature) return;
+        _mountedQuickChipsSignature = sig;
+
+        _replyQuickChipsHost.Children.Clear();
+        if (chips.Count == 0)
+        {
+            _replyQuickChipsHost.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        foreach (var chip in chips)
+        {
+            var captured = chip;
+            var pillBorder = new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(UiKit.ControlRadius),
+                Padding = new Thickness(9, 4, 9, 4),
+                Margin = new Thickness(0, 0, 7, 4),
+                SnapsToDevicePixels = true,
+                Child = new TextBlock
+                {
+                    Text = "✨ " + captured.Label,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 11.8,
+                    Foreground = UiKit.AccentBrush
+                }
+            };
+            var chipBtn = UiKit.BareButton(pillBorder, () => PrefillTaskReplyComposer(captured.Prompt));
+            chipBtn.MouseEnter += (_, _) => { pillBorder.Background = UiKit.GlassCardHoverBrush; pillBorder.BorderBrush = UiKit.AccentBrush; };
+            chipBtn.MouseLeave += (_, _) => { pillBorder.Background = UiKit.GlassTrackBrush; pillBorder.BorderBrush = UiKit.GlassSubtleRimBrush; };
+            _replyQuickChipsHost.Children.Add(chipBtn);
+        }
+        _replyQuickChipsHost.Visibility = Visibility.Visible;
+    }
+
+    private string ComputeTaskDetailSignature(MonitorTask task, TaskDetailController detail, bool showInspector)
     {
         var sb = new System.Text.StringBuilder(256);
         sb.Append(UiKit.IsDark ? 'D' : 'L').Append('|')
+          .Append(showInspector ? 'W' : 'N').Append('|')
+          .Append(_taskInfoAccordionExpanded ? 'E' : 'C').Append('|')
           .Append(_controller.IsFresh ? '1' : '0').Append('|')
           .Append(_controller.Mutating ? '1' : '0').Append('|')
           .Append(_controller.SyncOutput ? '1' : '0').Append('|')
@@ -4526,6 +4686,7 @@ public partial class MainWindow : Window
           .Append(detail.Result?.Available == true ? '1' : '0').Append('|')
           .Append(detail.Result?.ResultId).Append('|')
           .Append(detail.Result?.Reason).Append('|')
+          .Append(detail.SettingsReceiptText).Append('|')
           .Append(detail.Controls is not null ? '1' : '0').Append('|')
           .Append(detail.Controls?.Reason).Append('|')
           .Append(detail.DecisionSending ? '1' : '0').Append('|')
@@ -4569,76 +4730,104 @@ public partial class MainWindow : Window
         var liveTask = _controller.Tasks.FirstOrDefault(t => t.Id == _selectedTaskId);
         if (liveTask is null) return;
 
-        UpdateReplyComposerControls(_taskDetail);
+        var plan = _lastMainPlan ?? CurrentMainShellPlan();
+        var showInspector = plan.TaskDetailInspector;
+        if (_taskDetailInspectorDivCol is not null)
+            _taskDetailInspectorDivCol.Width = new GridLength(showInspector ? 1 : 0);
+        if (_taskDetailInspectorCol is not null)
+            _taskDetailInspectorCol.Width = new GridLength(showInspector ? 268 : 0);
 
-        var nextSignature = ComputeTaskDetailSignature(liveTask, _taskDetail);
+        var taskComputer = _controller.Devices.FirstOrDefault(d => d.Id == liveTask.DeviceId);
+        UpdateReplyComposerControls(_taskDetail);
+        SyncComposerQuickChips(liveTask, taskComputer);
+
+        var nextSignature = ComputeTaskDetailSignature(liveTask, _taskDetail, showInspector);
         if (nextSignature == _mountedTaskCardsSignature && _taskDetailCardsHost.Children.Count > 0)
             return;
         _mountedTaskCardsSignature = nextSignature;
 
-        _taskDetailCardsHost.Children.Clear();
-
-        // Identity + Actions row
-        var topIdentityRow = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
-        var idBadge = UiKit.TaskIdentityBadge(liveTask.Tool, liveTask.DeviceName ?? "电脑", 18);
-        var idBtn = UiKit.BareButton(idBadge, () =>
+        // 1. Pinned Compact Hero Header
+        if (_taskDetailHeaderHost is not null)
         {
-            if (!string.IsNullOrEmpty(liveTask.DeviceId))
+            _taskDetailHeaderHost.Children.Clear();
+            var topIdentityRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var leftMeta = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            var idBadge = UiKit.TaskIdentityBadge(liveTask.Tool, liveTask.DeviceName ?? "电脑", 16);
+            var idBtn = UiKit.BareButton(idBadge, () =>
             {
-                _selectedDeviceId = liveTask.DeviceId;
-                _page = NavPage.Devices;
-                RenderAll(forceShell: true);
+                if (!string.IsNullOrEmpty(liveTask.DeviceId))
+                {
+                    _selectedDeviceId = liveTask.DeviceId;
+                    _page = NavPage.Devices;
+                    RenderAll(forceShell: true);
+                }
+            });
+            idBtn.ToolTip = "查看所属电脑详情";
+            leftMeta.Children.Add(idBtn);
+
+            if (!string.IsNullOrWhiteSpace(liveTask.Project))
+            {
+                var shortProj = Path.GetFileName(liveTask.Project!.TrimEnd('/', '\\'));
+                if (string.IsNullOrWhiteSpace(shortProj)) shortProj = liveTask.Project.Trim();
+                leftMeta.Children.Add(new TextBlock
+                {
+                    Text = " · " + shortProj,
+                    ToolTip = liveTask.Project,
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 12,
+                    Foreground = UiKit.MutedBrush,
+                    VerticalAlignment = VerticalAlignment.Center
+                });
             }
-        });
-        idBtn.ToolTip = "查看所属电脑详情";
-        topIdentityRow.Children.Add(idBtn);
+            topIdentityRow.Children.Add(leftMeta);
 
-        var archiveBtn = UiKit.SecondaryButton(
-            liveTask.Archived ? "取消归档" : "归档任务",
-            async () => await _controller.ArchiveTaskAsync(liveTask),
-            !_controller.Mutating,
-            glyph: liveTask.Archived ? "restore" : "archive");
-        DockPanel.SetDock(archiveBtn, Dock.Right);
-        archiveBtn.HorizontalAlignment = HorizontalAlignment.Right;
-        topIdentityRow.Children.Add(archiveBtn);
-        _taskDetailCardsHost.Children.Add(topIdentityRow);
-
-        // Large MiSans Task Title
-        var titleBlock = UiKit.Heading(liveTask.Title, 25);
-        titleBlock.Margin = new Thickness(0, 2, 0, 8);
-        _taskDetailCardsHost.Children.Add(titleBlock);
-
-        // Status + Project Row
-        var statusRow = BuildStatusDotRow(liveTask);
-        if (!string.IsNullOrWhiteSpace(liveTask.Project))
-        {
-            statusRow.Children.Add(new TextBlock
+            if (!showInspector)
             {
-                Text = " · 目录：" + liveTask.Project,
-                FontFamily = UiKit.AppFont,
-                FontSize = 12,
-                Foreground = UiKit.MutedBrush,
-                VerticalAlignment = VerticalAlignment.Center
+                var archiveBtn = UiKit.SecondaryButton(
+                    liveTask.Archived ? "取消归档" : "归档",
+                    async () => await _controller.ArchiveTaskAsync(liveTask),
+                    !_controller.Mutating,
+                    glyph: liveTask.Archived ? "restore" : "archive");
+                DockPanel.SetDock(archiveBtn, Dock.Right);
+                archiveBtn.HorizontalAlignment = HorizontalAlignment.Right;
+                topIdentityRow.Children.Add(archiveBtn);
+            }
+            _taskDetailHeaderHost.Children.Add(topIdentityRow);
+
+            var titleBlock = UiKit.Heading(liveTask.Title, 21);
+            titleBlock.Margin = new Thickness(0, 0, 0, 6);
+            _taskDetailHeaderHost.Children.Add(titleBlock);
+
+            var statusRow = BuildStatusDotRow(liveTask);
+            statusRow.Margin = new Thickness(0, 0, 0, 12);
+            _taskDetailHeaderHost.Children.Add(statusRow);
+
+            _taskDetailHeaderHost.Children.Add(new Border
+            {
+                Height = 1,
+                Background = UiKit.GlassSubtleRimBrush,
+                Opacity = 0.75
             });
         }
-        statusRow.Margin = new Thickness(0, 0, 0, 14);
-        _taskDetailCardsHost.Children.Add(statusRow);
 
-        if (!string.IsNullOrWhiteSpace(liveTask.Preview))
+        // 2. Main Scrollable Canvas
+        _taskDetailCardsHost.Children.Clear();
+
+        if (!string.IsNullOrWhiteSpace(liveTask.Preview) && liveTask.EffectiveStatus is "running" or "waiting" or "error")
         {
-            var prev = UiKit.Body(liveTask.Preview!, 13.5, UiKit.MutedBrush);
-            prev.Margin = new Thickness(0, 0, 0, 16);
+            var prev = UiKit.Body(liveTask.Preview!, 13, UiKit.MutedBrush);
+            prev.Margin = new Thickness(0, 0, 0, 14);
             _taskDetailCardsHost.Children.Add(prev);
         }
 
-        // Top-placed Pending Attention Requests (Structured Questions / Single-Turn Approvals — Parity with Mobile & macOS)
+        // Dynamic Priority Slot: Pending Approvals / Questions (0 height when idle)
         if (_taskDetail.Controls?.Pending is { Count: > 0 } pendings)
         {
             foreach (var req in pendings.Where(p => p.State is "pending" or "submitted" or "forwarded" or "acknowledged"
                                                     || p.Outcome == "handled_on_desktop"))
             {
                 var attCard = BuildAttentionCard(req, _taskDetail);
-                attCard.Margin = new Thickness(0, 0, 0, 16);
+                attCard.Margin = new Thickness(0, 0, 0, 14);
                 _taskDetailCardsHost.Children.Add(attCard);
             }
         }
@@ -4647,7 +4836,7 @@ public partial class MainWindow : Window
             var waitStack = new StackPanel();
             var waitHead = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
             var headTitle = liveTask.EffectivePendingKind == "question" ? "等待回答" : "待你处理";
-            waitHead.Children.Add(UiKit.Heading(headTitle, 16.5));
+            waitHead.Children.Add(UiKit.Heading(headTitle, 16));
             var refreshWaitBtn = UiKit.IconButton("refresh", "刷新提问和批准状态", async () => await _taskDetail.RefreshControlsAsync(), enabled: !_taskDetail.DecisionSending);
             DockPanel.SetDock(refreshWaitBtn, Dock.Right);
             refreshWaitBtn.HorizontalAlignment = HorizontalAlignment.Right;
@@ -4667,78 +4856,47 @@ public partial class MainWindow : Window
                 waitStack.Children.Add(fb);
             }
 
-            var waitCard = UiKit.Card(waitStack, 18, UiKit.CardRadius);
+            var waitCard = UiKit.Card(waitStack, 16, UiKit.CardRadius);
             waitCard.BorderBrush = UiKit.WarningBrush;
-            waitCard.Margin = new Thickness(0, 0, 0, 16);
+            waitCard.Margin = new Thickness(0, 0, 0, 14);
             _taskDetailCardsHost.Children.Add(waitCard);
         }
 
-        // Error Analysis Card (Parity with Android NativeErrorPresentation)
+        // Dynamic Priority Slot: Error Analysis
         if (liveTask.ErrorAnalysis is { } err && !string.IsNullOrWhiteSpace(err.Summary))
         {
             var errStack = new StackPanel();
-            errStack.Children.Add(UiKit.Heading("错误报告摘要", 15.5));
-            var sum = UiKit.Body(err.Summary!, 13.5, UiKit.WarningBrush);
-            sum.Margin = new Thickness(0, 6, 0, 0);
+            errStack.Children.Add(UiKit.Heading("错误报告摘要", 15));
+            var sum = UiKit.Body(err.Summary!, 13, UiKit.WarningBrush);
+            sum.Margin = new Thickness(0, 5, 0, 0);
             errStack.Children.Add(sum);
             if (!string.IsNullOrWhiteSpace(err.Suggestion))
             {
-                var sug = UiKit.Body("建议核查：" + err.Suggestion!, 13, UiKit.MutedBrush);
-                sug.Margin = new Thickness(0, 6, 0, 0);
+                var sug = UiKit.Body("建议核查：" + err.Suggestion!, 12.5, UiKit.MutedBrush);
+                sug.Margin = new Thickness(0, 5, 0, 0);
                 errStack.Children.Add(sug);
             }
-            var errCard = UiKit.Card(errStack, 18, UiKit.CardRadius);
+            var errCard = UiKit.Card(errStack, 16, UiKit.CardRadius);
             errCard.BorderBrush = UiKit.WarningBrush;
-            errCard.Margin = new Thickness(0, 0, 0, 16);
+            errCard.Margin = new Thickness(0, 0, 0, 14);
             _taskDetailCardsHost.Children.Add(errCard);
         }
 
-        // Local Dev Server One-Tap Preview Card (Parity with Android NativeDevPreviewPolicy)
-        var taskComputer = _controller.Devices.FirstOrDefault(d => d.Id == liveTask.DeviceId);
-        var previewCard = BuildDevPreviewCard(
-            liveTask,
-            taskComputer,
-            liveTask.SupportsReply
-                ? prompt =>
-                {
-                    if (_replyInputBox is not null)
-                    {
-                        _replyInputBox.Text = prompt;
-                        _replyInputBox.Focus();
-                        _replyInputBox.CaretIndex = _replyInputBox.Text.Length;
-                    }
-                }
-                : null);
-        if (previewCard is not null)
+        // Narrow Mode: Compact Dev Preview Card right above Final Result
+        if (!showInspector)
         {
-            previewCard.Margin = new Thickness(0, 0, 0, 16);
-            _taskDetailCardsHost.Children.Add(previewCard);
+            var narrowPreviewCard = BuildDevPreviewCard(
+                liveTask,
+                taskComputer,
+                liveTask.SupportsReply ? PrefillTaskReplyComposer : null);
+            if (narrowPreviewCard is not null)
+            {
+                narrowPreviewCard.Margin = new Thickness(0, 0, 0, 14);
+                _taskDetailCardsHost.Children.Add(narrowPreviewCard);
+            }
         }
 
-        // Conversation Token Card
-        if (liveTask.Usage?.TotalTokens is { } totalTokens)
-        {
-            var tokRow = new DockPanel();
-            var left = new StackPanel();
-            left.Children.Add(UiKit.Body("本次对话已记录", 12, UiKit.MutedBrush));
-            var valText = UsageFormatting.CompactTokens(totalTokens) + " Token" + (liveTask.Usage.Coverage == "complete" ? "" : " · 部分记录");
-            var val = UiKit.Heading(valText, 19);
-            val.Margin = new Thickness(0, 4, 0, 0);
-            left.Children.Add(val);
-            tokRow.Children.Add(left);
-
-            var detailBtn = UiKit.SecondaryButton("查看明细", () => Dialogs.ShowTaskTokenBreakdown(this, liveTask.Usage));
-            DockPanel.SetDock(detailBtn, Dock.Right);
-            detailBtn.VerticalAlignment = VerticalAlignment.Center;
-            detailBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            tokRow.Children.Add(detailBtn);
-
-            var tokCard = UiKit.Card(tokRow, 18, UiKit.CardRadius);
-            tokCard.Margin = new Thickness(0, 0, 0, 16);
-            _taskDetailCardsHost.Children.Add(tokCard);
-        }
-
-        // Final Result Card
+        // Primary Reading Card: Final Result & Deliverables (plus clean space below for upcoming Diff #2)
         var resStack = new StackPanel();
         var resHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
         var reloadResBtn = UiKit.IconButton("refresh", "刷新最终结果", async () => await _taskDetail.LoadResultAsync(true), enabled: !_taskDetail.ResultLoading);
@@ -4747,7 +4905,7 @@ public partial class MainWindow : Window
         resHeader.Children.Add(reloadResBtn);
 
         var resLeftTitle = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        resLeftTitle.Children.Add(UiKit.Heading("最终结果", 18));
+        resLeftTitle.Children.Add(UiKit.Heading("最终结果", 17.5));
         if (!string.IsNullOrEmpty(_taskDetail.Result?.CompletedAt))
         {
             resLeftTitle.Children.Add(new TextBlock
@@ -4776,7 +4934,7 @@ public partial class MainWindow : Window
                 BorderThickness = new Thickness(0),
                 Padding = new Thickness(12, 10, 12, 10),
                 TextWrapping = TextWrapping.Wrap,
-                MaxHeight = 360,
+                MaxHeight = 420,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto
             };
             resStack.Children.Add(new Border
@@ -4797,7 +4955,7 @@ public partial class MainWindow : Window
                 resStack.Children.Add(trunc);
             }
 
-            var actionRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
+            var actionRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
             Button? copyBtn = null;
             copyBtn = UiKit.SecondaryButton("复制", async () =>
             {
@@ -4828,15 +4986,15 @@ public partial class MainWindow : Window
 
             if (resDto.Files is { Count: > 0 } files)
             {
-                var filesLabel = UiKit.Body("配套文件（SHA-256 完整性校验下载）", 12.5, UiKit.MutedBrush);
-                filesLabel.Margin = new Thickness(0, 16, 0, 8);
+                var filesLabel = UiKit.Body("配套交付文件（SHA-256 完整性校验下载）", 12.5, UiKit.MutedBrush);
+                filesLabel.Margin = new Thickness(0, 14, 0, 8);
                 resStack.Children.Add(filesLabel);
 
                 foreach (var file in files)
                 {
                     var capturedFile = file;
                     var fRow = new DockPanel();
-                    fRow.Children.Add(UiKit.Body(file.Name, 13.5));
+                    fRow.Children.Add(UiKit.Body(file.Name, 13));
                     var dlBtn = UiKit.SecondaryButton(
                         file.Ready == false ? "同步中" : $"下载 ({file.Size / 1024.0:0.#} KB)",
                         async () =>
@@ -4855,11 +5013,11 @@ public partial class MainWindow : Window
 
                     resStack.Children.Add(new Border
                     {
-                        Background = UiKit.BgBrush,
-                        BorderBrush = UiKit.LineBrush,
+                        Background = UiKit.GlassTrackBrush,
+                        BorderBrush = UiKit.GlassSubtleRimBrush,
                         BorderThickness = new Thickness(1),
                         CornerRadius = new CornerRadius(UiKit.PodRadius),
-                        Padding = new Thickness(12, 9, 12, 9),
+                        Padding = new Thickness(12, 8.5, 12, 8.5),
                         Margin = new Thickness(0, 0, 0, 6),
                         Child = fRow
                     });
@@ -4873,12 +5031,255 @@ public partial class MainWindow : Window
                 : (_taskDetail.Result?.Reason ?? (_taskDetail.ResultLoading ? "正在读取…" : "还没有最终结果"));
             resStack.Children.Add(UiKit.Body(reason, 13.5, UiKit.MutedBrush));
         }
-        _taskDetailCardsHost.Children.Add(UiKit.Card(resStack, 22));
+        _taskDetailCardsHost.Children.Add(UiKit.Card(resStack, 20));
 
-        if (_replyModelSummaryText is not null)
-            _replyModelSummaryText.Text = _taskDetail.ModelSettingsSummary;
-        if (_replyStatusText is not null)
-            _replyStatusText.Text = _taskDetail.ReplyMessage;
+        // Narrow Mode: Default-Collapsed「会话详情」Accordion Card (A1)
+        if (!showInspector)
+        {
+            var accCol = new StackPanel();
+            var accHeader = new DockPanel { LastChildFill = true };
+            var chev = new MonitorIcon(_taskInfoAccordionExpanded ? "chevron-up" : "chevron-down", UiKit.MutedBrush, 16)
+            {
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(10, 0, 0, 0)
+            };
+            DockPanel.SetDock(chev, Dock.Right);
+            accHeader.Children.Add(chev);
+
+            var summaryParts = new List<string>();
+            if (liveTask.Usage?.TotalTokens is { } tTok)
+                summaryParts.Add(UsageFormatting.CompactTokens(tTok) + " Token");
+            if (!string.IsNullOrWhiteSpace(liveTask.Project))
+            {
+                var sp = Path.GetFileName(liveTask.Project!.TrimEnd('/', '\\'));
+                summaryParts.Add("目录 " + (string.IsNullOrWhiteSpace(sp) ? liveTask.Project.Trim() : sp));
+            }
+            var accTitleStack = new StackPanel();
+            accTitleStack.Children.Add(UiKit.Heading("会话详情", 14.5));
+            accTitleStack.Children.Add(UiKit.Body(
+                summaryParts.Count > 0 ? string.Join(" · ", summaryParts) : "查看对话 Token 用量、项目目录与所属电脑",
+                12, UiKit.MutedBrush));
+            accHeader.Children.Add(accTitleStack);
+
+            var accToggleBtn = UiKit.BareButton(accHeader, () =>
+            {
+                _taskInfoAccordionExpanded = !_taskInfoAccordionExpanded;
+                RefreshMountedTaskDetail();
+            });
+            accToggleBtn.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            accCol.Children.Add(accToggleBtn);
+
+            if (_taskInfoAccordionExpanded)
+            {
+                accCol.Children.Add(new Border
+                {
+                    Height = 1,
+                    Background = UiKit.GlassSubtleRimBrush,
+                    Margin = new Thickness(0, 12, 0, 12)
+                });
+                accCol.Children.Add(BuildTaskEnvironmentMetaContent(liveTask, taskComputer, includeArchiveButton: false));
+            }
+
+            var accCard = UiKit.Card(accCol, 16, UiKit.CardRadius);
+            accCard.Margin = new Thickness(0, 14, 0, 0);
+            _taskDetailCardsHost.Children.Add(accCard);
+        }
+
+        // 3. Wide Mode: Right Environment Inspector Rail (A3)
+        if (_taskDetailInspectorHost is not null)
+        {
+            _taskDetailInspectorHost.Children.Clear();
+            if (showInspector)
+            {
+                var railTitle = UiKit.Heading("环境与会话", 15);
+                railTitle.Margin = new Thickness(2, 2, 0, 12);
+                _taskDetailInspectorHost.Children.Add(railTitle);
+
+                // Inspector Section 1: Dev Server Previews
+                var inspectorPreviews = DevPreviewPolicy.ItemsFor(liveTask, taskComputer, _controller.IsFresh);
+                var prevStack = new StackPanel();
+                var prevHead = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+                prevHead.Children.Add(new MonitorIcon("globe", UiKit.AccentBrush, 15.5) { Margin = new Thickness(0, 0, 6, 0) });
+                prevHead.Children.Add(UiKit.Heading("本地开发预览", 14));
+                prevStack.Children.Add(prevHead);
+
+                if (inspectorPreviews.Count == 0 || taskComputer is null)
+                {
+                    prevStack.Children.Add(UiKit.Body(
+                        _controller.IsFresh && taskComputer?.Online == true
+                            ? "当前未检测到活跃的前端或 Web 监听端口。"
+                            : "电脑在线并启动本地开发服务后，可在此一键打开预览。",
+                        12, UiKit.MutedBrush));
+                }
+                else
+                {
+                    foreach (var item in inspectorPreviews)
+                    {
+                        var captured = item;
+                        var pCol = new StackPanel();
+                        pCol.Children.Add(new TextBlock
+                        {
+                            Text = $"端口 :{captured.Port} ({captured.Process})",
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 12.8,
+                            FontWeight = FontWeights.SemiBold,
+                            Foreground = UiKit.TextBrush
+                        });
+                        pCol.Children.Add(new TextBlock
+                        {
+                            Text = captured.Subtitle,
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 11.5,
+                            Foreground = captured.OpenUrl is null ? UiKit.WarningBrush : UiKit.MutedBrush,
+                            TextWrapping = TextWrapping.Wrap,
+                            Margin = new Thickness(0, 2, 0, 7)
+                        });
+                        var pBtns = new WrapPanel { Orientation = Orientation.Horizontal };
+                        if (!string.IsNullOrEmpty(captured.OpenUrl))
+                        {
+                            var openBtn = UiKit.PrimaryButton(captured.ButtonLabel, () =>
+                                MonitorController.OpenDevPreviewUrl(captured.OpenUrl, allowLoopback: taskComputer.Local));
+                            openBtn.Margin = new Thickness(0, 0, 6, 4);
+                            pBtns.Children.Add(openBtn);
+                        }
+                        if (!string.IsNullOrEmpty(captured.ShareUrl) && captured.LocalMachine)
+                        {
+                            var cpBtn = UiKit.SecondaryButton("复制真机链接", () =>
+                            {
+                                try
+                                {
+                                    Clipboard.SetText(captured.ShareUrl!);
+                                    _controller.Notice = $"已复制真机预览地址：{captured.ShareUrl}";
+                                    RenderAll(false);
+                                }
+                                catch { }
+                            });
+                            cpBtn.Margin = new Thickness(0, 0, 6, 4);
+                            pBtns.Children.Add(cpBtn);
+                        }
+                        if (!string.IsNullOrEmpty(captured.LoopbackFixPrompt))
+                        {
+                            var fixBtn = UiKit.SecondaryButton(liveTask.SupportsReply ? "改为 0.0.0.0" : "复制开放指令", () =>
+                            {
+                                if (liveTask.SupportsReply) PrefillTaskReplyComposer(captured.LoopbackFixPrompt!);
+                                else
+                                {
+                                    try { Clipboard.SetText(captured.LoopbackFixPrompt!); } catch { }
+                                }
+                            });
+                            fixBtn.Margin = new Thickness(0, 0, 0, 4);
+                            pBtns.Children.Add(fixBtn);
+                        }
+                        pCol.Children.Add(pBtns);
+                        prevStack.Children.Add(new Border
+                        {
+                            Background = UiKit.GlassTrackBrush,
+                            BorderBrush = UiKit.GlassSubtleRimBrush,
+                            BorderThickness = new Thickness(1),
+                            CornerRadius = new CornerRadius(UiKit.PodRadius),
+                            Padding = new Thickness(10, 8, 10, 6),
+                            Margin = new Thickness(0, 0, 0, 6),
+                            Child = pCol
+                        });
+                    }
+                }
+                var inspectorPrevCard = UiKit.Card(prevStack, 14, UiKit.CardRadius);
+                inspectorPrevCard.Margin = new Thickness(0, 0, 0, 12);
+                _taskDetailInspectorHost.Children.Add(inspectorPrevCard);
+
+                // Inspector Section 2 & 3: Usage + Session Environment & Actions
+                var metaCard = UiKit.Card(BuildTaskEnvironmentMetaContent(liveTask, taskComputer, includeArchiveButton: true), 14, UiKit.CardRadius);
+                _taskDetailInspectorHost.Children.Add(metaCard);
+            }
+        }
+    }
+
+    private UIElement BuildTaskEnvironmentMetaContent(MonitorTask liveTask, Computer? computer, bool includeArchiveButton)
+    {
+        var stack = new StackPanel();
+
+        // Conversation Token Block
+        stack.Children.Add(UiKit.Body("本次对话用量", 11.8, UiKit.MutedBrush));
+        if (liveTask.Usage?.TotalTokens is { } totalTokens)
+        {
+            var tokText = UsageFormatting.CompactTokens(totalTokens) + " Token" + (liveTask.Usage.Coverage == "complete" ? "" : " · 部分记录");
+            var tokRow = new DockPanel { Margin = new Thickness(0, 3, 0, 10) };
+            var detailBtn = UiKit.SecondaryButton("明细", () => Dialogs.ShowTaskTokenBreakdown(this, liveTask.Usage));
+            DockPanel.SetDock(detailBtn, Dock.Right);
+            detailBtn.HorizontalAlignment = HorizontalAlignment.Right;
+            tokRow.Children.Add(detailBtn);
+            var val = UiKit.Heading(tokText, 16);
+            val.VerticalAlignment = VerticalAlignment.Center;
+            tokRow.Children.Add(val);
+            stack.Children.Add(tokRow);
+        }
+        else
+        {
+            var emptyTok = UiKit.Body("暂未提供此对话的本地用量记录", 12.5, UiKit.MutedBrush);
+            emptyTok.Margin = new Thickness(0, 3, 0, 10);
+            stack.Children.Add(emptyTok);
+        }
+
+        stack.Children.Add(new Border
+        {
+            Height = 1,
+            Background = UiKit.GlassSubtleRimBrush,
+            Margin = new Thickness(0, 2, 0, 10)
+        });
+
+        // Environment Facts
+        void AddFact(string key, string value, bool mono = false)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            var row = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+            row.Children.Add(UiKit.Body(key, 11.5, UiKit.MutedBrush));
+            row.Children.Add(new TextBlock
+            {
+                Text = value,
+                FontFamily = mono ? UiKit.MonoFont : UiKit.AppFont,
+                FontSize = 12.5,
+                Foreground = UiKit.TextBrush,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 2, 0, 0)
+            });
+            stack.Children.Add(row);
+        }
+
+        var online = _controller.IsFresh && computer?.Online == true;
+        AddFact("所属电脑", $"{liveTask.DeviceName ?? computer?.Name ?? "电脑"} · {(online ? "在线" : "离线")}");
+        if (!string.IsNullOrWhiteSpace(liveTask.Project))
+            AddFact("项目目录", liveTask.Project!, mono: true);
+
+        var contLabel = MonitorTask.ContinuationTitleFor(liveTask.EffectiveContinuation(_controller.IsFresh, online));
+        if (!string.IsNullOrEmpty(contLabel))
+            AddFact("接续状态", contLabel);
+
+        var actions = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        if (!string.IsNullOrEmpty(liveTask.DeviceId))
+        {
+            var devBtn = UiKit.SecondaryButton("查看电脑", () =>
+            {
+                _selectedDeviceId = liveTask.DeviceId;
+                _page = NavPage.Devices;
+                RenderAll(forceShell: true);
+            }, glyph: "devices");
+            devBtn.Margin = new Thickness(0, 0, 8, 6);
+            actions.Children.Add(devBtn);
+        }
+        if (includeArchiveButton)
+        {
+            var archBtn = UiKit.SecondaryButton(
+                liveTask.Archived ? "取消归档" : "归档任务",
+                async () => await _controller.ArchiveTaskAsync(liveTask),
+                !_controller.Mutating,
+                glyph: liveTask.Archived ? "restore" : "archive");
+            archBtn.Margin = new Thickness(0, 0, 0, 6);
+            actions.Children.Add(archBtn);
+        }
+        if (actions.Children.Count > 0)
+            stack.Children.Add(actions);
+
+        return stack;
     }
 
     private Border BuildAttentionCard(SessionPendingRequestDto req, TaskDetailController detail)

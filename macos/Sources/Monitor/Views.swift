@@ -99,7 +99,7 @@ struct RootView: View {
                     taskList.frame(minWidth: 310, idealWidth: 360, maxWidth: 440)
                     Group {
                         if let id = taskSelection, let task = store.task(id) {
-                            TaskDetailView(task: task, store: store).id(store.tokenFingerprint + id)
+                            TaskDetailView(task: task, store: store, onViewComputer: { page = .devices }).id(store.tokenFingerprint + id)
                         } else {
                             ContentUnavailableView {
                                 Label("选择一个任务", systemImage: "square.stack.3d.up")
@@ -404,18 +404,46 @@ private struct LoginView: View {
 private struct TaskDetailView: View {
     let task: MonitorTask
     @ObservedObject var store: MonitorStore
+    var onViewComputer: (() -> Void)? = nil
     @StateObject private var model: TaskDetailModel
     @State private var showingModelSettings = false
     @State private var showingTaskUsage = false
-    init(task: MonitorTask, store: MonitorStore) {
+    @State private var sessionInfoExpanded = false
+
+    init(task: MonitorTask, store: MonitorStore, onViewComputer: (() -> Void)? = nil) {
         self.task = task
         self.store = store
+        self.onViewComputer = onViewComputer
         _model = StateObject(wrappedValue: TaskDetailModel(task: task, store: store))
     }
+
     private var liveTask: MonitorTask { store.task(task.id) ?? task }
+
     private func exactOrMissing(_ value: Int64?) -> String {
         value.map { UsageFormat.exact($0) } ?? "未提供"
     }
+
+    private func shortProjectName(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        let trimmed = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/\\"))
+        if trimmed.isEmpty { return raw }
+        let parts = trimmed.split(whereSeparator: { $0 == "/" || $0 == "\\" })
+        return parts.last.map(String.init) ?? trimmed
+    }
+
+    private var accordionSummary: String {
+        var parts: [String] = []
+        if let total = liveTask.usage?.totalTokens {
+            parts.append("\(UsageFormat.compact(total)) Token")
+        }
+        if let shortDir = shortProjectName(liveTask.project) {
+            parts.append("目录 \(shortDir)")
+        } else if let devName = liveTask.deviceName, !devName.isEmpty {
+            parts.append(devName)
+        }
+        return parts.isEmpty ? "展开查看用量与目录" : parts.joined(separator: " · ")
+    }
+
     private func taskUsageHelp(_ usage: TaskUsageSummary?) -> String {
         guard let usage else { return "这台电脑暂未提供此对话的用量记录。\n未提供不代表没有使用。" }
         var lines = [
@@ -430,114 +458,410 @@ private struct TaskDetailView: View {
         }
         return lines.joined(separator: "\n") + "\n\n这是已采集到的对话记录，可能不是完整历史。\n缓存相关分类依工具定义，总量由采集端去重计算，不把分类重复相加。"
     }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack(alignment: .top, spacing: 15) {
-                    BrandIcon(tool: liveTask.tool, size: 42)
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(liveTask.title).font(.custom("MiSans-Regular", size: 25)).fontWeight(.semibold).textSelection(.enabled)
-                        HStack { Text(liveTask.deviceName ?? "电脑"); Text("·"); StatusBadge(task: liveTask, fresh: store.fresh) }.foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-                if let preview = liveTask.preview, !preview.isEmpty { Text(preview).foregroundStyle(.secondary).lineLimit(3) }
-                if liveTask.supportsReply {
-                    TaskAttentionSection(model: model, waiting: liveTask.effectiveStatus == "waiting")
-                }
-                let previewItems = DevPreviewPolicy.items(for: liveTask, computer: store.device(liveTask.deviceId), fresh: store.fresh)
-                if !previewItems.isEmpty, let owningComputer = store.device(liveTask.deviceId) {
-                    DevPreviewCardView(
-                        items: previewItems,
-                        computer: owningComputer,
-                        matchedTask: true,
-                        store: store,
-                        onPrefillPrompt: liveTask.supportsReply ? { prompt in model.draft = prompt } : nil
-                    )
-                }
-                if let usage = liveTask.usage, let total = usage.totalTokens {
-                    GlassCard {
-                        HStack(spacing: 14) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("本次对话已记录")
-                                    .font(.custom("MiSans-Regular", size: 12.5))
-                                    .foregroundStyle(.secondary)
-                                Text(UsageFormat.compact(total) + " Token" + (usage.coverage == "complete" ? "" : " · 部分记录"))
-                                    .font(.custom("MiSans-Regular", size: 19))
-                                    .fontWeight(.semibold)
-                                    .monospacedDigit()
+        let owningComputer = store.device(liveTask.deviceId)
+        let previewItems = DevPreviewPolicy.items(for: liveTask, computer: owningComputer, fresh: store.fresh)
+
+        GeometryReader { geo in
+            let showInspector = geo.size.width >= 620
+            HStack(alignment: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    compactTaskHeader
+                    Divider()
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            if liveTask.supportsReply {
+                                TaskAttentionSection(model: model, waiting: liveTask.effectiveStatus == "waiting")
                             }
-                            Spacer()
-                            Button("查看明细") { showingTaskUsage = true }
-                                .controlSize(.regular)
+                            if !showInspector, !previewItems.isEmpty, let owningComputer {
+                                DevPreviewCardView(
+                                    items: previewItems,
+                                    computer: owningComputer,
+                                    matchedTask: true,
+                                    store: store,
+                                    onPrefillPrompt: liveTask.supportsReply ? { prompt in model.draft = prompt } : nil
+                                )
+                            }
+                            finalResultCard
+                            // Reserved clean slot directly below Final Result for upcoming Feature #2 (交付代码 Diff 速览)
+                            if !showInspector {
+                                sessionDetailsAccordionCard(owningComputer: owningComputer)
+                            }
                         }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 18)
+                        .frame(maxWidth: 860, alignment: .leading)
+                    }
+                    if liveTask.supportsReply {
+                        composerBar(previewItems: previewItems)
                     }
                 }
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 18) {
-                        HStack {
-                            Text("最终结果").font(.custom("MiSans-Regular", size: 18)).fontWeight(.semibold)
-                            Spacer()
-                            if model.loading { ProgressView().controlSize(.small) }
-                            Button { Task { await model.loadResult(force: true) } } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("更新最终结果").disabled(model.loading || !store.syncOutput)
-                        }
-                        if store.syncOutput, let result = model.result, result.available, let text = result.text {
-                            if !model.resultError.isEmpty { Label(model.resultError, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary) }
-                            else if model.resultIsStale { Text("正在更新，显示上次结果").foregroundStyle(.secondary) }
-                            Text(text).textSelection(.enabled).lineSpacing(5).frame(maxWidth: .infinity, alignment: .leading)
-                            if result.truncated == true { Text("内容较长，完整结果请在电脑查看").foregroundStyle(.secondary) }
-                            HStack {
-                                Button("复制", systemImage: "doc.on.doc") { model.copyResult() }
-                                Button("保存 TXT", systemImage: "arrow.down.document") { Task { await model.saveTXT() } }.disabled(model.downloading || !model.canSaveTXT)
-                            }.controlSize(.large)
-                            if let files = result.files, !files.isEmpty {
-                                Divider()
-                                ForEach(files) { file in
-                                    Button { Task { await model.saveFile(file) } } label: {
-                                        HStack { Image(systemName: "doc"); Text(file.name).lineLimit(2); Spacer(); Text(file.ready == false ? "同步中" : ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file)).foregroundStyle(.secondary); Image(systemName: "arrow.down") }
-                                    }.buttonStyle(.plain).padding(.vertical, 5).disabled(file.ready == false || model.downloading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if showInspector {
+                    Divider()
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            if !previewItems.isEmpty, let owningComputer {
+                                inspectorCard(title: "本地开发预览", symbol: "globe") {
+                                    DevPreviewRowsView(
+                                        items: previewItems,
+                                        computer: owningComputer,
+                                        store: store,
+                                        onPrefillPrompt: liveTask.supportsReply ? { prompt in model.draft = prompt } : nil
+                                    )
                                 }
                             }
-                        } else { Text(model.resultError.isEmpty ? model.result?.reason ?? (model.loading ? "正在读取…" : "还没有最终结果") : model.resultError).foregroundStyle(.secondary) }
-                    }
-                }
-                if task.supportsReply {
-                    GlassCard {
-                        VStack(alignment: .leading, spacing: 15) {
-                            HStack(spacing: 12) {
-                                Text("继续任务").font(.custom("MiSans-Regular", size: 18)).fontWeight(.semibold)
-                                Spacer()
-                                Text(model.replySettingsSummary)
-                                    .font(.custom("MiSans-Regular", size: 12))
-                                    .foregroundStyle(model.canSendReplySelection ? Color.secondary : Color.orange)
-                                    .lineLimit(1)
-                                Button("模型设置", systemImage: "slider.horizontal.3") {
-                                    showingModelSettings = true
-                                }
-                                .controlSize(.regular)
+                            inspectorCard(title: "会话环境与用量", symbol: "cpu") {
+                                environmentMetaContent(owningComputer: owningComputer)
                             }
-                            TextEditor(text: $model.draft).scrollContentBackground(.hidden).frame(minHeight: 90, maxHeight: 180).disabled(model.unresolved || model.sending)
-                                .overlay(alignment: .topLeading) { if model.draft.isEmpty { Text("告诉它下一步做什么…").foregroundStyle(.tertiary).padding(.top, 1).padding(.leading, 5).allowsHitTesting(false) } }
-                            if !model.unresolved && !model.canSendReplySelection {
-                                Text("模型选项已变化或过期，请在「模型设置」中重新选择或恢复继承电脑设置")
-                                    .font(.custom("MiSans-Regular", size: 13))
-                                    .foregroundStyle(.orange)
-                            }
-                            if !model.replyMessage.isEmpty { Text(model.replyMessage).foregroundStyle(.secondary) }
-                            HStack { Spacer(); if model.sending { ProgressView().controlSize(.small) }; Button(model.sendTitle) { Task { await model.send() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSend) }
                         }
+                        .padding(16)
                     }
+                    .frame(width: 268)
                 }
-            }.padding(28).frame(maxWidth: 860)
+            }
         }
-        .navigationTitle(task.brand)
-        .toolbar { ToolbarItem { Button(task.archived ? "取消归档" : "归档", systemImage: "archivebox") { Task { await store.archive(task) } }.disabled(store.mutating) } }
+        .navigationTitle(liveTask.brand)
+        .toolbar {
+            ToolbarItem {
+                Button(liveTask.archived ? "取消归档" : "归档", systemImage: "archivebox") {
+                    Task { await store.archive(liveTask) }
+                }
+                .disabled(store.mutating)
+            }
+        }
         .sheet(isPresented: $showingModelSettings) { SessionModelSettingsSheet(model: model) }
         .sheet(isPresented: $showingTaskUsage) { UsageHelpSheet(title: "对话用量", text: taskUsageHelp(liveTask.usage)) }
         .onChange(of: liveTask.effectivePendingKind) { _, nextKind in
             model.observePendingKind(nextKind)
         }
         .task { await model.run() }
+    }
+
+    private var compactTaskHeader: some View {
+        HStack(alignment: .center, spacing: 13) {
+            BrandIcon(tool: liveTask.tool, size: 36)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(liveTask.title)
+                    .font(.custom("MiSans-Regular", size: 19))
+                    .fontWeight(.semibold)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                HStack(spacing: 6) {
+                    Text(liveTask.brand)
+                    Text("·")
+                    Text(liveTask.deviceName ?? "电脑")
+                    if let shortDir = shortProjectName(liveTask.project) {
+                        Text("·")
+                        Text(shortDir).lineLimit(1)
+                    }
+                    Text("·")
+                    StatusBadge(task: liveTask, fresh: store.fresh)
+                }
+                .font(.custom("MiSans-Regular", size: 12.5))
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+    }
+
+    private var finalResultCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    Text("最终结果")
+                        .font(.custom("MiSans-Regular", size: 17))
+                        .fontWeight(.semibold)
+                    Spacer()
+                    if model.loading { ProgressView().controlSize(.small) }
+                    if store.syncOutput, let result = model.result, result.available, result.text != nil {
+                        Button("复制", systemImage: "doc.on.doc") { model.copyResult() }
+                            .controlSize(.small)
+                        Button("保存 TXT", systemImage: "arrow.down.document") { Task { await model.saveTXT() } }
+                            .controlSize(.small)
+                            .disabled(model.downloading || !model.canSaveTXT)
+                    }
+                    Button {
+                        Task { await model.loadResult(force: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .help("更新最终结果")
+                    .disabled(model.loading || !store.syncOutput)
+                }
+
+                if store.syncOutput, let result = model.result, result.available, let text = result.text {
+                    if !model.resultError.isEmpty {
+                        Label(model.resultError, systemImage: "exclamationmark.triangle")
+                            .font(.custom("MiSans-Regular", size: 12.5))
+                            .foregroundStyle(.secondary)
+                    } else if model.resultIsStale {
+                        Text("正在更新，显示上次结果")
+                            .font(.custom("MiSans-Regular", size: 12.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(text)
+                        .textSelection(.enabled)
+                        .lineSpacing(5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if result.truncated == true {
+                        Text("内容较长，完整结果请在电脑查看")
+                            .font(.custom("MiSans-Regular", size: 12.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let files = result.files, !files.isEmpty {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("配套交付文件 (\(files.count))")
+                                .font(.custom("MiSans-Regular", size: 12))
+                                .foregroundStyle(.secondary)
+                            ForEach(files) { file in
+                                Button {
+                                    Task { await model.saveFile(file) }
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "doc")
+                                        Text(file.name).lineLimit(2)
+                                        Spacer()
+                                        Text(file.ready == false ? "同步中" : ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
+                                            .foregroundStyle(.secondary)
+                                        Image(systemName: "arrow.down")
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 4)
+                                .disabled(file.ready == false || model.downloading)
+                            }
+                        }
+                    }
+                } else {
+                    if let preview = liveTask.preview, !preview.isEmpty {
+                        Text(preview)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(4)
+                    }
+                    Text(model.resultError.isEmpty ? model.result?.reason ?? (model.loading ? "正在读取…" : "还没有最终结果") : model.resultError)
+                        .font(.custom("MiSans-Regular", size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func sessionDetailsAccordionCard(owningComputer: Computer?) -> some View {
+        GlassCard {
+            DisclosureGroup(isExpanded: $sessionInfoExpanded) {
+                environmentMetaContent(owningComputer: owningComputer)
+                    .padding(.top, 12)
+            } label: {
+                HStack(spacing: 10) {
+                    Text("会话详情")
+                        .font(.custom("MiSans-Regular", size: 14.5))
+                        .fontWeight(.semibold)
+                    Spacer()
+                    if !sessionInfoExpanded {
+                        Text(accordionSummary)
+                            .font(.custom("MiSans-Regular", size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func inspectorCard<Content: View>(title: String, symbol: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: symbol)
+                .font(.custom("MiSans-Regular", size: 13.5))
+                .fontWeight(.semibold)
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.quaternary, lineWidth: 0.7)
+        }
+    }
+
+    private func environmentMetaContent(owningComputer: Computer?) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let usage = liveTask.usage, let total = usage.totalTokens {
+                HStack(alignment: .center, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("本次对话已记录")
+                            .font(.custom("MiSans-Regular", size: 11.5))
+                            .foregroundStyle(.secondary)
+                        Text(UsageFormat.compact(total) + " Token" + (usage.coverage == "complete" ? "" : " · 部分记录"))
+                            .font(.custom("MiSans-Regular", size: 15))
+                            .fontWeight(.semibold)
+                            .monospacedDigit()
+                    }
+                    Spacer()
+                    Button("查看明细") { showingTaskUsage = true }
+                        .controlSize(.small)
+                }
+            } else {
+                Text("本次对话用量：暂未提供记录")
+                    .font(.custom("MiSans-Regular", size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("来源电脑")
+                        .font(.custom("MiSans-Regular", size: 11.5))
+                        .foregroundStyle(.secondary)
+                    let onlineText = (store.fresh && owningComputer?.online == true) ? "在线" : "状态待更新/离线"
+                    Text("\(liveTask.deviceName ?? owningComputer?.name ?? "电脑") · \(onlineText)")
+                        .font(.custom("MiSans-Regular", size: 12.5))
+                }
+                Spacer()
+                if let onViewComputer {
+                    Button("查看电脑") { onViewComputer() }
+                        .controlSize(.small)
+                }
+            }
+
+            if let project = liveTask.project, !project.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("项目目录")
+                        .font(.custom("MiSans-Regular", size: 11.5))
+                        .foregroundStyle(.secondary)
+                    Text(project)
+                        .font(.custom("MiSans-Regular", size: 12))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HStack {
+                Text(liveTask.supportsReply ? "支持远程继续回复与审批" : "仅可查看状态")
+                    .font(.custom("MiSans-Regular", size: 11.5))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(liveTask.archived ? "取消归档" : "归档任务") {
+                    Task { await store.archive(liveTask) }
+                }
+                .controlSize(.small)
+                .disabled(store.mutating)
+            }
+        }
+    }
+
+    private func composerBar(previewItems: [DevPreviewItem]) -> some View {
+        let loopbackChips = previewItems.filter { $0.loopbackFixPrompt != nil }
+        return VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                // Quick-Action & Suggestion Chips Row (reserved for Feature #5 + live loopback port prompt chip)
+                if !loopbackChips.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(loopbackChips) { item in
+                                if let fixPrompt = item.loopbackFixPrompt {
+                                    Button {
+                                        model.draft = fixPrompt
+                                    } label: {
+                                        Text("✨ 开放 :\(item.port) 供手机预览")
+                                            .font(.custom("MiSans-Regular", size: 11.5))
+                                            .foregroundStyle(Color.accentColor)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 4)
+                                            .background(Color.accentColor.opacity(0.11), in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HStack(alignment: .bottom, spacing: 10) {
+                    TextEditor(text: $model.draft)
+                        .font(.custom("MiSans-Regular", size: 13.5))
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .frame(minHeight: 42, maxHeight: 110)
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .disabled(model.unresolved || model.sending)
+                        .overlay(alignment: .topLeading) {
+                            if model.draft.isEmpty {
+                                Text("继续交代下一步任务…")
+                                    .font(.custom("MiSans-Regular", size: 13.5))
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.top, 7)
+                                    .padding(.leading, 11)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    Button(model.sendTitle) {
+                        Task { await model.send() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(!model.canSend)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        showingModelSettings = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 11))
+                            Text(model.replySettingsSummary)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .font(.custom("MiSans-Regular", size: 12))
+                        .foregroundStyle(model.canSendReplySelection ? Color.primary : Color.orange)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+
+                    if let used = model.recentUsedModelSummary {
+                        Text("本轮：\(used)")
+                            .font(.custom("MiSans-Regular", size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    if model.sending {
+                        ProgressView().controlSize(.small)
+                    }
+                    if !model.unresolved && !model.canSendReplySelection {
+                        Text("模型选项已变化，请重选")
+                            .font(.custom("MiSans-Regular", size: 11.5))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    } else if !model.replyMessage.isEmpty {
+                        Text(model.replyMessage)
+                            .font(.custom("MiSans-Regular", size: 11.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+        }
+        .background(.regularMaterial)
     }
 }
 

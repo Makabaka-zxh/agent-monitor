@@ -318,22 +318,27 @@ public class CoreTests
         Assert.Equal(72.0, narrowMain.SidebarWidth);
         Assert.Equal(284.0, narrowMain.TaskListWidth);
         Assert.False(narrowMain.AccountTwoColumnBento);
+        Assert.False(narrowMain.TaskDetailInspector);
 
         var ultraNarrowMain = ResponsiveLayoutPolicy.PlanMainShell(680);
         Assert.True(ultraNarrowMain.CollapseSidebar);
         Assert.Equal(1, ultraNarrowMain.UsageColumns);
+        Assert.False(ultraNarrowMain.TaskDetailInspector);
 
         var defaultMain = ResponsiveLayoutPolicy.PlanMainShell(1180);
         Assert.False(defaultMain.CollapseSidebar);
         Assert.Equal(208.0, defaultMain.SidebarWidth);
         Assert.Equal(2, defaultMain.UsageColumns);
         Assert.Equal(2, defaultMain.DevicesColumns);
+        Assert.False(defaultMain.TaskDetailInspector);
+        Assert.True(ResponsiveLayoutPolicy.PlanMainShell(1240).TaskDetailInspector);
 
         var wideMain = ResponsiveLayoutPolicy.PlanMainShell(1440);
         Assert.False(wideMain.CollapseSidebar);
         Assert.Equal(3, wideMain.UsageColumns);
         Assert.Equal(2, wideMain.DevicesColumns);
         Assert.True(wideMain.AccountTwoColumnBento);
+        Assert.True(wideMain.TaskDetailInspector);
     }
 
     [Fact]
