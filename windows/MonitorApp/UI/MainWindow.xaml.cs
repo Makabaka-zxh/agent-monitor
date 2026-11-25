@@ -538,13 +538,23 @@ public partial class MainWindow : Window
                 Close();
             }));
 
-            var streamInfo = Application.GetResourceStream(new Uri("pack://application:,,,/Resources/AppIcon.ico"));
-            if (streamInfo?.Stream is { } s)
+            try
             {
-                using (s)
+                var streamInfo = Application.GetResourceStream(new Uri("pack://application:,,,/Resources/AppIcon.ico"));
+                if (streamInfo?.Stream is { } s)
                 {
-                    _trayIconSource = new System.Drawing.Icon(s);
+                    using (s)
+                    {
+                        _trayIconSource = new System.Drawing.Icon(s);
+                    }
                 }
+            }
+            catch { }
+
+            if (_trayIconSource is null && Environment.ProcessPath is { Length: > 0 } procPath)
+            {
+                try { _trayIconSource = System.Drawing.Icon.ExtractAssociatedIcon(procPath); }
+                catch { }
             }
 
             _trayIcon = new System.Windows.Forms.NotifyIcon
@@ -567,7 +577,15 @@ public partial class MainWindow : Window
 
     private void OnQuotaAlertTriggered(string title, string body)
     {
-        try { _trayIcon?.ShowBalloonTip(6000, title, body, System.Windows.Forms.ToolTipIcon.Info); }
+        try
+        {
+            NotificationBanner.Show(title, body, () =>
+            {
+                RestoreMainWindow();
+                if (_compactMode) ToggleCompactMode();
+                SwitchPage(NavPage.Usage);
+            });
+        }
         catch { }
     }
 
@@ -587,6 +605,7 @@ public partial class MainWindow : Window
             Hide();
             return;
         }
+        NotificationBanner.CloseAll();
         SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged;
         _timer.Stop();
         _secondTicker.Stop();
@@ -3716,9 +3735,9 @@ public partial class MainWindow : Window
         split.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         var leftPane = new DockPanel { Background = Brushes.Transparent };
-        var topControls = new StackPanel { Margin = new Thickness(14, 16, 14, 8) };
+        var topControls = new StackPanel { Margin = new Thickness(18, 18, 16, 10) };
 
-        var headerRow = new DockPanel { Margin = new Thickness(2, 0, 2, 11) };
+        var headerRow = new DockPanel { Margin = new Thickness(2, 0, 2, 12) };
         headerRow.Children.Add(UiKit.Heading("工作台", 23));
         var headerRight = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
         _searchMatchSummary = UiKit.Body("", 12, UiKit.MutedBrush);
@@ -3743,7 +3762,7 @@ public partial class MainWindow : Window
         var searchInputLayer = new Grid();
         var searchPlaceholder = new TextBlock
         {
-            Text = "搜索任务、项目或电脑（空格分隔多词）",
+            Text = "搜索任务、项目或电脑",
             FontFamily = UiKit.AppFont,
             FontSize = 13,
             Foreground = UiKit.MutedBrush,
@@ -3755,6 +3774,7 @@ public partial class MainWindow : Window
         var searchBox = new TextBox
         {
             Text = _controller.SearchQuery,
+            ToolTip = "支持空格分隔多关键词组合搜索",
             FontFamily = UiKit.AppFont,
             FontSize = 13.5,
             Foreground = UiKit.TextBrush,
@@ -3812,7 +3832,7 @@ public partial class MainWindow : Window
         DockPanel.SetDock(topControls, Dock.Top);
         leftPane.Children.Add(topControls);
 
-        var listScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(14, 2, 14, 20) };
+        var listScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(18, 4, 16, 22) };
         _taskListHost = new StackPanel();
         listScroll.Content = _taskListHost;
         leftPane.Children.Add(listScroll);
@@ -3820,7 +3840,7 @@ public partial class MainWindow : Window
         Grid.SetColumn(leftPane, 0);
         split.Children.Add(leftPane);
 
-        var divider = new Border { Background = UiKit.SplitDividerBrush, Margin = new Thickness(0, 12, 0, 14) };
+        var divider = new Border { Background = UiKit.SplitDividerBrush, Margin = new Thickness(0, 14, 0, 14) };
         Grid.SetColumn(divider, 1);
         split.Children.Add(divider);
 
@@ -3843,7 +3863,7 @@ public partial class MainWindow : Window
         };
     }
 
-    private StackPanel BuildStatusDotRow(MonitorTask task)
+    private StackPanel BuildStatusDotRow(MonitorTask task, bool includeContinuation = true, bool includeUpdatedTime = true)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var color = TaskStatusColor(task);
@@ -3864,31 +3884,34 @@ public partial class MainWindow : Window
             Foreground = color,
             VerticalAlignment = VerticalAlignment.Center
         });
-        var contMode = task.EffectiveContinuation(_controller.IsFresh, _controller.IsDeviceOnline(task.DeviceId));
-        var contLabel = MonitorTask.ContinuationTitleFor(contMode);
-        if (!string.IsNullOrEmpty(contLabel))
+        if (includeContinuation)
         {
-            var isContinuable = contMode == "continuable";
-            row.Children.Add(new Border
+            var contMode = task.EffectiveContinuation(_controller.IsFresh, _controller.IsDeviceOnline(task.DeviceId));
+            var contLabel = MonitorTask.ContinuationTitleFor(contMode);
+            if (!string.IsNullOrEmpty(contLabel))
             {
-                Background = UiKit.GlassTrackBrush,
-                BorderBrush = isContinuable ? UiKit.AccentBrush : UiKit.GlassSubtleRimBrush,
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(6, 1, 6, 1),
-                Margin = new Thickness(6, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock
+                var isContinuable = contMode == "continuable";
+                row.Children.Add(new Border
                 {
-                    Text = contLabel,
-                    FontFamily = UiKit.AppFont,
-                    FontSize = 11,
-                    FontWeight = isContinuable ? FontWeights.SemiBold : FontWeights.Normal,
-                    Foreground = isContinuable ? UiKit.AccentBrush : UiKit.MutedBrush
-                }
-            });
+                    Background = UiKit.GlassTrackBrush,
+                    BorderBrush = isContinuable ? UiKit.AccentBrush : UiKit.GlassSubtleRimBrush,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(6),
+                    Padding = new Thickness(6, 1, 6, 1),
+                    Margin = new Thickness(7, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = new TextBlock
+                    {
+                        Text = contLabel,
+                        FontFamily = UiKit.AppFont,
+                        FontSize = 11,
+                        FontWeight = isContinuable ? FontWeights.SemiBold : FontWeights.Normal,
+                        Foreground = isContinuable ? UiKit.AccentBrush : UiKit.MutedBrush
+                    }
+                });
+            }
         }
-        if (!string.IsNullOrEmpty(task.UpdatedAt))
+        if (includeUpdatedTime && !string.IsNullOrEmpty(task.UpdatedAt))
         {
             row.Children.Add(new TextBlock
             {
@@ -3906,7 +3929,6 @@ public partial class MainWindow : Window
     {
         var plan = _lastMainPlan ?? CurrentMainShellPlan();
         var narrowList = plan.TaskListWidth < 340;
-        var wideList = plan.TaskListWidth >= 380;
         var visible = _controller.VisibleTasks;
         if (_searchMatchSummary is not null)
         {
@@ -3974,9 +3996,9 @@ public partial class MainWindow : Window
                     UpdateTasksPageInPlace();
                 }));
             }).ToList();
-            var scopeSeg = UiKit.SegmentedControl(scopeItems, equalColumns: false);
-            scopeSeg.Margin = new Thickness(0, 6, 0, 2);
-            _taskFilterHost.Children.Add(scopeSeg);
+            var scopeTabs = UiKit.FilterTabsRow(scopeItems);
+            scopeTabs.Margin = new Thickness(2, 9, 0, 2);
+            _taskFilterHost.Children.Add(scopeTabs);
         }
 
         if (_taskListHost is not null)
@@ -4035,48 +4057,65 @@ public partial class MainWindow : Window
                     var isSelected = task.Id == _selectedTaskId;
                     var isWaiting = _controller.IsFresh && task.Stale != true && task.EffectiveStatus == "waiting";
                     var col = new StackPanel();
-                    col.Children.Add(UiKit.TaskIdentityBadge(task.Tool, task.DeviceName ?? "电脑", 15));
 
+                    // Row 1: [Brand · Device] ...... [Relative Timestamp]
+                    var topMetaGrid = new Grid();
+                    topMetaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    topMetaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    var idBadge = UiKit.TaskIdentityBadge(task.Tool, task.DeviceName ?? "电脑", 15);
+                    Grid.SetColumn(idBadge, 0);
+                    topMetaGrid.Children.Add(idBadge);
+                    if (!string.IsNullOrEmpty(task.UpdatedAt))
+                    {
+                        var relTxt = new TextBlock
+                        {
+                            Text = UsageFormatting.RelativeTime(task.UpdatedAt),
+                            FontFamily = UiKit.AppFont,
+                            FontSize = 11.5,
+                            Foreground = UiKit.MutedBrush,
+                            VerticalAlignment = VerticalAlignment.Center,
+                            Margin = new Thickness(8, 0, 0, 0)
+                        };
+                        Grid.SetColumn(relTxt, 1);
+                        topMetaGrid.Children.Add(relTxt);
+                    }
+                    col.Children.Add(topMetaGrid);
+
+                    // Row 2: Task Title (clamped cleanly to 2 lines)
                     var titleBlock = UiKit.Heading(task.Title, 14.5);
-                    titleBlock.Margin = new Thickness(0, 6, 0, 6);
+                    titleBlock.LineHeight = 20;
+                    titleBlock.MaxHeight = 41;
+                    titleBlock.TextTrimming = TextTrimming.CharacterEllipsis;
+                    titleBlock.Margin = new Thickness(0, 7, 0, 8);
                     col.Children.Add(titleBlock);
 
-                    var statusRow = BuildStatusDotRow(task);
+                    // Row 3: [Status Dot + Label] + [ · Project Directory] (uncluttered, full remaining width)
+                    var bottomGrid = new Grid();
+                    bottomGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    bottomGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    var statusDot = BuildStatusDotRow(task, includeContinuation: false, includeUpdatedTime: false);
+                    Grid.SetColumn(statusDot, 0);
+                    bottomGrid.Children.Add(statusDot);
+
                     if (!string.IsNullOrWhiteSpace(task.Project))
                     {
                         var proj = Path.GetFileName(task.Project!.TrimEnd('/', '\\'));
                         if (string.IsNullOrWhiteSpace(proj)) proj = task.Project.Trim();
-                        statusRow.Children.Add(new TextBlock
+                        var projTxt = new TextBlock
                         {
                             Text = $" · {proj}",
+                            ToolTip = task.Project,
                             FontFamily = UiKit.AppFont,
-                            FontSize = 11.5,
+                            FontSize = 11.8,
                             Foreground = UiKit.MutedBrush,
+                            TextWrapping = TextWrapping.NoWrap,
                             TextTrimming = TextTrimming.CharacterEllipsis,
-                            MaxWidth = narrowList ? 82 : 145,
                             VerticalAlignment = VerticalAlignment.Center
-                        });
+                        };
+                        Grid.SetColumn(projTxt, 1);
+                        bottomGrid.Children.Add(projTxt);
                     }
-                    col.Children.Add(statusRow);
-
-                    if (wideList && !string.IsNullOrWhiteSpace(task.Preview) && task.EffectiveStatus is "running" or "waiting" or "error")
-                    {
-                        var snippet = task.Preview!.Replace("\r", " ").Replace("\n", " ").Trim();
-                        if (snippet.Length > 0)
-                        {
-                            col.Children.Add(new TextBlock
-                            {
-                                Text = snippet,
-                                FontFamily = UiKit.AppFont,
-                                FontSize = 11.5,
-                                Foreground = UiKit.MutedBrush,
-                                Opacity = 0.85,
-                                TextTrimming = TextTrimming.CharacterEllipsis,
-                                TextWrapping = TextWrapping.NoWrap,
-                                Margin = new Thickness(0, 5, 0, 0)
-                            });
-                        }
-                    }
+                    col.Children.Add(bottomGrid);
 
                     var cardContent = new Grid();
                     if (isSelected)
@@ -4099,8 +4138,8 @@ public partial class MainWindow : Window
                         BorderBrush = defaultBorder,
                         BorderThickness = new Thickness(1),
                         CornerRadius = new CornerRadius(UiKit.CardRadius),
-                        Padding = new Thickness(15, 12.5, 15, 12.5),
-                        Margin = new Thickness(0, 0, 0, 8),
+                        Padding = new Thickness(16, 13.5, 16, 13.5),
+                        Margin = new Thickness(0, 0, 0, 10),
                         SnapsToDevicePixels = true,
                         Child = cardContent
                     };
@@ -4407,14 +4446,14 @@ public partial class MainWindow : Window
         mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        _taskDetailHeaderHost = new StackPanel { Margin = new Thickness(24, 16, 24, 0) };
+        _taskDetailHeaderHost = new StackPanel { Margin = new Thickness(28, 20, 28, 0) };
         Grid.SetRow(_taskDetailHeaderHost, 0);
         mainGrid.Children.Add(_taskDetailHeaderHost);
 
         var scroll = new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Padding = new Thickness(24, 14, 24, 22)
+            Padding = new Thickness(28, 16, 28, 24)
         };
         _taskDetailCardsHost = new StackPanel { MaxWidth = 860, HorizontalAlignment = HorizontalAlignment.Stretch };
         scroll.Content = _taskDetailCardsHost;
@@ -4535,7 +4574,7 @@ public partial class MainWindow : Window
                 Background = UiKit.GlassHeaderBrush,
                 BorderBrush = UiKit.GlassSubtleRimBrush,
                 BorderThickness = new Thickness(0, 1, 0, 0),
-                Padding = new Thickness(24, 12, 24, 14),
+                Padding = new Thickness(28, 13, 28, 15),
                 SnapsToDevicePixels = true,
                 Child = dockStack
             };
@@ -4795,11 +4834,11 @@ public partial class MainWindow : Window
             _taskDetailHeaderHost.Children.Add(topIdentityRow);
 
             var titleBlock = UiKit.Heading(liveTask.Title, 21);
-            titleBlock.Margin = new Thickness(0, 0, 0, 6);
+            titleBlock.Margin = new Thickness(0, 2, 0, 8);
             _taskDetailHeaderHost.Children.Add(titleBlock);
 
             var statusRow = BuildStatusDotRow(liveTask);
-            statusRow.Margin = new Thickness(0, 0, 0, 12);
+            statusRow.Margin = new Thickness(0, 0, 0, 14);
             _taskDetailHeaderHost.Children.Add(statusRow);
 
             _taskDetailHeaderHost.Children.Add(new Border
@@ -4812,13 +4851,6 @@ public partial class MainWindow : Window
 
         // 2. Main Scrollable Canvas
         _taskDetailCardsHost.Children.Clear();
-
-        if (!string.IsNullOrWhiteSpace(liveTask.Preview) && liveTask.EffectiveStatus is "running" or "waiting" or "error")
-        {
-            var prev = UiKit.Body(liveTask.Preview!, 13, UiKit.MutedBrush);
-            prev.Margin = new Thickness(0, 0, 0, 14);
-            _taskDetailCardsHost.Children.Add(prev);
-        }
 
         // Dynamic Priority Slot: Pending Approvals / Questions (0 height when idle)
         if (_taskDetail.Controls?.Pending is { Count: > 0 } pendings)
@@ -4993,8 +5025,16 @@ public partial class MainWindow : Window
                 foreach (var file in files)
                 {
                     var capturedFile = file;
-                    var fRow = new DockPanel();
-                    fRow.Children.Add(UiKit.Body(file.Name, 13));
+                    var fRow = new Grid();
+                    fRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    fRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                    var fileNameBlock = UiKit.Body(file.Name, 13);
+                    fileNameBlock.VerticalAlignment = VerticalAlignment.Center;
+                    fileNameBlock.Margin = new Thickness(0, 0, 12, 0);
+                    Grid.SetColumn(fileNameBlock, 0);
+                    fRow.Children.Add(fileNameBlock);
+
                     var dlBtn = UiKit.SecondaryButton(
                         file.Ready == false ? "同步中" : $"下载 ({file.Size / 1024.0:0.#} KB)",
                         async () =>
@@ -5007,8 +5047,9 @@ public partial class MainWindow : Window
                         },
                         file.Ready != false && !_taskDetail.Downloading,
                         glyph: "download");
-                    DockPanel.SetDock(dlBtn, Dock.Right);
                     dlBtn.HorizontalAlignment = HorizontalAlignment.Right;
+                    dlBtn.VerticalAlignment = VerticalAlignment.Center;
+                    Grid.SetColumn(dlBtn, 1);
                     fRow.Children.Add(dlBtn);
 
                     resStack.Children.Add(new Border
@@ -5026,10 +5067,16 @@ public partial class MainWindow : Window
         }
         else
         {
+            if (!string.IsNullOrWhiteSpace(liveTask.Preview) && liveTask.EffectiveStatus is "running" or "waiting" or "error")
+            {
+                var prev = UiKit.Body(liveTask.Preview!, 13.5, UiKit.TextBrush);
+                prev.Margin = new Thickness(0, 0, 0, 8);
+                resStack.Children.Add(prev);
+            }
             var reason = !string.IsNullOrEmpty(_taskDetail.ResultError)
                 ? _taskDetail.ResultError
                 : (_taskDetail.Result?.Reason ?? (_taskDetail.ResultLoading ? "正在读取…" : "还没有最终结果"));
-            resStack.Children.Add(UiKit.Body(reason, 13.5, UiKit.MutedBrush));
+            resStack.Children.Add(UiKit.Body(reason, 13, UiKit.MutedBrush));
         }
         _taskDetailCardsHost.Children.Add(UiKit.Card(resStack, 20));
 
@@ -6972,11 +7019,15 @@ public partial class MainWindow : Window
             foreach (var nd in nativeDevs)
             {
                 var captured = nd;
-                var row = new DockPanel { Margin = new Thickness(0, 8, 0, 8) };
-                var left = new StackPanel();
+                var row = new Grid { Margin = new Thickness(0, 9, 0, 9) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
                 left.Children.Add(UiKit.Body(nd.Name, 14));
                 var desc = nd.Current == true ? "当前桌面端" : $"App · 最近在线 {UsageFormatting.RelativeTime(nd.LastSeen)}";
                 left.Children.Add(UiKit.Body(desc, 12, nd.Current == true ? UiKit.AccentBrush : UiKit.MutedBrush));
+                Grid.SetColumn(left, 0);
                 row.Children.Add(left);
 
                 if (nd.Current != true)
@@ -6987,8 +7038,10 @@ public partial class MainWindow : Window
                             return;
                         await _controller.RevokeNativeConnectionAsync(captured.Id);
                     }, !_controller.Mutating, UiKit.DangerBrush);
-                    DockPanel.SetDock(revokeBtn, Dock.Right);
+                    revokeBtn.Width = 108;
+                    revokeBtn.HorizontalAlignment = HorizontalAlignment.Right;
                     revokeBtn.VerticalAlignment = VerticalAlignment.Center;
+                    Grid.SetColumn(revokeBtn, 1);
                     row.Children.Add(revokeBtn);
                 }
                 devStack.Children.Add(row);
@@ -6997,13 +7050,17 @@ public partial class MainWindow : Window
             foreach (var ws in webSessions)
             {
                 var captured = ws;
-                var row = new DockPanel { Margin = new Thickness(0, 8, 0, 8) };
-                var left = new StackPanel();
+                var row = new Grid { Margin = new Thickness(0, 9, 0, 9) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
                 left.Children.Add(UiKit.Body(ws.Name, 14));
                 var desc = ws.AuthorizesCurrent == true
                     ? "浏览器 · 授权了当前桌面端连接"
                     : $"浏览器 · 最近活动 {UsageFormatting.RelativeTime(ws.LastSeen)}";
                 left.Children.Add(UiKit.Body(desc, 12, UiKit.MutedBrush));
+                Grid.SetColumn(left, 0);
                 row.Children.Add(left);
 
                 var revokeBtn = UiKit.SecondaryButton("退出会话", async () =>
@@ -7015,8 +7072,10 @@ public partial class MainWindow : Window
                         return;
                     await _controller.RevokeBrowserSessionAsync(captured.Id, captured.AuthorizesCurrent == true);
                 }, !_controller.Mutating, UiKit.DangerBrush);
-                DockPanel.SetDock(revokeBtn, Dock.Right);
+                revokeBtn.Width = 108;
+                revokeBtn.HorizontalAlignment = HorizontalAlignment.Right;
                 revokeBtn.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(revokeBtn, 1);
                 row.Children.Add(revokeBtn);
                 devStack.Children.Add(row);
             }

@@ -333,11 +333,11 @@ public static class Dialogs
         var win = CreateModal(owner, "额度提醒", 430);
         var root = new StackPanel { Margin = new Thickness(26) };
         root.Children.Add(UiKit.Heading("官方额度提醒", 21));
-        var desc = UiKit.Body("当 Codex、Claude Code 或 Antigravity 官方窗口剩余额度低于设定比例，或窗口重置恢复时，通过 Windows 系统托盘发送通知。", 13, UiKit.MutedBrush);
+        var desc = UiKit.Body("当 Codex、Claude Code 或 Antigravity 官方窗口剩余额度低于设定比例，或窗口重置恢复时，在桌面右下角弹出液态玻璃提醒卡片。", 13, UiKit.MutedBrush);
         desc.Margin = new Thickness(0, 8, 0, 16);
         root.Children.Add(desc);
 
-        var enabledCheck = new CheckBox { Content = "开启低额度托盘提醒", Foreground = UiKit.TextBrush, IsChecked = current.Enabled, FontSize = 13.5, Margin = new Thickness(0, 0, 0, 12) };
+        var enabledCheck = new CheckBox { Content = "开启低额度桌面弹窗提醒", Foreground = UiKit.TextBrush, IsChecked = current.Enabled, FontSize = 13.5, Margin = new Thickness(0, 0, 0, 12) };
         var resetCheck = new CheckBox { Content = "额度窗口重置恢复时通知我", Foreground = UiKit.TextBrush, IsChecked = current.NotifyReset, FontSize = 13.5, Margin = new Thickness(0, 0, 0, 14) };
 
         var thresholdCombo = UiKit.StyledComboBox();
@@ -356,8 +356,8 @@ public static class Dialogs
 
         if (onTestAlert is not null)
         {
-            var testBtn = UiKit.SecondaryButton("发送一条测试托盘通知", () =>
-                onTestAlert("Monitor 额度提醒测试", "系统托盘通知工作正常，点击通知可直达用量与额度页面。"), glyph: "bell");
+            var testBtn = UiKit.SecondaryButton("发送一条测试弹窗提醒", () =>
+                onTestAlert("Monitor 额度提醒测试", "桌面液态玻璃提醒弹窗工作正常，点击卡片可直达用量与额度页面。"), glyph: "bell");
             testBtn.HorizontalAlignment = HorizontalAlignment.Left;
             testBtn.Margin = new Thickness(0, 0, 0, 18);
             root.Children.Add(testBtn);

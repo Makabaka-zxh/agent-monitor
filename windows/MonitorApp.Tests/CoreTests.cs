@@ -740,4 +740,14 @@ public class CoreTests
         Assert.Null(allDeviceItems[1].OpenUrl);
         Assert.Contains("0.0.0.0:3000", allDeviceItems[1].LoopbackFixPrompt);
     }
+
+    [Fact]
+    public void NotificationBanner_InfersCorrectBrandIconForQuotaAndSystemAlerts()
+    {
+        Assert.Equal("codex", NotificationBanner.InferToolBrandKey("Codex 额度剩余 15%"));
+        Assert.Equal("claude", NotificationBanner.InferToolBrandKey("Claude Code 额度已重置"));
+        Assert.Equal("antigravity", NotificationBanner.InferToolBrandKey("Antigravity 额度剩余 10%"));
+        Assert.Equal("app", NotificationBanner.InferToolBrandKey("Monitor 额度提醒测试"));
+        Assert.Equal("app", NotificationBanner.InferToolBrandKey(null));
+    }
 }

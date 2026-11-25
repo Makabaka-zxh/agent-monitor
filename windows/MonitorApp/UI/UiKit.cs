@@ -770,19 +770,20 @@ public static class UiKit
 
     public static Button PrimaryButton(string label, Action onClick, bool enabled = true, string? glyph = null)
     {
-        var content = ButtonLabelRow(label, OnAccentBrush, FontWeights.Medium, glyph);
+        var fg = enabled ? OnAccentBrush : MutedBrush;
+        var content = ButtonLabelRow(label, fg, FontWeights.Medium, glyph);
         var bg = AccentBrush;
         var hover = AccentHoverBrush;
         var border = new Border
         {
-            Background = enabled ? bg : SoftBrush,
-            BorderBrush = enabled ? GlassSubtleRimBrush : Brushes.Transparent,
+            Background = enabled ? bg : GlassTrackBrush,
+            BorderBrush = GlassSubtleRimBrush,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(ControlRadius),
             Padding = new Thickness(15, 8.5, 15, 8.5),
             SnapsToDevicePixels = true,
             Child = content,
-            Opacity = enabled ? 1.0 : 0.55
+            Opacity = enabled ? 1.0 : 0.78
         };
         var btn = BareButton(border, onClick, enabled);
         if (enabled)
@@ -1467,6 +1468,51 @@ public static class UiKit
         };
     }
 
+    public static FrameworkElement FilterTabsRow(IReadOnlyList<(string Label, bool Selected, Action OnClick)> items)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        for (var i = 0; i < items.Count; i++)
+        {
+            var (label, selected, onClick) = items[i];
+            var txt = new TextBlock
+            {
+                Text = label,
+                FontFamily = AppFont,
+                FontSize = 12.5,
+                FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = selected ? TextBrush : MutedBrush,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var pill = new Border
+            {
+                Background = selected ? GlassTrayBrush : Brushes.Transparent,
+                BorderBrush = selected ? GlassTrayRimBrush : Brushes.Transparent,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(ControlRadius),
+                Padding = new Thickness(11, 4.5, 11, 4.5),
+                Margin = new Thickness(0, 0, i == items.Count - 1 ? 0 : 6, 0),
+                SnapsToDevicePixels = true,
+                Child = txt
+            };
+            var btn = BareButton(pill, onClick, true);
+            if (!selected)
+            {
+                btn.MouseEnter += (_, _) =>
+                {
+                    pill.Background = HoverBrush;
+                    txt.Foreground = TextBrush;
+                };
+                btn.MouseLeave += (_, _) =>
+                {
+                    pill.Background = Brushes.Transparent;
+                    txt.Foreground = MutedBrush;
+                };
+            }
+            row.Children.Add(btn);
+        }
+        return row;
+    }
+
     public static Button BareButton(UIElement content, Action onClick, bool enabled = true)
     {
         var template = new ControlTemplate(typeof(Button));
@@ -1493,13 +1539,31 @@ public static class UiKit
         btn.Cursor = enabled ? Cursors.Hand : Cursors.Arrow;
         if (btn.Content is Border border)
         {
-            border.Opacity = enabled ? 1.0 : (primary ? 0.55 : 0.5);
+            border.Opacity = enabled ? 1.0 : (primary ? 0.78 : 0.5);
             if (primary)
-                border.Background = enabled ? AccentBrush : SoftBrush;
+            {
+                border.Background = enabled ? AccentBrush : GlassTrackBrush;
+                border.BorderBrush = GlassSubtleRimBrush;
+            }
+            var targetFg = primary ? (enabled ? OnAccentBrush : MutedBrush) : null;
             if (border.Child is TextBlock tb)
+            {
                 tb.Text = label;
-            else if (border.Child is StackPanel sp && sp.Children.OfType<TextBlock>().FirstOrDefault() is { } rowTb)
-                rowTb.Text = label;
+                if (targetFg is not null) tb.Foreground = targetFg;
+            }
+            else if (border.Child is StackPanel sp)
+            {
+                if (sp.Children.OfType<TextBlock>().FirstOrDefault() is { } rowTb)
+                {
+                    rowTb.Text = label;
+                    if (targetFg is not null) rowTb.Foreground = targetFg;
+                }
+                if (targetFg is not null && sp.Children.OfType<MonitorIcon>().FirstOrDefault() is { } rowIcon)
+                {
+                    rowIcon.Ink = targetFg;
+                    rowIcon.InvalidateVisual();
+                }
+            }
         }
     }
 

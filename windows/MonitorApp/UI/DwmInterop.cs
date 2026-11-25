@@ -15,9 +15,34 @@ public static class DwmInterop
     private const int DWMWCP_ROUND = 2;
     private const int DWMSBT_MAINWINDOW = 2;      // Windows 11 Mica
     private const int DWMSBT_TRANSIENTWINDOW = 3; // Windows 11 Acrylic for floating HUD/dialogs
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
 
     [DllImport("dwmapi.dll", PreserveSig = true)]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr", SetLastError = true)]
+    private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    public static bool ApplyNonActivatingPopup(Window window, bool dark)
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                var exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+                exStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                _ = SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(exStyle));
+            }
+        }
+        catch { }
+        return ApplyWindowStyling(window, dark, transientAcrylic: true);
+    }
 
     public static bool IsSystemDarkTheme()
     {
