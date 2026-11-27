@@ -37,6 +37,10 @@ struct TaskUsageSummary: Decodable, Hashable {
     }
 }
 
+struct TaskErrorAnalysis: Decodable, Hashable {
+    let summary: String?
+}
+
 struct MonitorTask: Decodable, Identifiable, Hashable {
     let id: String
     let title: String
@@ -53,6 +57,7 @@ struct MonitorTask: Decodable, Identifiable, Hashable {
     let stale: Bool?
     var usage: TaskUsageSummary? = nil
     var pendingInteractionKind: String? = nil
+    var errorAnalysis: TaskErrorAnalysis? = nil
     static func brand(for tool: String) -> String {
         guard let source = ToolFilter(rawValue: tool), source != .all else { return "任务" }
         return source.title

@@ -192,5 +192,8 @@ final class MonitorTests: XCTestCase {
         XCTAssertEqual(res.diff?.additions, 3)
         XCTAssertEqual(res.diff?.files?.first?.path, "src/main.swift")
         XCTAssertEqual(res.diff?.files?.first?.hunks?.first?.lines?.first?.newLine, 2)
+
+        let errTask = try decode(MonitorTask.self, #"{"id":"device:codex:e1","title":"Build","tool":"codex","status":"error","error_analysis":{"summary":"Exit code 1"},"device_id":"device","archived":false,"stale":false}"#)
+        XCTAssertEqual(errTask.errorAnalysis?.summary, "Exit code 1")
     }
 }
