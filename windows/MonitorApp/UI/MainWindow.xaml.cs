@@ -174,7 +174,120 @@ public partial class MainWindow : Window
             {
                 await _controller.StartQrLoginAsync();
             }
+
+            if (TryGetSelfTestOutputDir() is { } selfTestDir)
+            {
+                await RunUiSelfTestAsync(selfTestDir);
+            }
         };
+    }
+
+    private static string? TryGetSelfTestOutputDir()
+    {
+        var args = Environment.GetCommandLineArgs();
+        for (var i = 1; i + 1 < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--ui-self-test", StringComparison.Ordinal))
+                return args[i + 1];
+        }
+        return null;
+    }
+
+    private async Task RunUiSelfTestAsync(string outDir)
+    {
+        try
+        {
+            Directory.CreateDirectory(outDir);
+            if (_controller.Connected)
+            {
+                await _controller.RefreshWorkbenchAsync();
+                RenderAll(forceShell: true);
+                await Task.Delay(950);
+                RenderAll(forceShell: false);
+            }
+
+            CaptureElementPng(OuterFrame, Path.Combine(outDir, "win_01_workbench.png"), 1220, 780, applyWindowSize: true);
+
+            if (_controller.Connected)
+            {
+                var candidateTask = _controller.Tasks.FirstOrDefault(t => t.SupportsReply && !t.Archived)
+                    ?? _controller.Tasks.FirstOrDefault(t => !t.Archived)
+                    ?? _controller.Tasks.FirstOrDefault();
+                if (candidateTask is not null)
+                {
+                    SelectTask(candidateTask);
+                    await Task.Delay(950);
+                    RenderAll(forceShell: false);
+                    CaptureElementPng(OuterFrame, Path.Combine(outDir, "win_01b_task_detail.png"), 1220, 780, applyWindowSize: true);
+                }
+
+                SwitchPage(NavPage.Usage);
+                await Task.Delay(250);
+                CaptureElementPng(OuterFrame, Path.Combine(outDir, "win_02_usage.png"), 1220, 780, applyWindowSize: true);
+
+                _accountScrollOffset = 9000;
+                SwitchPage(NavPage.Account);
+                await Task.Delay(250);
+                if (_pageBodyHost?.Content is ScrollViewer sv)
+                {
+                    sv.UpdateLayout();
+                    sv.ScrollToBottom();
+                }
+                CaptureElementPng(OuterFrame, Path.Combine(outDir, "win_03_account_devices.png"), 1220, 780, applyWindowSize: true);
+
+                SwitchPage(NavPage.Tasks);
+                ToggleCompactMode();
+                await Task.Delay(200);
+                CaptureElementPng(OuterFrame, Path.Combine(outDir, "win_04_compact_mini.png"), Math.Max(360, Width), Math.Max(260, Height), applyWindowSize: true);
+                ToggleCompactMode();
+            }
+
+            var banner = NotificationBanner.BuildBannerVisual(
+                "Codex 额度提醒",
+                "5 小时额度剩余 18%（低于 20% 提醒线），约 1 小时 12 分钟后重置");
+            banner.Measure(new Size(364, double.PositiveInfinity));
+            var bannerH = Math.Max(88, Math.Ceiling(banner.DesiredSize.Height));
+            CaptureElementPng(banner, Path.Combine(outDir, "win_05_notification_banner.png"), 364, bannerH, applyWindowSize: false);
+        }
+        finally
+        {
+            _allowExit = true;
+            Close();
+            Application.Current?.Shutdown(0);
+        }
+    }
+
+    private void CaptureElementPng(FrameworkElement element, string filePath, double dipWidth, double dipHeight, bool applyWindowSize)
+    {
+        if (applyWindowSize)
+        {
+            WindowState = WindowState.Normal;
+            Width = dipWidth;
+            Height = dipHeight;
+        }
+        element.Measure(new Size(dipWidth, dipHeight));
+        element.Arrange(new Rect(0, 0, dipWidth, dipHeight));
+        element.UpdateLayout();
+        Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+
+        const double dpi = 144.0;
+        var scale = dpi / 96.0;
+        var pxW = Math.Max(1, (int)Math.Round(dipWidth * scale));
+        var pxH = Math.Max(1, (int)Math.Round(dipHeight * scale));
+
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen())
+        {
+            dc.DrawRectangle(UiKit.CanvasBrush, null, new Rect(0, 0, dipWidth, dipHeight));
+            dc.DrawRectangle(new VisualBrush(element) { Stretch = Stretch.None, AlignmentX = AlignmentX.Left, AlignmentY = AlignmentY.Top }, null, new Rect(0, 0, dipWidth, dipHeight));
+        }
+
+        var rtb = new RenderTargetBitmap(pxW, pxH, dpi, dpi, PixelFormats.Pbgra32);
+        rtb.Render(dv);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(rtb));
+        using var fs = File.Create(filePath);
+        encoder.Save(fs);
     }
 
     private void SyncTheme(bool applyDwm = true, bool rebuildBackdrop = true)
@@ -4446,16 +4559,19 @@ public partial class MainWindow : Window
         mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         mainGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var headerOuter = new Border { Padding = new Thickness(30, 20, 30, 0) };
-        _taskDetailHeaderHost = new StackPanel { MaxWidth = 720, HorizontalAlignment = HorizontalAlignment.Stretch };
-        headerOuter.Child = _taskDetailHeaderHost;
+        var headerOuter = new Border { Padding = new Thickness(30, 18, 30, 0) };
+        _taskDetailHeaderHost = new StackPanel();
+        var headerCard = UiKit.Card(_taskDetailHeaderHost, 18);
+        headerCard.MaxWidth = 720;
+        headerCard.HorizontalAlignment = HorizontalAlignment.Stretch;
+        headerOuter.Child = headerCard;
         Grid.SetRow(headerOuter, 0);
         mainGrid.Children.Add(headerOuter);
 
         var scroll = new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Padding = new Thickness(30, 16, 30, 24)
+            Padding = new Thickness(30, 14, 30, 24)
         };
         _taskDetailCardsHost = new StackPanel { MaxWidth = 720, HorizontalAlignment = HorizontalAlignment.Stretch };
         scroll.Content = _taskDetailCardsHost;

@@ -63,6 +63,8 @@ public final class TrackingDurationDialog {
         final Runnable onDismiss;
         final LinearLayout timedContent;
         final LinearLayout untilContent;
+        final TextView timedTab;
+        final TextView untilTab;
         final Wheel hours;
         final Wheel minutes;
         final TextView start;
@@ -115,14 +117,23 @@ public final class TrackingDurationDialog {
             content.addView(header);
             content.addView(ui.space(12));
 
-            NativePages.Segments modes = new NativePages.Segments(ui,
-                    new String[]{"timed", "until"}, new String[]{"定时", "直至任务结束"}, key -> {
-                untilTaskEnd = "until".equals(key);
+            LinearLayout modeTrack = ui.row();
+            modeTrack.setBackground(ui.rounded(ui.soft, 14));
+            modeTrack.setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4));
+            timedTab = buildModePill("定时", () -> {
+                if (!untilTaskEnd) return;
+                untilTaskEnd = false;
                 showMode();
             });
-            modes.select(untilTaskEnd ? "until" : "timed");
-            content.addView(modes.view(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            content.addView(ui.space(22));
+            untilTab = buildModePill("直至任务结束", () -> {
+                if (untilTaskEnd) return;
+                untilTaskEnd = true;
+                showMode();
+            });
+            modeTrack.addView(timedTab, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            modeTrack.addView(untilTab, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            content.addView(modeTrack, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            content.addView(ui.space(14));
 
             timedContent = ui.column();
             LinearLayout labels = ui.row();
@@ -133,11 +144,11 @@ public final class TrackingDurationDialog {
 
             float numberSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 28,
                     activity.getResources().getDisplayMetrics());
-            int wheelHeight = Math.max(ui.dp(196), Math.round(numberSize * 4.4f));
-            int selectionHeight = Math.max(ui.dp(56), Math.round(numberSize * 1.65f));
+            int wheelHeight = Math.max(ui.dp(186), Math.round(numberSize * 4.2f));
+            int selectionHeight = Math.max(ui.dp(54), Math.round(numberSize * 1.6f));
             FrameLayout wheelArea = new FrameLayout(activity);
             View highlight = new View(activity);
-            highlight.setBackground(ui.rounded(ui.soft, 18));
+            highlight.setBackground(ui.rounded(ui.soft, 16));
             highlight.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             FrameLayout.LayoutParams highlightParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, selectionHeight, Gravity.CENTER);
             wheelArea.addView(highlight, highlightParams);
@@ -152,29 +163,37 @@ public final class TrackingDurationDialog {
             timedContent.addView(wheelArea, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, wheelHeight));
 
             validation = ui.text("请选择至少 1 分钟", 13);
+            ui.applyControlSpacing(validation);
             validation.setTextColor(ui.warning);
             validation.setGravity(Gravity.CENTER);
-            validation.setPadding(0, ui.dp(4), 0, 0);
+            validation.setPadding(0, ui.dp(6), 0, 0);
             validation.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-            validation.setVisibility(View.INVISIBLE);
+            validation.setVisibility(View.GONE);
             timedContent.addView(validation, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             content.addView(timedContent);
 
             untilContent = ui.column();
             untilContent.setGravity(Gravity.CENTER);
-            untilContent.setPadding(ui.dp(12), ui.dp(34), ui.dp(12), ui.dp(34));
-            untilContent.setMinimumHeight(wheelHeight + ui.dp(35));
+            untilContent.setBackground(ui.bordered(ui.bg, 18));
+            untilContent.setPadding(ui.dp(18), ui.dp(20), ui.dp(18), ui.dp(20));
             FrameLayout iconBadge = new FrameLayout(activity);
-            iconBadge.setBackground(ui.rounded(ui.soft, 22));
-            iconBadge.addView(ui.icon("check", 30), new FrameLayout.LayoutParams(ui.dp(30), ui.dp(30), Gravity.CENTER));
-            untilContent.addView(iconBadge, new LinearLayout.LayoutParams(ui.dp(64), ui.dp(64)));
-            untilContent.addView(ui.space(22));
-            TextView untilTitle = ui.text("任务结束时自动停止", 17, true);
+            iconBadge.setBackground(ui.rounded(ui.soft, 16));
+            iconBadge.addView(ui.icon("check", 24), new FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER));
+            untilContent.addView(iconBadge, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+            untilContent.addView(ui.space(12));
+            TextView untilTitle = ui.text("任务结束时自动停止", 16, true);
+            ui.applyControlSpacing(untilTitle);
             untilTitle.setGravity(Gravity.CENTER);
             untilContent.addView(untilTitle, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            untilContent.addView(ui.space(6));
+            TextView untilSub = ui.body("等待批准或回答期间继续保留，任务完成后自动结束", 13);
+            ui.applyControlSpacing(untilSub);
+            untilSub.setLineSpacing(ui.dp(3), 1.08f);
+            untilSub.setGravity(Gravity.CENTER);
+            untilContent.addView(untilSub, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             content.addView(untilContent);
 
-            content.addView(ui.space(22));
+            content.addView(ui.space(16));
             LinearLayout actions = ui.row();
             TextView cancel = ui.button("取消", false, dialog::dismiss);
             actions.addView(cancel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -208,8 +227,37 @@ public final class TrackingDurationDialog {
             showMode();
         }
 
+        TextView buildModePill(String label, Runnable onTap) {
+            TextView pill = ui.text(label, 14, false);
+            ui.applyControlSpacing(pill);
+            pill.setGravity(Gravity.CENTER);
+            pill.setMinHeight(ui.dp(38));
+            pill.setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(8));
+            pill.setSingleLine(true);
+            pill.setClickable(true);
+            pill.setFocusable(true);
+            pill.setOnClickListener(v -> onTap.run());
+            pill.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+                @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                    super.onInitializeAccessibilityNodeInfo(host, info);
+                    info.setClassName("android.widget.RadioButton");
+                    info.setCheckable(true);
+                    info.setChecked(host.isSelected());
+                }
+            });
+            return pill;
+        }
+
+        void styleModePill(TextView pill, boolean active) {
+            pill.setSelected(active);
+            pill.setTypeface(active ? ui.strong : ui.regular);
+            pill.setTextColor(active ? ui.text : ui.muted);
+            pill.setBackground(active ? ui.bordered(ui.surface, 11) : ui.ripple(Color.TRANSPARENT, 11));
+        }
+
         void addWheelLabel(LinearLayout parent, String label) {
-            TextView view = ui.text(label, 14);
+            TextView view = ui.text(label, 13);
+            ui.applyControlSpacing(view);
             view.setTextColor(ui.muted);
             view.setGravity(Gravity.CENTER);
             parent.addView(view, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -270,13 +318,13 @@ public final class TrackingDurationDialog {
             if (window == null) return;
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setDimAmount(.25f);
+            window.setDimAmount(.45f);
             window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
             window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             WindowManager.LayoutParams attributes = window.getAttributes();
-            attributes.width = Math.min(ui.dp(520), availableBounds().width() - ui.dp(24));
+            attributes.width = Math.min(ui.dp(520), availableBounds().width() - ui.dp(16));
             attributes.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            attributes.y = ui.dp(12);
+            attributes.y = ui.dp(6);
             attributes.windowAnimations = 0;
             if (Build.VERSION.SDK_INT >= 30) attributes.setFitInsetsTypes(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
             window.setAttributes(attributes);
@@ -301,6 +349,8 @@ public final class TrackingDurationDialog {
         }
 
         void showMode() {
+            styleModePill(timedTab, !untilTaskEnd);
+            styleModePill(untilTab, untilTaskEnd);
             timedContent.setVisibility(untilTaskEnd ? View.GONE : View.VISIBLE);
             untilContent.setVisibility(untilTaskEnd ? View.VISIBLE : View.GONE);
             updateConfirmation();
@@ -328,7 +378,7 @@ public final class TrackingDurationDialog {
             boolean enabled = untilTaskEnd || (idle && validMinutes(value));
             start.setEnabled(enabled);
             start.setAlpha(enabled ? 1f : .42f);
-            validation.setVisibility(!validMinutes(value) && idle ? View.VISIBLE : View.INVISIBLE);
+            validation.setVisibility(!untilTaskEnd && !validMinutes(value) && idle ? View.VISIBLE : View.GONE);
             if (!idle) handler.postDelayed(settled, Math.max(60L, Math.min(250L, settleAfter - SystemClock.uptimeMillis())));
         }
 

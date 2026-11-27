@@ -1454,41 +1454,52 @@ public final class MainActivity extends Activity {
         heroCard.addView(ui.space(12));
         heroCard.addView(taskDetail.view(), wrap());
 
-        View heroDivider = new View(this);
-        heroDivider.setBackgroundColor(ui.line);
-        LinearLayout.LayoutParams hDivLp = new LinearLayout.LayoutParams(-1, Math.max(1, ui.dp(0.6f)));
-        hDivLp.topMargin = ui.dp(14);
-        hDivLp.bottomMargin = ui.dp(12);
-        heroCard.addView(heroDivider, hDivLp);
-
         LinearLayout trackingRow = ui.row();
         trackingRow.setGravity(Gravity.CENTER_VERTICAL);
-        View bellIcon = ui.icon("bell", 18);
-        LinearLayout.LayoutParams bellLp = new LinearLayout.LayoutParams(ui.dp(18), ui.dp(18));
+        trackingRow.setBackground(ui.bordered(ui.bg, 14));
+        trackingRow.setPaddingRelative(ui.dp(11), ui.dp(9), ui.dp(10), ui.dp(9));
+
+        FrameLayout bellBadge = new FrameLayout(this);
+        bellBadge.setBackground(ui.rounded(ui.soft, 10));
+        View bellIcon = ui.icon("bell", 16);
+        bellBadge.addView(bellIcon, new FrameLayout.LayoutParams(ui.dp(16), ui.dp(16), Gravity.CENTER));
+        LinearLayout.LayoutParams bellLp = new LinearLayout.LayoutParams(ui.dp(32), ui.dp(32));
         bellLp.setMarginEnd(ui.dp(10));
-        trackingRow.addView(bellIcon, bellLp);
+        trackingRow.addView(bellBadge, bellLp);
 
         LinearLayout trackWords = ui.column();
-        trackWords.addView(ui.text("实况通知追踪", 14, true), wrap());
+        TextView trackTitle = ui.text("实况通知追踪", 14, true);
+        ui.applyControlSpacing(trackTitle);
+        trackTitle.setSingleLine(true);
+        trackTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        trackWords.addView(trackTitle, wrap());
+
         trackingNote = ui.text("", 12, false);
         trackingNote.setTextColor(ui.muted);
+        ui.applyControlSpacing(trackingNote);
+        trackingNote.setSingleLine(true);
+        trackingNote.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams tnLp = wrap(); tnLp.topMargin = ui.dp(2);
         trackWords.addView(trackingNote, tnLp);
         trackingRow.addView(trackWords, new LinearLayout.LayoutParams(0, -2, 1));
 
-        trackingButton = ui.button("开启实况追踪", false, () -> {
+        trackingButton = ui.button("开启追踪", false, () -> {
             if (selectedId.equals(TrackingService.trackedId)) {
                 TrackingService.requestStop(this, TrackingService.generation);
                 updateTracking();
             } else chooseTrackingDuration(selectedId, loadedToken, ++actionRevision);
         });
-        trackingButton.setMinHeight(ui.dp(36));
-        trackingButton.setPadding(ui.dp(13), ui.dp(6), ui.dp(13), ui.dp(6));
+        trackingButton.setSingleLine(true);
+        trackingButton.setMinHeight(ui.dp(34));
+        trackingButton.setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(6));
         trackingButton.setTextSize(13);
         LinearLayout.LayoutParams tbLp = new LinearLayout.LayoutParams(-2, -2);
         tbLp.setMarginStart(ui.dp(10));
         trackingRow.addView(trackingButton, tbLp);
-        heroCard.addView(trackingRow, wrap());
+
+        LinearLayout.LayoutParams trackBarLp = wrap();
+        trackBarLp.topMargin = ui.dp(14);
+        heroCard.addView(trackingRow, trackBarLp);
 
         taskPreviewSection = ui.column();
         taskPreviewSection.setVisibility(View.GONE);
@@ -2456,16 +2467,16 @@ public final class MainActivity extends Activity {
         if (trackingButton == null || !page.equals("task")) return;
         boolean active = selectedId.equals(TrackingService.trackedId); JSONObject task = findTask(selectedId), device = task == null ? null : findDevice(task.optString("device_id"));
         boolean runnable = task != null && !stale() && device != null && TrackingPolicy.confirmedRunning(true, task.optBoolean("archived"), device.optBoolean("online"), task.optString("status"));
-        trackingButton.setText(active ? "停止追踪" : "开启实况追踪");
+        trackingButton.setText(active ? "停止追踪" : "开启追踪");
         trackingButton.setEnabled(active || runnable);
         trackingButton.setAlpha(active || runnable ? 1f : .5f);
         trackingButton.setTextColor(active ? ui.danger : runnable ? (ui.dark ? ui.bg : Color.WHITE) : ui.muted);
-        trackingButton.setBackground(ui.ripple(active ? ui.soft : runnable ? ui.accent : ui.soft, 14));
-        String detail = active ? TrackingService.trackingMessage : runnable ? "锁屏与通知栏实时更新任务进展" : "任务确认执行中后可开启实况";
-        if (active && TrackingService.untilTaskEnd) detail = "正在通知栏跟踪 · 直至任务结束";
+        trackingButton.setBackground(ui.ripple(active ? ui.soft : runnable ? ui.accent : ui.soft, 11));
+        String detail = active ? TrackingService.trackingMessage : runnable ? "锁屏与通知栏实时更新进展" : "任务执行中可开启";
+        if (active && TrackingService.untilTaskEnd) detail = "正在通知栏跟踪 · 直至结束";
         else if (active && TrackingService.endsAt > 0) {
             long minutes = Math.max(1, (TrackingService.endsAt - SystemClock.elapsedRealtime() + 59999) / 60000);
-            detail = "正在通知栏跟踪 · 剩余 " + (minutes >= 60 ? (minutes / 60) + " 小时" + (minutes % 60 > 0 ? " " + (minutes % 60) + " 分钟" : "") : minutes + " 分钟");
+            detail = "跟踪中 · 剩 " + (minutes >= 60 ? (minutes / 60) + " 小时" + (minutes % 60 > 0 ? " " + (minutes % 60) + " 分" : "") : minutes + " 分钟");
         }
         if (trackingNote != null) {
             if (!android.text.TextUtils.equals(trackingNote.getText(), detail)) trackingNote.setText(detail);

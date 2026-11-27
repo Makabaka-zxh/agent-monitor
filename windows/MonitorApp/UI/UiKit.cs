@@ -1479,7 +1479,7 @@ public static class UiKit
                 Text = label,
                 FontFamily = AppFont,
                 FontSize = 12.5,
-                FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal,
+                FontWeight = selected ? FontWeights.SemiBold : FontWeights.Medium,
                 Foreground = selected ? TextBrush : MutedBrush,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1488,9 +1488,9 @@ public static class UiKit
                 Background = selected ? GlassTrayBrush : Brushes.Transparent,
                 BorderBrush = selected ? GlassTrayRimBrush : Brushes.Transparent,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(ControlRadius),
-                Padding = new Thickness(11, 4.5, 11, 4.5),
-                Margin = new Thickness(0, 0, i == items.Count - 1 ? 0 : 6, 0),
+                CornerRadius = new CornerRadius(ControlRadius - 1),
+                Padding = new Thickness(11, 4, 11, 4),
+                Margin = new Thickness(0, 0, i == items.Count - 1 ? 0 : 3, 0),
                 SnapsToDevicePixels = true,
                 Child = txt
             };
@@ -1510,7 +1510,17 @@ public static class UiKit
             }
             row.Children.Add(btn);
         }
-        return row;
+        return new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = GlassTrackBrush,
+            BorderBrush = GlassSubtleRimBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(ControlRadius),
+            Padding = new Thickness(3, 2.5, 3, 2.5),
+            SnapsToDevicePixels = true,
+            Child = row
+        };
     }
 
     public static Button BareButton(UIElement content, Action onClick, bool enabled = true)

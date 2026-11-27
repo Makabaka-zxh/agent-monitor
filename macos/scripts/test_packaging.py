@@ -56,8 +56,8 @@ class PackagingTests(unittest.TestCase):
         info = plistlib.loads(plistlib.dumps(app.app_info()))
         self.assertEqual(info["CFBundleExecutable"], "Monitor")
         self.assertEqual(info["CFBundleIdentifier"], "com.agentmonitor.mac")
-        self.assertEqual(info["CFBundleShortVersionString"], "1.1.8")
-        self.assertEqual(info["CFBundleVersion"], "21")
+        self.assertEqual(info["CFBundleShortVersionString"], "1.1.9")
+        self.assertEqual(info["CFBundleVersion"], "22")
         self.assertEqual(info["LSMinimumSystemVersion"], "14.0")
         self.assertEqual(info["CFBundleURLTypes"][0]["CFBundleURLSchemes"], ["agentmonitor"])
         resources = Path(__file__).resolve().parents[1] / "Sources" / "Monitor" / "Resources"

@@ -229,6 +229,7 @@ public final class NativeTaskResults {
         modelCapsuleBox.addView(modelCapsuleIcon, mIconLp);
 
         modelCapsule = ui.text("继承电脑 ▾", 12, true);
+        ui.applyControlSpacing(modelCapsule);
         modelCapsule.setSingleLine(true);
         modelCapsule.setEllipsize(android.text.TextUtils.TruncateAt.END);
         modelCapsule.setMaxWidth(ui.dp(190));
@@ -242,6 +243,7 @@ public final class NativeTaskResults {
         LinearLayout.LayoutParams statusColParams = new LinearLayout.LayoutParams(0, -2, 1);
         statusColParams.setMarginStart(ui.dp(10));
         replyReceiptBadge = ui.text("", 12, true);
+        ui.applyControlSpacing(replyReceiptBadge);
         replyReceiptBadge.setSingleLine(true);
         replyReceiptBadge.setEllipsize(android.text.TextUtils.TruncateAt.END);
         replyReceiptBadge.setGravity(Gravity.END);
@@ -249,6 +251,7 @@ public final class NativeTaskResults {
         statusCol.addView(replyReceiptBadge, wrap());
 
         replyStatus = ui.text("", 12, false);
+        ui.applyControlSpacing(replyStatus);
         replyStatus.setTextColor(ui.muted);
         replyStatus.setSingleLine(true);
         replyStatus.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -258,12 +261,14 @@ public final class NativeTaskResults {
         replyCard.addView(metaRow, metaSpace);
 
         replyAppliedLabel = ui.text("", 12, true);
+        ui.applyControlSpacing(replyAppliedLabel);
         replyAppliedLabel.setTextColor(ui.accent);
         replyAppliedLabel.setPadding(0, ui.dp(4), 0, 0);
         replyAppliedLabel.setVisibility(View.GONE);
         replyCard.addView(replyAppliedLabel, wrap());
 
         replyAvailability = ui.text("", 12, false);
+        ui.applyControlSpacing(replyAvailability);
         replyAvailability.setTextColor(ui.muted);
         replyAvailability.setPadding(0, ui.dp(3), 0, 0);
         replyAvailability.setVisibility(View.GONE);
@@ -740,7 +745,10 @@ public final class NativeTaskResults {
                 ? "" : NativeReplyPresentationPolicy.replyReceipt(sendBusy, commandState, commandDelivered);
         String baseStatus = NativeReplyPresentationPolicy.commandStatus(sendBusy, pending, commandState, retry, commandReason);
         String availability = NativeReplyPresentationPolicy.capabilityStatus(sendBusy, pending, knownReply, replyAvailable, selectionReady, capabilityReason);
-        setText(replyStatus, baseStatus.isEmpty() && receiptTrail.isEmpty() && availability.isEmpty() && knownReply && replyAvailable ? "电脑在线可直达" : baseStatus);
+        boolean inlineAvailability = baseStatus.isEmpty() && receiptTrail.isEmpty() && !availability.isEmpty() && availability.length() <= 18;
+        String rightMetaStatus = inlineAvailability ? availability
+                : (baseStatus.isEmpty() && receiptTrail.isEmpty() && availability.isEmpty() && knownReply && replyAvailable ? "电脑在线可直达" : baseStatus);
+        setText(replyStatus, rightMetaStatus);
         replyStatus.setVisibility(replyStatus.getText().length() == 0 ? View.GONE : View.VISIBLE);
         setText(replyAppliedLabel, settingsReceiptText);
         replyAppliedLabel.setVisibility(settingsReceiptText.isEmpty() ? View.GONE : View.VISIBLE);
@@ -748,8 +756,9 @@ public final class NativeTaskResults {
         replyReceiptBadge.setTextColor("failed".equals(commandState) ? ui.danger
                 : "blocked".equals(commandState) ? ui.warning : commandDelivered ? ui.accent : ui.text);
         replyReceiptBadge.setVisibility(receiptTrail.isEmpty() ? View.GONE : View.VISIBLE);
-        setText(replyAvailability, availability);
-        replyAvailability.setVisibility(availability.isEmpty() ? View.GONE : View.VISIBLE);
+        String belowAvailability = inlineAvailability ? "" : availability;
+        setText(replyAvailability, belowAvailability);
+        replyAvailability.setVisibility(belowAvailability.isEmpty() ? View.GONE : View.VISIBLE);
         replyStatus.setTextColor(commandState.equals("failed") ? ui.danger
                 : commandState.equals("blocked") || commandState.equals("uncertain") || commandState.equals("not_found") ? ui.warning : ui.muted);
         setText(sendButton, pending ? (retry ? "重试" : "查询") : "发送");

@@ -20,7 +20,7 @@ APP_OWNER = "monitor-native-macos-v1"
 def app_info() -> dict:
     return {"CFBundleIdentifier": BUNDLE_ID, "CFBundleName": "Monitor", "CFBundleDisplayName": "Monitor",
             "CFBundleExecutable": "Monitor", "CFBundlePackageType": "APPL", "CFBundleInfoDictionaryVersion": "6.0",
-            "CFBundleShortVersionString": "1.1.8", "CFBundleVersion": "21", "LSMinimumSystemVersion": "14.0",
+            "CFBundleShortVersionString": "1.1.9", "CFBundleVersion": "22", "LSMinimumSystemVersion": "14.0",
             "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
             "CFBundleURLTypes": [{"CFBundleURLName": "Monitor login return", "CFBundleURLSchemes": ["agentmonitor"]}]}
 

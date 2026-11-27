@@ -112,7 +112,41 @@ public static class NotificationBanner
             RepositionAll();
         };
 
-        // Header Attribution Row: [Monitor AppIcon] Monitor · 额度提醒 ...... [×]
+        var cardBorder = BuildBannerVisual(
+            title,
+            body,
+            onDismiss: () => Dismiss(invokeCallback: false),
+            onActivate: onActivate is not null ? () => Dismiss(invokeCallback: true) : null,
+            onHoverEnter: () => timer.Stop(),
+            onHoverLeave: () => { if (!dismissed) timer.Start(); });
+
+        win.Content = cardBorder;
+        ActiveBanners.Add(win);
+
+        win.Loaded += (_, _) =>
+        {
+            RepositionAll(animateWindow: win);
+            timer.Start();
+        };
+
+        try
+        {
+            win.Show();
+        }
+        catch
+        {
+            ActiveBanners.Remove(win);
+        }
+    }
+
+    public static Border BuildBannerVisual(
+        string title,
+        string body,
+        Action? onDismiss = null,
+        Action? onActivate = null,
+        Action? onHoverEnter = null,
+        Action? onHoverLeave = null)
+    {
         var headerGrid = new Grid();
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -136,12 +170,11 @@ public static class NotificationBanner
         Grid.SetColumn(appSourceLabel, 1);
         headerGrid.Children.Add(appSourceLabel);
 
-        var closeBtn = UiKit.IconButton("close", "关闭通知", () => Dismiss(invokeCallback: false), boxSize: 22, iconSize: 12);
+        var closeBtn = UiKit.IconButton("close", "关闭通知", () => onDismiss?.Invoke(), boxSize: 22, iconSize: 12);
         closeBtn.Margin = new Thickness(6, -2, -4, -2);
         Grid.SetColumn(closeBtn, 2);
         headerGrid.Children.Add(closeBtn);
 
-        // Main Content Row: [38x38 Tool/App Brand Glass Pod] + [Title + Body]
         var bodyGrid = new Grid { Margin = new Thickness(0, 9, 0, 0) };
         bodyGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         bodyGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -188,7 +221,7 @@ public static class NotificationBanner
             clickableBody.MouseLeftButtonUp += (_, e) =>
             {
                 e.Handled = true;
-                Dismiss(invokeCallback: true);
+                onActivate();
             };
         }
 
@@ -196,42 +229,36 @@ public static class NotificationBanner
         innerStack.Children.Add(headerGrid);
         innerStack.Children.Add(clickableBody);
 
+        var frostedVeil = new Border
+        {
+            Background = new SolidColorBrush(UiKit.IsDark
+                ? Color.FromArgb(228, 24, 31, 40)
+                : Color.FromArgb(234, 248, 251, 255)),
+            Child = innerStack
+        };
+
         var cardBorder = new Border
         {
-            Background = UiKit.GlassCardBrush,
+            Width = BannerWidth,
+            CornerRadius = new CornerRadius(8),
+            ClipToBounds = true,
+            Background = UiKit.SurfaceBrush,
             BorderBrush = UiKit.GlassRimBrush,
             BorderThickness = new Thickness(1),
-            Child = UiKit.AmbientStage(innerStack, compact: true)
+            Child = UiKit.AmbientStage(frostedVeil, compact: true)
         };
 
         cardBorder.MouseEnter += (_, _) =>
         {
-            timer.Stop();
+            onHoverEnter?.Invoke();
             cardBorder.BorderBrush = UiKit.AccentBrush;
         };
         cardBorder.MouseLeave += (_, _) =>
         {
             cardBorder.BorderBrush = UiKit.GlassRimBrush;
-            if (!dismissed) timer.Start();
+            onHoverLeave?.Invoke();
         };
-
-        win.Content = cardBorder;
-        ActiveBanners.Add(win);
-
-        win.Loaded += (_, _) =>
-        {
-            RepositionAll(animateWindow: win);
-            timer.Start();
-        };
-
-        try
-        {
-            win.Show();
-        }
-        catch
-        {
-            ActiveBanners.Remove(win);
-        }
+        return cardBorder;
     }
 
     private static void RepositionAll(Window? animateWindow = null)

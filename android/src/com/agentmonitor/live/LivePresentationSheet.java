@@ -217,12 +217,12 @@ final class LivePresentationSheet extends Dialog {
         if (activity.isFinishing() || activity.isDestroyed()) return;
         closing = false; super.show(); Window window = getWindow(); if (window == null) return;
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.28f);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.45f);
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         WindowManager.LayoutParams attributes = window.getAttributes();
-        attributes.width = Math.min(ui.dp(520), Math.max(ui.dp(120), availableBounds().width() - ui.dp(24)));
-        attributes.height = ViewGroup.LayoutParams.WRAP_CONTENT; attributes.y = ui.dp(12); attributes.windowAnimations = 0;
+        attributes.width = Math.min(ui.dp(520), Math.max(ui.dp(120), availableBounds().width() - ui.dp(16)));
+        attributes.height = ViewGroup.LayoutParams.WRAP_CONTENT; attributes.y = ui.dp(6); attributes.windowAnimations = 0;
         if (Build.VERSION.SDK_INT >= 30) attributes.setFitInsetsTypes(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
         window.setAttributes(attributes);
         if (ValueAnimator.areAnimatorsEnabled()) {

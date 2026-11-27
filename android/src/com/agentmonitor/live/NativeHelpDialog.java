@@ -88,13 +88,13 @@ public final class NativeHelpDialog extends Dialog {
         if (window == null) return;
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-        window.setDimAmount(.22f);
+        window.setDimAmount(.45f);
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         WindowManager.LayoutParams attributes = window.getAttributes();
-        attributes.width = Math.min(ui.dp(520), Math.max(ui.dp(120), availableBounds().width() - ui.dp(24)));
+        attributes.width = Math.min(ui.dp(520), Math.max(ui.dp(120), availableBounds().width() - ui.dp(16)));
         attributes.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-        attributes.y = ui.dp(12);
+        attributes.y = ui.dp(6);
         attributes.windowAnimations = 0;
         if (Build.VERSION.SDK_INT >= 30) attributes.setFitInsetsTypes(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
         window.setAttributes(attributes);
