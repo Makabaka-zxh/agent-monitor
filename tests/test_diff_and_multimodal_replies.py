@@ -227,7 +227,7 @@ def test_running_local_antigravity_task_exposes_live_workspace_diff(tmp_path: Pa
 
     monkeypatch.setattr(
         "agent_monitor.antigravity.resolve_antigravity_deliverable_roots",
-        lambda conv_id, base=None: (repo, None),
+        lambda conv_id, base=None: (None, repo),
     )
     monkeypatch.setattr(
         "agent_monitor.antigravity.read_antigravity_result",

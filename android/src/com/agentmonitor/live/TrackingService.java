@@ -140,7 +140,7 @@ public final class TrackingService extends Service {
         }
         pendingApprovalId = id;
         pendingApprovalRevision = rev;
-        pendingApprovalTitle = clean(pa.optString("title"), 80);
+        pendingApprovalTitle = pa.isNull("title") ? "" : clean(pa.optString("title", ""), 80);
     }
     private void submitNotificationApproval(long expectedGeneration, String requestId, String revision, String decision) {
         if (!accepts(expectedGeneration) || decisionInFlight || shouldRedactLockscreen()) return;

@@ -485,7 +485,7 @@ class LocalResults:
         final = dict(final, files=[], _paths={}, _antigravity_id=wanted, diff=None)
         roots = resolve_antigravity_deliverable_roots(wanted, base=self.antigravity_home)
         if roots is not None:
-            workspace_dir = roots[0]
+            workspace_dir = roots[1]
             if workspace_dir is not None:
                 final["diff"] = collect_workspace_diff(
                     workspace_dir,
@@ -734,8 +734,8 @@ class TaskResults:
                         source.removeprefix("antigravity:"),
                         base=self.local.antigravity_home,
                     )
-                    if roots is not None and roots[0] is not None:
-                        live_diff = collect_workspace_diff(roots[0])
+                    if roots is not None and roots[1] is not None:
+                        live_diff = collect_workspace_diff(roots[1])
                 else:
                     session = self.local.resolve(source)
                     if session is not None and session.cwd is not None:

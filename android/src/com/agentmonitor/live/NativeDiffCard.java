@@ -133,7 +133,8 @@ public final class NativeDiffCard {
         }
         card.addView(header, wrap());
 
-        String commitTitle = diff.optString("commit_title", "").trim();
+        String commitTitle = diff.isNull("commit_title") ? "" : diff.optString("commit_title", "").trim();
+        if ("null".equalsIgnoreCase(commitTitle)) commitTitle = "";
         if (!commitTitle.isEmpty()) {
             TextView commitLine = ui.text("提交：" + commitTitle, 12, false);
             commitLine.setTextColor(ui.muted);
