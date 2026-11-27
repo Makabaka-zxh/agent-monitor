@@ -37,8 +37,8 @@ HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(?: (.*))?$")
 class DiffLineModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["ctx", "add", "del"]
-    old_no: int | None = Field(default=None, ge=1, le=9_999_999)
-    new_no: int | None = Field(default=None, ge=1, le=9_999_999)
+    old_line: int | None = Field(default=None, ge=1, le=9_999_999)
+    new_line: int | None = Field(default=None, ge=1, le=9_999_999)
     text: str = Field(max_length=MAX_LINE_CHARS)
 
 
@@ -54,14 +54,16 @@ class DiffFileModel(BaseModel):
     status: Literal["modified", "added", "deleted", "renamed"] = "modified"
     additions: int = Field(ge=0, le=999_999)
     deletions: int = Field(ge=0, le=999_999)
+    binary: StrictBool = False
     truncated: StrictBool = False
     hunks: list[DiffHunkModel] = Field(default_factory=list, max_length=MAX_HUNKS_PER_FILE)
 
 
 class DiffSummaryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    scope: Literal["working_tree", "last_commit"]
-    files_changed: int = Field(ge=1, le=99_999)
+    source: Literal["working_tree", "last_commit"]
+    commit_title: str | None = Field(default=None, max_length=160)
+    total_files: int = Field(ge=1, le=99_999)
     additions: int = Field(ge=0, le=9_999_999)
     deletions: int = Field(ge=0, le=9_999_999)
     truncated: StrictBool = False
@@ -143,7 +145,12 @@ def _run_git(cwd: Path, args: list[str], *, timeout: float = 3.0) -> bytes | Non
     return out
 
 
-def parse_unified_diff(raw_text: str, *, scope: Literal["working_tree", "last_commit"]) -> dict | None:
+def parse_unified_diff(
+    raw_text: str,
+    *,
+    source: Literal["working_tree", "last_commit"],
+    commit_title: str | None = None,
+) -> dict | None:
     files_raw: list[dict] = []
     current: dict | None = None
     current_hunk: dict | None = None
@@ -160,6 +167,7 @@ def parse_unified_diff(raw_text: str, *, scope: Literal["working_tree", "last_co
                 "status": "modified",
                 "additions": 0,
                 "deletions": 0,
+                "binary": False,
                 "hunks": [],
                 "line_count": 0,
                 "truncated": False,
@@ -183,7 +191,10 @@ def parse_unified_diff(raw_text: str, *, scope: Literal["working_tree", "last_co
                 if _is_sensitive_relpath(target_path):
                     current["skip"] = True
             continue
-        if line.startswith(("index ", "--- ", "+++ ", "Binary files ")):
+        if line.startswith("Binary files "):
+            current["binary"] = True
+            continue
+        if line.startswith(("index ", "--- ", "+++ ")):
             continue
         if line.startswith("@@ "):
             hm = HUNK_RE.match(line)
@@ -227,15 +238,18 @@ def parse_unified_diff(raw_text: str, *, scope: Literal["working_tree", "last_co
             if current["line_count"] < MAX_LINES_PER_FILE:
                 current_hunk["lines"].append({
                     "kind": kind,
-                    "old_no": o_no,
-                    "new_no": n_no,
+                    "old_line": o_no,
+                    "new_line": n_no,
                     "text": _clean_line(body),
                 })
                 current["line_count"] += 1
             else:
                 current["truncated"] = True
 
-    visible = [f for f in files_raw if not f["skip"] and (f["additions"] > 0 or f["deletions"] > 0 or f["status"] != "modified")]
+    visible = [
+        f for f in files_raw
+        if not f["skip"] and (f["additions"] > 0 or f["deletions"] > 0 or f["binary"] or f["status"] != "modified")
+    ]
     if not visible:
         return None
 
@@ -243,6 +257,7 @@ def parse_unified_diff(raw_text: str, *, scope: Literal["working_tree", "last_co
     total_add = sum(f["additions"] for f in visible)
     total_del = sum(f["deletions"] for f in visible)
     summary_truncated = total_files > MAX_DIFF_FILES or any(f["truncated"] for f in visible[:MAX_DIFF_FILES])
+    clean_title = _clean_line(commit_title).strip()[:160] if commit_title else None
 
     out_files = []
     for f in visible[:MAX_DIFF_FILES]:
@@ -252,13 +267,15 @@ def parse_unified_diff(raw_text: str, *, scope: Literal["working_tree", "last_co
             "status": f["status"],
             "additions": f["additions"],
             "deletions": f["deletions"],
+            "binary": bool(f["binary"]),
             "truncated": bool(f["truncated"]),
             "hunks": hunks,
         })
 
     model = DiffSummaryModel(
-        scope=scope,
-        files_changed=total_files,
+        source=source,
+        commit_title=clean_title or None,
+        total_files=total_files,
         additions=total_add,
         deletions=total_del,
         truncated=summary_truncated,
@@ -332,7 +349,7 @@ def collect_workspace_diff(cwd: Path, *, started_at: str = "", completed_at: str
             wt_text = (wt_text + "\n" + extra).strip()
 
     if wt_text.strip():
-        parsed = parse_unified_diff(wt_text, scope="working_tree")
+        parsed = parse_unified_diff(wt_text, source="working_tree")
         if parsed is not None:
             if wt_truncated:
                 parsed["truncated"] = True
@@ -343,13 +360,15 @@ def collect_workspace_diff(cwd: Path, *, started_at: str = "", completed_at: str
     start_ts = _iso_to_epoch(started_at)
     if end_ts is None and start_ts is None:
         return None
-    head_meta = _run_git(cwd, ["log", "-1", "--format=%ct", "HEAD"])
+    head_meta = _run_git(cwd, ["log", "-1", "--format=%ct%x00%s", "HEAD"])
     if not head_meta:
         return None
+    raw_ts, _, raw_subject = head_meta.partition(b"\x00")
     try:
-        commit_ts = float(head_meta.decode("ascii", errors="ignore").strip())
+        commit_ts = float(raw_ts.decode("ascii", errors="ignore").strip())
     except ValueError:
         return None
+    commit_subject = raw_subject.decode("utf-8", errors="replace").strip()
 
     lower_bound = (start_ts - 60.0) if start_ts is not None else (end_ts - 1800.0)  # type: ignore[operator]
     upper_bound = (end_ts + 300.0) if end_ts is not None else (start_ts + 7200.0)  # type: ignore[operator]
@@ -361,7 +380,7 @@ def collect_workspace_diff(cwd: Path, *, started_at: str = "", completed_at: str
         return None
     commit_truncated = len(commit_bytes) > MAX_RAW_DIFF_BYTES
     commit_text = commit_bytes[:MAX_RAW_DIFF_BYTES].decode("utf-8", errors="replace")
-    parsed_commit = parse_unified_diff(commit_text, scope="last_commit")
+    parsed_commit = parse_unified_diff(commit_text, source="last_commit", commit_title=commit_subject)
     if parsed_commit is not None and commit_truncated:
         parsed_commit["truncated"] = True
     return parsed_commit

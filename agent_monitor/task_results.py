@@ -727,9 +727,19 @@ class TaskResults:
             live_diff = None
             if local:
                 _, source, _ = self._task(task_id)
-                session = self.local.resolve(source)
-                if session is not None and session.cwd is not None:
-                    live_diff = collect_workspace_diff(session.cwd)
+                if source.startswith("antigravity:"):
+                    from .antigravity import resolve_antigravity_deliverable_roots
+
+                    roots = resolve_antigravity_deliverable_roots(
+                        source.removeprefix("antigravity:"),
+                        base=self.local.antigravity_home,
+                    )
+                    if roots is not None and roots[0] is not None:
+                        live_diff = collect_workspace_diff(roots[0])
+                else:
+                    session = self.local.resolve(source)
+                    if session is not None and session.cwd is not None:
+                        live_diff = collect_workspace_diff(session.cwd)
             return {"task_id": task_id, "available": False, "text": "", "result_id": "", "completed_at": "",
                     "truncated": False, "files": [], "diff": live_diff, "txt_size": 0, "txt_sha256": "",
                     "capability": "local" if local else "remote",

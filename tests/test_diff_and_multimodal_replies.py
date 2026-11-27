@@ -51,15 +51,17 @@ def test_parse_unified_diff_filters_secrets_and_counts_lines():
         "+    y = x + 2",
         "+    return y",
     ])
-    parsed = parse_unified_diff(raw, scope="working_tree")
+    parsed = parse_unified_diff(raw, source="working_tree")
     assert parsed is not None
-    assert parsed["scope"] == "working_tree"
-    assert parsed["files_changed"] == 1
+    assert parsed["source"] == "working_tree"
+    assert parsed["total_files"] == 1
     assert parsed["additions"] == 2
     assert parsed["deletions"] == 1
     assert [f["path"] for f in parsed["files"]] == ["src/app.py"]
     lines = parsed["files"][0]["hunks"][0]["lines"]
     assert [ln["kind"] for ln in lines] == ["ctx", "del", "add", "add"]
+    assert lines[1]["old_line"] == 11
+    assert lines[2]["new_line"] == 11
     assert "super_secret_do_not_expose" not in json.dumps(parsed)
 
 
@@ -83,7 +85,7 @@ def test_collect_workspace_diff_working_tree_and_last_commit(tmp_path: Path):
 
     wt_diff = collect_workspace_diff(repo)
     assert wt_diff is not None
-    assert wt_diff["scope"] == "working_tree"
+    assert wt_diff["source"] == "working_tree"
     paths = {f["path"] for f in wt_diff["files"]}
     assert "main.py" in paths
     assert "helper.py" in paths
@@ -97,7 +99,8 @@ def test_collect_workspace_diff_working_tree_and_last_commit(tmp_path: Path):
 
     commit_diff = collect_workspace_diff(repo, started_at=started_iso, completed_at=completed_iso)
     assert commit_diff is not None
-    assert commit_diff["scope"] == "last_commit"
+    assert commit_diff["source"] == "last_commit"
+    assert commit_diff["commit_title"] == "feat: update hello"
     assert {f["path"] for f in commit_diff["files"]} == {"main.py", "helper.py"}
 
 
@@ -207,3 +210,57 @@ def test_stage_reply_images_uses_git_ignored_dir_and_cleans_up(tmp_path: Path):
     assert len(paths) == 1
     assert paths[0].is_file()
     assert paths[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_running_local_antigravity_task_exposes_live_workspace_diff(tmp_path: Path, monkeypatch):
+    from agent_monitor.task_results import LocalResults, TaskResults
+
+    repo = tmp_path / "ag-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Tester")
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "init")
+    (repo / "app.py").write_text("x = 2\ny = 3\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "agent_monitor.antigravity.resolve_antigravity_deliverable_roots",
+        lambda conv_id, base=None: (repo, None),
+    )
+    monkeypatch.setattr(
+        "agent_monitor.antigravity.read_antigravity_result",
+        lambda conv_id, base=None, include_turn_start=False: None,
+    )
+
+    app = create_app(tmp_path / "db", collect_local=False, public_url="https://ag.test", allowed_hosts=["ag.test"])
+    store = app.state.store
+    with store.lock, store.db:
+        store.db.execute("UPDATE preferences SET sync_output=1 WHERE id=1")
+        store.db.execute(
+            "INSERT INTO devices(id,name,platform,local,last_seen) VALUES ('local-pc','PC','Windows',1,?)",
+            (time.time(),),
+        )
+        store.db.execute(
+            "INSERT INTO tasks VALUES ('local-pc','antigravity:conv-1',?)",
+            (
+                json.dumps(
+                    {
+                        "id": "antigravity:conv-1",
+                        "tool": "antigravity",
+                        "title": "Running AG Turn",
+                        "status": "running",
+                        "updated_at": "2026-11-27T15:00:00Z",
+                    }
+                ),
+            ),
+        )
+    svc = TaskResults(store, LocalResults(antigravity_home=tmp_path))
+    res = svc.result("local-pc:antigravity:conv-1")
+    assert res["available"] is False
+    assert res["diff"] is not None
+    assert res["diff"]["source"] == "working_tree"
+    assert res["diff"]["files"][0]["path"] == "app.py"
+    assert res["diff"]["additions"] == 2
+    assert res["diff"]["deletions"] == 1
