@@ -484,7 +484,9 @@ private struct TaskDetailView: View {
                                 )
                             }
                             finalResultCard
-                            // Reserved clean slot directly below Final Result for upcoming Feature #2 (交付代码 Diff 速览)
+                            if store.syncOutput, let diff = model.result?.diff, let files = diff.files, !files.isEmpty {
+                                DiffSummaryCardView(diff: diff, files: files)
+                            }
                             if !showInspector {
                                 sessionDetailsAccordionCard(owningComputer: owningComputer)
                             }
@@ -760,28 +762,65 @@ private struct TaskDetailView: View {
     }
 
     private func composerBar(previewItems: [DevPreviewItem]) -> some View {
-        let loopbackChips = previewItems.filter { $0.loopbackFixPrompt != nil }
+        let firstLoopback = previewItems.first(where: { $0.loopbackFixPrompt != nil })
+        let hasErr = liveTask.errorAnalysis?.summary?.isEmpty == false
+        let diffCount = model.result?.diff?.files?.count ?? 0
+        let wasPlan = model.replySettingsSummary.contains("计划")
+        let suggestions = QuickReplySuggestionPolicy.suggestions(
+            status: liveTask.effectiveStatus,
+            hasError: hasErr,
+            diffFiles: diffCount,
+            planMode: wasPlan,
+            loopbackPort: firstLoopback?.port ?? 0,
+            loopbackPrompt: firstLoopback?.loopbackFixPrompt
+        )
         return VStack(alignment: .leading, spacing: 8) {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
-                // Quick-Action & Suggestion Chips Row (reserved for Feature #5 + live loopback port prompt chip)
-                if !loopbackChips.isEmpty {
+                if !suggestions.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            ForEach(loopbackChips) { item in
-                                if let fixPrompt = item.loopbackFixPrompt {
-                                    Button {
-                                        model.draft = fixPrompt
-                                    } label: {
-                                        Text("✨ 开放 :\(item.port) 供手机预览")
-                                            .font(.custom("MiSans-Regular", size: 11.5))
-                                            .foregroundStyle(Color.accentColor)
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 4)
-                                            .background(Color.accentColor.opacity(0.11), in: Capsule())
-                                    }
-                                    .buttonStyle(.plain)
+                            ForEach(suggestions) { item in
+                                Button {
+                                    model.draft = item.prompt
+                                } label: {
+                                    Text(item.label)
+                                        .font(.custom("MiSans-Regular", size: 11.5))
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4)
+                                        .background(Color.accentColor.opacity(0.11), in: Capsule())
                                 }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+
+                if !model.draftImages.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(model.draftImages) { img in
+                                HStack(spacing: 6) {
+                                    Image(systemName: "photo")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Color.accentColor)
+                                    Text(img.label)
+                                        .font(.custom("MiSans-Regular", size: 11.5))
+                                    if !model.sending && !model.unresolved {
+                                        Button {
+                                            model.draftImages.removeAll(where: { $0.id == img.id })
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 12))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.06), in: Capsule())
                             }
                         }
                     }
@@ -833,6 +872,24 @@ private struct TaskDetailView: View {
                     }
                     .buttonStyle(.plain)
 
+                    Button {
+                        chooseReplyImages()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "photo.badge.plus")
+                                .font(.system(size: 11))
+                            Text(model.draftImages.isEmpty ? "附带图片" : "图片 \(model.draftImages.count)")
+                                .lineLimit(1)
+                        }
+                        .font(.custom("MiSans-Regular", size: 12))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.unresolved || model.sending || model.draftImages.count >= QuickReplySuggestionPolicy.maxAttachments)
+
                     if let used = model.recentUsedModelSummary {
                         Text("本轮：\(used)")
                             .font(.custom("MiSans-Regular", size: 11.5))
@@ -862,6 +919,195 @@ private struct TaskDetailView: View {
             .padding(.bottom, 12)
         }
         .background(.regularMaterial)
+    }
+
+    private func chooseReplyImages() {
+        let rem = QuickReplySuggestionPolicy.maxAttachments - model.draftImages.count
+        guard rem > 0 else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .webP]
+        panel.allowsMultipleSelection = rem > 1
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls.prefix(rem) {
+            if let encoded = TaskDetailModel.encodeImageAttachment(from: url, index: model.draftImages.count + 1) {
+                model.draftImages.append(encoded)
+            } else {
+                store.notice = "无法读取或压缩所选图片"
+            }
+        }
+    }
+}
+
+@MainActor
+private struct DiffSummaryCardView: View {
+    let diff: DiffSummary
+    let files: [DiffFile]
+    @State private var expandedPaths: Set<String> = []
+    @State private var didInitDefault = false
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Label("代码变更", systemImage: "chevron.left.forwardslash.chevron.right")
+                        .font(.custom("MiSans-Regular", size: 17))
+                        .fontWeight(.semibold)
+                    Text(diff.source == "last_commit" ? "本轮提交" : "未提交")
+                        .lineLimit(1)
+                        .font(.custom("MiSans-Regular", size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                    Spacer()
+                    Text("\(max(files.count, diff.totalFiles)) 文件")
+                        .font(.custom("MiSans-Regular", size: 12))
+                        .foregroundStyle(.secondary)
+                    if diff.additions > 0 || diff.deletions > 0 {
+                        Text("+\(diff.additions)")
+                            .font(.system(size: 12.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.green)
+                        Text("-\(diff.deletions)")
+                            .font(.system(size: 12.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                if let commitTitle = diff.commitTitle, !commitTitle.isEmpty {
+                    Text("提交：\(commitTitle)")
+                        .font(.custom("MiSans-Regular", size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                ForEach(files) { file in
+                    let hasHunks = (file.binary != true) && (file.hunks?.isEmpty == false)
+                    let isOpen = hasHunks && expandedPaths.contains(file.path)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button {
+                            guard hasHunks else { return }
+                            if expandedPaths.contains(file.path) {
+                                expandedPaths.remove(file.path)
+                            } else {
+                                expandedPaths.insert(file.path)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(badgeLabel(file.status))
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(badgeColor(file.status))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                Text(file.path)
+                                    .font(.system(size: 12.2, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                if file.binary == true {
+                                    Text("二进制").font(.custom("MiSans-Regular", size: 11)).foregroundStyle(.secondary)
+                                } else {
+                                    if file.additions > 0 {
+                                        Text("+\(file.additions)")
+                                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(.green)
+                                    }
+                                    if file.deletions > 0 {
+                                        Text("-\(file.deletions)")
+                                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                                            .foregroundStyle(.red)
+                                    }
+                                }
+                                if hasHunks {
+                                    Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 9)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if isOpen, let hunks = file.hunks {
+                            Divider()
+                            ScrollView(.horizontal, showsIndicators: true) {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
+                                        if !hunk.header.isEmpty {
+                                            Text(hunk.header)
+                                                .font(.system(size: 11.2, design: .monospaced))
+                                                .foregroundStyle(Color.accentColor)
+                                                .padding(.horizontal, 10)
+                                                .padding(.vertical, 3)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(Color.accentColor.opacity(0.09))
+                                        }
+                                        if let lines = hunk.lines {
+                                            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                                                let num = line.kind == "del" ? line.oldLine : (line.newLine ?? line.oldLine)
+                                                let numCol = num.map { String(format: "%4d ", $0) } ?? "     "
+                                                let pfx = line.kind == "add" ? "+" : (line.kind == "del" ? "-" : " ")
+                                                Text("\(numCol)\(pfx) \(line.text)")
+                                                    .font(.system(size: 11.5, design: .monospaced))
+                                                    .foregroundStyle(line.kind == "add" ? Color.green : (line.kind == "del" ? Color.red : Color.secondary))
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 1.5)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .background(
+                                                        line.kind == "add" ? Color.green.opacity(0.11)
+                                                        : (line.kind == "del" ? Color.red.opacity(0.11) : Color.clear)
+                                                    )
+                                            }
+                                        }
+                                    }
+                                    if file.truncated == true {
+                                        Text("   … 其余差异行已折叠")
+                                            .font(.custom("MiSans-Regular", size: 11))
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                if diff.truncated == true || diff.totalFiles > files.count {
+                    Text("已展示前 \(files.count) / \(max(files.count, diff.totalFiles)) 个文件的精简差异，完整 Diff 请在仓库查看")
+                        .font(.custom("MiSans-Regular", size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .onAppear {
+            if !didInitDefault {
+                didInitDefault = true
+                if files.count == 1, files[0].binary != true {
+                    expandedPaths.insert(files[0].path)
+                }
+            }
+        }
+    }
+
+    private func badgeLabel(_ status: String) -> String {
+        guard let c = status.uppercased().first else { return "M" }
+        switch c {
+        case "A", "U", "?": return "A"
+        case "D": return "D"
+        case "R": return "R"
+        default: return "M"
+        }
+    }
+
+    private func badgeColor(_ status: String) -> Color {
+        let b = badgeLabel(status)
+        if b == "A" { return .green }
+        if b == "D" { return .red }
+        return .accentColor
     }
 }
 
@@ -1168,6 +1414,7 @@ private struct NewTaskSheet: View {
     @State private var selectedProjectId = ""
     @State private var selectedTool = "codex"
     @State private var prompt = ""
+    @State private var draftImages: [DraftImageAttachment] = []
     @State private var submitting = false
     @State private var statusMessage = ""
     @State private var statusIsWarning = false
@@ -1189,7 +1436,7 @@ private struct NewTaskSheet: View {
             && activeComputer != nil
             && supportedTools.contains(selectedTool)
             && MonitorSecurity.matches(selectedProjectId, "[0-9a-f]{24}")
-            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
     }
 
     var body: some View {
@@ -1246,9 +1493,43 @@ private struct NewTaskSheet: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("首条任务指令")
-                        .font(.custom("MiSans-Regular", size: 12.5))
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("首条任务指令")
+                            .font(.custom("MiSans-Regular", size: 12.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            chooseNewTaskImages()
+                        } label: {
+                            Label(draftImages.isEmpty ? "附带图片" : "附带图片 (\(draftImages.count))", systemImage: "photo.badge.plus")
+                                .font(.custom("MiSans-Regular", size: 12))
+                        }
+                        .controlSize(.small)
+                        .disabled(submitting || draftImages.count >= QuickReplySuggestionPolicy.maxAttachments)
+                    }
+                    if !draftImages.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(draftImages) { img in
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "photo").font(.system(size: 11)).foregroundStyle(Color.accentColor)
+                                        Text(img.label).font(.custom("MiSans-Regular", size: 11.5))
+                                        if !submitting {
+                                            Button {
+                                                draftImages.removeAll(where: { $0.id == img.id })
+                                            } label: {
+                                                Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(.secondary)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(Color.primary.opacity(0.06), in: Capsule())
+                                }
+                            }
+                        }
+                    }
                     TextEditor(text: $prompt)
                         .font(.custom("MiSans-Regular", size: 13.5))
                         .scrollContentBackground(.hidden)
@@ -1318,6 +1599,7 @@ private struct NewTaskSheet: View {
             projectId: selectedProjectId,
             tool: selectedTool,
             prompt: prompt,
+            images: draftImages,
             onProgress: { msg in
                 statusIsWarning = false
                 statusMessage = msg
@@ -1332,6 +1614,23 @@ private struct NewTaskSheet: View {
         if let err = outcome.error, !err.isEmpty {
             statusIsWarning = true
             statusMessage = err
+        }
+    }
+
+    private func chooseNewTaskImages() {
+        let rem = QuickReplySuggestionPolicy.maxAttachments - draftImages.count
+        guard rem > 0 else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .webP]
+        panel.allowsMultipleSelection = rem > 1
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls.prefix(rem) {
+            if let encoded = TaskDetailModel.encodeImageAttachment(from: url, index: draftImages.count + 1) {
+                draftImages.append(encoded)
+            } else {
+                statusIsWarning = true
+                statusMessage = "无法读取或压缩所选图片"
+            }
         }
     }
 }

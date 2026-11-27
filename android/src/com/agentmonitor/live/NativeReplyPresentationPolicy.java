@@ -88,4 +88,45 @@ public final class NativeReplyPresentationPolicy {
         if (parts.length() == 0) return "";
         return (verifiedApplied ? "本轮实际使用：" : "已随回复提交：") + parts;
     }
+
+    public static final class Suggestion {
+        public final String label;
+        public final String prompt;
+        public Suggestion(String label, String prompt) {
+            this.label = label == null ? "" : label;
+            this.prompt = prompt == null ? "" : prompt;
+        }
+    }
+
+    /**
+     * Contextual 1-tap follow-up suggestions for the composer bar (#5).
+     * Combines optional loopback dev-port fix with task-status/diff-aware prompts (max 4).
+     */
+    public static java.util.List<Suggestion> quickSuggestions(
+            String status, boolean hasError, int diffFiles, boolean planMode,
+            int loopbackPort, String loopbackPrompt) {
+        java.util.List<Suggestion> out = new java.util.ArrayList<>();
+        if (loopbackPort > 0 && loopbackPrompt != null && !loopbackPrompt.trim().isEmpty()) {
+            out.add(new Suggestion("开放 :" + loopbackPort + " 手机预览", loopbackPrompt.trim()));
+        }
+        if ("failed".equals(status) || hasError) {
+            out.add(new Suggestion("定位报错并修复", "请定位上述报错或失败的根本原因，直接修复并运行验证确认恢复正常。"));
+            out.add(new Suggestion("最小复现并跑测试", "请先用最小范围复现该问题，修复后运行相关测试汇报结果。"));
+        } else if (planMode) {
+            out.add(new Suggestion("按此方案执行", "方案确认无误，请按此方案逐步实施修改并运行测试验证。"));
+            out.add(new Suggestion("只保留核心改动", "请精简上述方案，只做最核心、改动最小的部分并执行。"));
+        } else if (diffFiles > 0) {
+            out.add(new Suggestion("运行测试验证改动", "请针对刚才修改的代码运行相关测试与构建检查，确认没有引入回归。"));
+            out.add(new Suggestion("自查边界与安全", "请审视本轮代码变更，检查是否有遗漏的边界情况、异常处理或权限安全问题。"));
+            out.add(new Suggestion("总结变更与提交说明", "请简要总结本轮修改的文件与核心逻辑，并草拟一段清晰的 Git 提交说明。"));
+        } else {
+            out.add(new Suggestion("继续推进下一步", "请继续推进下一步，完成后汇报验证结果。"));
+            out.add(new Suggestion("运行测试检查状态", "请运行当前项目的测试套件，汇报通过情况与待处理项。"));
+            out.add(new Suggestion("总结进展与待办", "请简要总结目前已完成的内容，以及接下来还需要处理的事项。"));
+        }
+        while (out.size() > 4) {
+            out.remove(out.size() - 1);
+        }
+        return out;
+    }
 }

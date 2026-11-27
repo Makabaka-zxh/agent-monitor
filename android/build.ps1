@@ -182,7 +182,7 @@ Run-Checked (Join-Path $javaBin 'java.exe') @('-cp', (Join-Path $buildDirectory 
 # Compile the real notification/receiver implementation against offline recording stubs.
 # These classes stay outside build/classes and therefore never enter the APK.
 $notificationTestSources = @(Get-ChildItem -LiteralPath (Join-Path $projectDirectory 'tests/notification-stubs') -Filter '*.java' -Recurse -File | ForEach-Object { $_.FullName })
-foreach ($source in @('TrackingService', 'MonitorWidgetBridge', 'TrackingRequestDiagnostics', 'TrackingRemovalListener', 'NotificationRecoveryPolicy', 'StopReceiver', 'DismissReceiver', 'TrackingPolicy', 'NativeNavigationPolicy', 'NativeWebPolicy', 'NativeScreenPolicy', 'NativeListPresentation', 'LivePresentation', 'LivePresentationPreferences', 'UsageAlertNotification', 'DeviceBrand', 'XiaomiLiveCapabilities', 'XiaomiLiveNotification')) {
+foreach ($source in @('TrackingService', 'MonitorWidgetBridge', 'TrackingRequestDiagnostics', 'TrackingRemovalListener', 'NotificationRecoveryPolicy', 'StopReceiver', 'DismissReceiver', 'ApprovalActionReceiver', 'TrackingPolicy', 'NativeNavigationPolicy', 'NativeWebPolicy', 'NativeScreenPolicy', 'NativeListPresentation', 'LivePresentation', 'LivePresentationPreferences', 'UsageAlertNotification', 'DeviceBrand', 'XiaomiLiveCapabilities', 'XiaomiLiveNotification')) {
     $notificationTestSources += Join-Path $projectDirectory "src/com/agentmonitor/live/$source.java"
 }
 $notificationTestSources += Join-Path $projectDirectory 'tests/TrackingNotificationTest.java'

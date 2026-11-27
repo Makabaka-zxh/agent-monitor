@@ -457,6 +457,32 @@ class TaskInteractions:
                 result[row["device_id"] + ":" + row["source_id"]] = "question"
         return result
 
+    def pending_approvals(self, reader_id):
+        """Return {task_id: {id, revision, title}} for active reader-owned approvals."""
+        if self.replies.stopping.is_set():
+            return {}
+        rows = self.store.db.execute("""
+            SELECT COALESCE(NULLIF(c.created_task_id,''), c.task_id) AS task_id,
+                   i.id, i.revision, i.payload
+            FROM task_interactions i JOIN task_replies c ON c.id=i.command_id
+                AND c.reader_id=i.reader_id AND c.device_id=i.device_id
+                AND (c.source_id=i.source_id OR c.created_task_id=i.device_id||':'||i.source_id)
+            WHERE i.reader_id=? AND i.kind='approval' AND i.state='pending'
+                AND i.expires_at>? AND c.state IN ('dispatching','running')
+            ORDER BY i.created_at ASC""", (reader_id, time.time())).fetchall()
+        result = {}
+        for row in rows:
+            tid = row["task_id"]
+            if tid in result:
+                continue
+            payload = json.loads(row["payload"]) if row["payload"] else {}
+            result[tid] = {
+                "id": row["id"],
+                "revision": row["revision"],
+                "title": str(payload.get("title", "") or "")[:120],
+            }
+        return result
+
     def get(self, reader, task_id):
         device_id, source_id, device, task, reason = self.replies._base_capability(task_id, for_catalog=True)
         rows = self.store.db.execute("""SELECT * FROM task_interactions WHERE device_id=? AND source_id=? AND reader_id=?

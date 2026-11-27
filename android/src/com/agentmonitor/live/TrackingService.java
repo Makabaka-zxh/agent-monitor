@@ -48,6 +48,8 @@ public final class TrackingService extends Service {
     private final DeviceBrand deviceBrand = DeviceBrand.detect(Build.MANUFACTURER, Build.BRAND);
     private NotificationManager manager;
     private String title = "任务", tool = "", token = "", notificationTaskId = "";
+    private String pendingApprovalId = "", pendingApprovalRevision = "", pendingApprovalTitle = "", submittedApprovalId = "";
+    private boolean decisionInFlight;
     private LivePresentation.Data presentationData = new LivePresentation.Data();
     private long started, lastSuccess, lastConfirmedRunning, lastConfirmedTask, nextFetch, epoch;
     // In until-task-end mode this confirmation clock also records an explicit waiting state.
@@ -115,6 +117,62 @@ public final class TrackingService extends Service {
         if (current != null && current.recovery != null && current.recovery.matchesSession(expectedGeneration, sessionNonce))
             requestStop(context, expectedGeneration);
     }
+    public static void requestNotificationApproval(Context context, long expectedGeneration, String sessionNonce,
+                                                   String requestId, String revision, String decision) {
+        if (!"allow_once".equals(decision) && !"deny".equals(decision)) return;
+        if (requestId == null || requestId.isEmpty() || revision == null || revision.isEmpty()) return;
+        TrackingService current = instance;
+        if (current == null || current.recovery == null || !current.recovery.matchesSession(expectedGeneration, sessionNonce)) return;
+        current.handler.post(() -> current.submitNotificationApproval(expectedGeneration, requestId, revision, decision));
+    }
+    private void clearPendingApproval() {
+        pendingApprovalId = "";
+        pendingApprovalRevision = "";
+        pendingApprovalTitle = "";
+    }
+    private void applyPendingApproval(JSONObject task) {
+        JSONObject pa = task == null ? null : task.optJSONObject("pending_approval");
+        String id = pa == null ? "" : clean(pa.optString("id"), 128);
+        String rev = pa == null ? "" : clean(pa.optString("revision"), 128);
+        if (id.isEmpty() || rev.isEmpty() || id.equals(submittedApprovalId)) {
+            clearPendingApproval();
+            return;
+        }
+        pendingApprovalId = id;
+        pendingApprovalRevision = rev;
+        pendingApprovalTitle = clean(pa.optString("title"), 80);
+    }
+    private void submitNotificationApproval(long expectedGeneration, String requestId, String revision, String decision) {
+        if (!accepts(expectedGeneration) || decisionInFlight || shouldRedactLockscreen()) return;
+        if (!requestId.equals(pendingApprovalId) || !revision.equals(pendingApprovalRevision)) return;
+        final String submitToken = token;
+        final String submitTask = notificationTaskId;
+        if (submitToken.isEmpty() || submitTask.isEmpty() || !submitToken.equals(SessionStore.token(this))) return;
+        decisionInFlight = true;
+        submittedApprovalId = requestId;
+        clearPendingApproval();
+        trackingMessage = "正在确认任务状态";
+        pushWidgetTracking();
+        publish(notification(trackingMessage, true, false));
+        worker.execute(() -> {
+            NativeApi.Failure failure = null;
+            try {
+                NativeApprovalSender.send(submitTask, requestId, revision, decision, submitToken);
+            } catch (NativeApi.Failure err) {
+                failure = err;
+            }
+            final NativeApi.Failure err = failure;
+            handler.post(() -> {
+                if (!accepts(expectedGeneration)) return;
+                decisionInFlight = false;
+                if (err != null) {
+                    if (err.status == 401) { SessionStore.clearIfToken(this, submitToken); finish("", false); return; }
+                    if (err.status != 409 && err.status != 404) submittedApprovalId = "";
+                }
+                nextFetch = SystemClock.elapsedRealtime();
+            });
+        });
+    }
     public static void requestDismiss(Context context, long expectedGeneration, String sessionNonce, String presentationNonce) {
         TrackingService current = instance;
         if (current != null) current.onDismiss(expectedGeneration, sessionNonce, presentationNonce);
@@ -175,6 +233,7 @@ public final class TrackingService extends Service {
         handler.removeCallbacksAndMessages(null);
         invalidateNotification();
         epoch = ++generation; active = true; confirmingState = true; inFlight = false;
+        decisionInFlight = false; submittedApprovalId = ""; clearPendingApproval();
         clearAllRestores = 0;
         trackedId = clean(intent.getStringExtra("task_id"), 512);
         notificationTaskId = trackedId;
@@ -272,6 +331,7 @@ public final class TrackingService extends Service {
                         task != null && NativeApi.online(value, task), task == null ? null : task.optString("status", "unknown"), durationMs)) {
                     confirmingState = false; lastConfirmedRunning = lastConfirmedTask = now;
                     title = clean(task.optString("title", title), 160);
+                    applyPendingApproval(task);
                     trackingMessage = "等待批准";
                     pushWidgetTracking();
                     publish(notification(trackingMessage, true, false));
@@ -279,6 +339,7 @@ public final class TrackingService extends Service {
                 }
                 if (!TrackingPolicy.confirmedRunning(task != null, task != null && task.optBoolean("archived"),
                         task != null && NativeApi.online(value, task), task == null ? null : task.optString("status", "unknown"))) {
+                    clearPendingApproval();
                     confirmingState = true;
                     if (TrackingPolicy.observesUnknown(task != null, task != null && task.optBoolean("archived"),
                             task != null && NativeApi.online(value, task), task == null ? null : task.optString("status", ""), durationMs)) {
@@ -291,9 +352,11 @@ public final class TrackingService extends Service {
                 }
                 confirmingState = false; lastConfirmedRunning = lastConfirmedTask = now;
                 title = clean(task.optString("title", title), 160);
-                trackingMessage = "执行中";
+                applyPendingApproval(task);
+                boolean waitingOnApproval = !pendingApprovalId.isEmpty();
+                trackingMessage = waitingOnApproval ? "等待批准" : "执行中";
                 pushWidgetTracking();
-                publish(notification(trackingMessage, true, true));
+                publish(notification(trackingMessage, true, !waitingOnApproval));
             });
         });
     }
@@ -314,6 +377,7 @@ public final class TrackingService extends Service {
     private void networkFailure(long now) {
         String cutoff = TrackingPolicy.deadline(now, started, lastSuccess, stateConfirmationTime(), confirmingState, durationMs);
         if (!cutoff.isEmpty()) { finish(cutoff, true); return; }
+        clearPendingApproval();
         trackingMessage = "更新暂停，正在重连";
         pushWidgetTracking();
         publish(notification(trackingMessage, true, false));
@@ -463,9 +527,14 @@ public final class TrackingService extends Service {
                 .setContentIntent(content).setVisibility(Notification.VISIBILITY_PRIVATE).setOnlyAlertOnce(true)
                 .setPublicVersion(publicVersion)
                 .setOngoing(ongoing).setAutoCancel(!ongoing).setShowWhen(false);
-        if (showDetails) builder.setStyle(new Notification.BigTextStyle().bigText(
-                LivePresentation.expanded(toolLabel, displayMessage, presentationData, displayOptions,
-                        elapsed, System.currentTimeMillis())));
+        if (showDetails) {
+            String expandedBody = LivePresentation.expanded(toolLabel, displayMessage, presentationData, displayOptions,
+                    elapsed, System.currentTimeMillis());
+            if (!lockscreenRedacted && !pendingApprovalId.isEmpty() && !pendingApprovalTitle.isEmpty()) {
+                expandedBody = expandedBody + "\n待批：" + LivePresentation.clean(pendingApprovalTitle, 48);
+            }
+            builder.setStyle(new Notification.BigTextStyle().bigText(expandedBody));
+        }
         // Android 12+ may defer foreground visibility beyond POST_SETTLE_MS; that is not a user dismissal.
         if (Build.VERSION.SDK_INT >= 31 && ongoing) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
         if (Build.VERSION.SDK_INT >= 36 && promote && ongoing) {
@@ -485,7 +554,29 @@ public final class TrackingService extends Service {
             Intent dismiss = new Intent(this, DismissReceiver.class).setData(Uri.parse("agentmonitor://tracking-dismiss/" + epoch + "/" + recovery.presentationNonce()))
                     .putExtra("generation", epoch).putExtra(EXTRA_SESSION, recovery.sessionNonce()).putExtra(EXTRA_PRESENTATION, recovery.presentationNonce());
             PendingIntent deleted = PendingIntent.getBroadcast(this, 0, dismiss, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            if (!lockscreenRedacted) builder.addAction(new Notification.Action.Builder(null, "停止跟踪", action).build());
+            if (!lockscreenRedacted) {
+                if (!pendingApprovalId.isEmpty() && !pendingApprovalRevision.isEmpty() && !decisionInFlight) {
+                    Intent approveIntent = new Intent(this, ApprovalActionReceiver.class)
+                            .setData(Uri.parse("agentmonitor://tracking-approve/" + epoch + "/" + recovery.sessionNonce() + "/" + pendingApprovalId))
+                            .putExtra("generation", epoch)
+                            .putExtra(EXTRA_SESSION, recovery.sessionNonce())
+                            .putExtra("request_id", pendingApprovalId)
+                            .putExtra("revision", pendingApprovalRevision)
+                            .putExtra("decision", "allow_once");
+                    PendingIntent approveAction = PendingIntent.getBroadcast(this, 1, approveIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                    Intent denyIntent = new Intent(this, ApprovalActionReceiver.class)
+                            .setData(Uri.parse("agentmonitor://tracking-deny/" + epoch + "/" + recovery.sessionNonce() + "/" + pendingApprovalId))
+                            .putExtra("generation", epoch)
+                            .putExtra(EXTRA_SESSION, recovery.sessionNonce())
+                            .putExtra("request_id", pendingApprovalId)
+                            .putExtra("revision", pendingApprovalRevision)
+                            .putExtra("decision", "deny");
+                    PendingIntent denyAction = PendingIntent.getBroadcast(this, 2, denyIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                    builder.addAction(new Notification.Action.Builder(null, "批准本次", approveAction).build());
+                    builder.addAction(new Notification.Action.Builder(null, "拒绝", denyAction).build());
+                }
+                builder.addAction(new Notification.Action.Builder(null, "停止跟踪", action).build());
+            }
             builder.setDeleteIntent(deleted);
         }
         promotionRequested = false;
@@ -505,7 +596,7 @@ public final class TrackingService extends Service {
     private void finish(String message, boolean leaveNotice) {
         if (!active) { stopSelf(); return; }
         leaveNotice = leaveNotice && (recovery == null || !recovery.isPending());
-        active = false; invalidateNotification(); handler.removeCallbacksAndMessages(null);
+        active = false; clearPendingApproval(); decisionInFlight = false; invalidateNotification(); handler.removeCallbacksAndMessages(null);
         if (epoch == generation) { ++generation; trackedId = ""; trackingMessage = ""; endsAt = 0; untilTaskEnd = false; }
         MonitorWidgetBridge.clearTracking(this);
         stopForeground(STOP_FOREGROUND_REMOVE); manager.cancel(NOTIFICATION_ID);
@@ -517,7 +608,7 @@ public final class TrackingService extends Service {
     }
     @Override public void onTimeout(int startId, int fgsType) { finish("系统已结束本次跟踪", true); }
     @Override public void onDestroy() {
-        active = false; invalidateNotification(); handler.removeCallbacksAndMessages(null); worker.shutdownNow();
+        active = false; clearPendingApproval(); decisionInFlight = false; invalidateNotification(); handler.removeCallbacksAndMessages(null); worker.shutdownNow();
         if (screenReceiverRegistered) {
             screenReceiverRegistered = false;
             try { unregisterReceiver(screenReceiver); } catch (RuntimeException ignored) { }

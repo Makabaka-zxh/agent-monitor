@@ -85,7 +85,9 @@ public sealed class MonitorApi : IDisposable
         IReadOnlyList<(string Key, string Value)>? query = null,
         CancellationToken ct = default)
     {
-        var maxBytes = path == "/api/native/workbench" ? 8 * 1024 * 1024 : 1024 * 1024;
+        var maxBytes = path == "/api/native/workbench"
+            ? 8 * 1024 * 1024
+            : path == "/api/native/tasks/result" ? 2 * 1024 * 1024 : 1024 * 1024;
         var raw = await SendBytesAsync(origin, path, method, body, token, maxBytes, query, ct).ConfigureAwait(false);
         return JsonSerializer.Deserialize<T>(raw, JsonOptions)
             ?? throw new MonitorApiException(0, "服务返回的内容无效，请重试");

@@ -766,11 +766,93 @@ public static class Dialogs
         capabilityHint.Visibility = Visibility.Collapsed;
         root.Children.Add(capabilityHint);
 
-        root.Children.Add(UiKit.Body("首条任务指令", 12.8, UiKit.MutedBrush));
-        var promptBox = UiKit.StyledTextBox("", "描述你想让它完成的任务（Ctrl + Enter 快捷发起）…", multiline: true);
+        var draftImages = new List<ImageAttachmentDto>();
+        Action? syncBtnForward = null;
+
+        var promptHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+        var attachHost = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8), Visibility = Visibility.Collapsed };
+        Button? addImgBtn = null;
+
+        void RenderNewTaskAttachments()
+        {
+            attachHost.Children.Clear();
+            for (var idx = 0; idx < draftImages.Count; idx++)
+            {
+                var capturedIdx = idx;
+                attachHost.Children.Add(UiKit.BuildImageAttachmentPill(draftImages[idx], () =>
+                {
+                    if (capturedIdx < draftImages.Count)
+                    {
+                        draftImages.RemoveAt(capturedIdx);
+                        RenderNewTaskAttachments();
+                        syncBtnForward?.Invoke();
+                    }
+                }));
+            }
+            attachHost.Visibility = draftImages.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (addImgBtn is not null)
+                UiKit.SetButtonState(addImgBtn, draftImages.Count > 0 ? $"附带图片 ({draftImages.Count})" : "附带图片", draftImages.Count < QuickReplySuggestionPolicy.MaxAttachments, primary: false);
+        }
+
+        addImgBtn = UiKit.SecondaryButton("附带图片", () =>
+        {
+            if (draftImages.Count >= QuickReplySuggestionPolicy.MaxAttachments)
+            {
+                ShowMessage(win, "图片数量已达上限", $"单次最多可附带 {QuickReplySuggestionPolicy.MaxAttachments} 张图片。");
+                return;
+            }
+            var dlg = new OpenFileDialog
+            {
+                Filter = "图片文件 (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp",
+                Multiselect = draftImages.Count < QuickReplySuggestionPolicy.MaxAttachments - 1
+            };
+            if (dlg.ShowDialog(win) == true)
+            {
+                foreach (var path in dlg.FileNames)
+                {
+                    if (draftImages.Count >= QuickReplySuggestionPolicy.MaxAttachments) break;
+                    try
+                    {
+                        draftImages.Add(UiKit.LoadImageAttachmentFromFile(path, draftImages.Count + 1));
+                    }
+                    catch (Exception ex)
+                    {
+                        ShowMessage(win, "无法添加图片", ex.Message);
+                        break;
+                    }
+                }
+                RenderNewTaskAttachments();
+                syncBtnForward?.Invoke();
+            }
+        }, glyph: "image");
+        addImgBtn.ToolTip = "选择截图或图片（也可在输入框按 Ctrl + V 直接粘贴剪贴板截图）";
+        DockPanel.SetDock(addImgBtn, Dock.Right);
+        addImgBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        promptHeader.Children.Add(addImgBtn);
+        var promptLbl = UiKit.Body("首条任务指令（支持 Ctrl + V 粘贴截图）", 12.8, UiKit.MutedBrush);
+        promptLbl.VerticalAlignment = VerticalAlignment.Center;
+        promptHeader.Children.Add(promptLbl);
+        root.Children.Add(promptHeader);
+        root.Children.Add(attachHost);
+
+        var promptBox = UiKit.StyledTextBox("", "描述你想让它完成的任务（Ctrl + Enter 快捷发起，Ctrl + V 粘贴截图）…", multiline: true);
         promptBox.MinHeight = 96;
         promptBox.MaxHeight = 180;
-        promptBox.Margin = new Thickness(0, 6, 0, 12);
+        promptBox.Margin = new Thickness(0, 0, 0, 12);
+        CommandManager.AddPreviewExecutedHandler(promptBox, (_, e) =>
+        {
+            if (e.Command == ApplicationCommands.Paste && !Clipboard.ContainsText())
+            {
+                var pasted = UiKit.TryReadClipboardImageAttachments(draftImages.Count + 1, QuickReplySuggestionPolicy.MaxAttachments - draftImages.Count);
+                if (pasted.Count > 0)
+                {
+                    draftImages.AddRange(pasted);
+                    RenderNewTaskAttachments();
+                    syncBtnForward?.Invoke();
+                    e.Handled = true;
+                }
+            }
+        });
         root.Children.Add(promptBox);
 
         var statusText = UiKit.Body("", 12.5, UiKit.AccentBrush);
@@ -797,10 +879,13 @@ public static class Dialogs
             var comp = SelectedComputer();
             var tools = DevPreviewPolicy.SupportedToolsFor(comp);
             var hasProj = MonitorSecurity.Matches(SelectedProjectId(), "[0-9a-f]{24}");
-            var hasPrompt = !string.IsNullOrWhiteSpace(promptBox.Text);
+            var hasPrompt = !string.IsNullOrWhiteSpace(promptBox.Text) || draftImages.Count > 0;
             var canSend = !submitting && tools.Contains(selectedTool) && hasProj && hasPrompt;
             UiKit.SetButtonState(startBtn, submitting ? "正在启动…" : "启动新任务", canSend, primary: true);
+            if (addImgBtn is not null)
+                addImgBtn.IsEnabled = !submitting && draftImages.Count < QuickReplySuggestionPolicy.MaxAttachments;
         }
+        syncBtnForward = SyncStartButton;
 
         void RebuildToolChips(List<string> tools)
         {
@@ -887,7 +972,8 @@ public static class Dialogs
             var tools = DevPreviewPolicy.SupportedToolsFor(comp);
             var projId = SelectedProjectId();
             var prompt = promptBox.Text;
-            if (!tools.Contains(selectedTool) || !MonitorSecurity.Matches(projId, "[0-9a-f]{24}") || string.IsNullOrWhiteSpace(prompt))
+            if (!tools.Contains(selectedTool) || !MonitorSecurity.Matches(projId, "[0-9a-f]{24}")
+                || (string.IsNullOrWhiteSpace(prompt) && draftImages.Count == 0))
                 return;
 
             submitting = true;
@@ -910,7 +996,8 @@ public static class Dialogs
                     statusText.Text = msg;
                     statusText.Visibility = Visibility.Visible;
                 },
-                cts.Token);
+                cts.Token,
+                draftImages.Count > 0 ? draftImages : null);
 
             if (cts.IsCancellationRequested) return;
 

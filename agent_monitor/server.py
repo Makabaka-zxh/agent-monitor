@@ -386,10 +386,17 @@ def create_app(state_dir: Path | str, *, collect_local=False, public_url: str | 
     @app.middleware("http")
     async def bounds_and_headers(request: Request, call_next):
         if request.method in {"POST", "PUT", "PATCH"}:
+            max_body = 6 * 1024 * 1024 if request.url.path in {
+                "/api/native/tasks/reply",
+                "/api/native/tasks/start",
+                "/api/tasks/reply",
+                "/api/tasks/start",
+                "/api/agent/results",
+            } else 2 * 1024 * 1024
             size, chunks = 0, []
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > 2 * 1024 * 1024:
+                if size > max_body:
                     return JSONResponse({"detail": "提交的数据过大"}, status_code=413)
                 chunks.append(chunk)
             request._body = b"".join(chunks)

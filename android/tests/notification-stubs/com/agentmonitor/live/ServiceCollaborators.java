@@ -48,3 +48,15 @@ final class NotificationDiagnostics {
     }
     static String endReason(String message) { return message; }
 }
+final class NativeApprovalSender {
+    static final List<String> submissions = new ArrayList<>();
+    static volatile NativeApi.Failure nextFailure;
+    static void send(String taskId, String requestId, String revision, String decision, String token) throws NativeApi.Failure {
+        if (nextFailure != null) {
+            NativeApi.Failure failure = nextFailure;
+            nextFailure = null;
+            throw failure;
+        }
+        submissions.add(taskId + "|" + requestId + "|" + revision + "|" + decision + "|" + token);
+    }
+}

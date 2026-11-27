@@ -1139,6 +1139,53 @@ public sealed record DevPreviewItem(
     string Subtitle,
     string? LoopbackFixPrompt);
 
+public sealed record QuickSuggestionItem(string Label, string Prompt);
+
+public static class QuickReplySuggestionPolicy
+{
+    public const int MaxAttachments = 3;
+
+    public static List<QuickSuggestionItem> SuggestionsFor(
+        string? status,
+        bool hasError,
+        int diffFiles,
+        bool planMode,
+        int loopbackPort = 0,
+        string? loopbackPrompt = null)
+    {
+        var list = new List<QuickSuggestionItem>(5);
+        if (loopbackPort > 0 && !string.IsNullOrWhiteSpace(loopbackPrompt))
+            list.Add(new QuickSuggestionItem($"开放 :{loopbackPort} 手机预览", loopbackPrompt!.Trim()));
+
+        if (status is "failed" or "error" || hasError)
+        {
+            list.Add(new QuickSuggestionItem("定位报错并修复", "请定位上述报错或失败的根本原因，直接修复并运行验证确认恢复正常。"));
+            list.Add(new QuickSuggestionItem("最小复现并跑测试", "请先用最小范围复现该问题，修复后运行相关测试汇报结果。"));
+        }
+        else if (planMode)
+        {
+            list.Add(new QuickSuggestionItem("按此方案执行", "方案确认无误，请按此方案逐步实施修改并运行测试验证。"));
+            list.Add(new QuickSuggestionItem("只保留核心改动", "请精简上述方案，只做最核心、改动最小的部分并执行。"));
+        }
+        else if (diffFiles > 0)
+        {
+            list.Add(new QuickSuggestionItem("运行测试验证改动", "请针对刚才修改的代码运行相关测试与构建检查，确认没有引入回归。"));
+            list.Add(new QuickSuggestionItem("自查边界与安全", "请审视本轮代码变更，检查是否有遗漏的边界情况、异常处理或权限安全问题。"));
+            list.Add(new QuickSuggestionItem("总结变更与提交说明", "请简要总结本轮修改的文件与核心逻辑，并草拟一段清晰的 Git 提交说明。"));
+        }
+        else
+        {
+            list.Add(new QuickSuggestionItem("继续推进下一步", "请继续推进下一步，完成后汇报验证结果。"));
+            list.Add(new QuickSuggestionItem("运行测试检查状态", "请运行当前项目的测试套件，汇报通过情况与待处理项。"));
+            list.Add(new QuickSuggestionItem("总结进展与待办", "请简要总结目前已完成的内容，以及接下来还需要处理的事项。"));
+        }
+
+        if (list.Count > 4)
+            list.RemoveRange(4, list.Count - 4);
+        return list;
+    }
+}
+
 public static class DevPreviewPolicy
 {
     private static readonly string[] CanonicalTools = ["codex", "claude", "antigravity"];

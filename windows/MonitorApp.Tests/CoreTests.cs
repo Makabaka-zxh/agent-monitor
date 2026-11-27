@@ -750,4 +750,73 @@ public class CoreTests
         Assert.Equal("app", NotificationBanner.InferToolBrandKey("Monitor 额度提醒测试"));
         Assert.Equal("app", NotificationBanner.InferToolBrandKey(null));
     }
+
+    [Fact]
+    public void QuickReplySuggestions_And_DiffAndImageModels_RoundTripCleanly()
+    {
+        var errChips = QuickReplySuggestionPolicy.SuggestionsFor("error", hasError: true, diffFiles: 0, planMode: false, loopbackPort: 5173, loopbackPrompt: "bind 0.0.0.0");
+        Assert.Equal(3, errChips.Count);
+        Assert.Contains(":5173", errChips[0].Label);
+        Assert.Contains("定位报错", errChips[1].Label);
+
+        var diffChips = QuickReplySuggestionPolicy.SuggestionsFor("completed", hasError: false, diffFiles: 3, planMode: false);
+        Assert.Equal(3, diffChips.Count);
+        Assert.Contains("运行测试验证改动", diffChips[0].Label);
+
+        var planChips = QuickReplySuggestionPolicy.SuggestionsFor("completed", hasError: false, diffFiles: 0, planMode: true);
+        Assert.Equal(2, planChips.Count);
+        Assert.Contains("按此方案执行", planChips[0].Label);
+
+        const string sampleResultJson = """
+            {
+              "available": true,
+              "text": "Done.",
+              "diff": {
+                "source": "working_tree",
+                "total_files": 1,
+                "additions": 4,
+                "deletions": 1,
+                "truncated": false,
+                "files": [
+                  {
+                    "path": "src/app.py",
+                    "status": "M",
+                    "additions": 4,
+                    "deletions": 1,
+                    "binary": false,
+                    "truncated": false,
+                    "hunks": [
+                      {
+                        "header": "@@ -10,3 +10,6 @@",
+                        "lines": [
+                          { "kind": "add", "new_line": 11, "text": "return True" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+            """;
+        var parsed = System.Text.Json.JsonSerializer.Deserialize<TaskResultDto>(sampleResultJson);
+        Assert.NotNull(parsed?.Diff);
+        Assert.Equal("working_tree", parsed!.Diff!.Source);
+        Assert.Equal(4, parsed.Diff.Additions);
+        Assert.Single(parsed.Diff.Files!);
+        Assert.Equal("src/app.py", parsed.Diff.Files![0].Path);
+        Assert.Equal("return True", parsed.Diff.Files[0].Hunks![0].Lines![0].Text);
+
+        var startPayload = new TaskStartPayloadDto
+        {
+            DeviceId = "11111111-2222-3333-4444-555555555555",
+            ProjectId = "0123456789abcdef01234567",
+            Tool = "codex",
+            RequestId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            Text = "",
+            Images = [new ImageAttachmentDto { Mime = "image/jpeg", Data = "ABCD", Label = "ui-only" }]
+        };
+        var wire = System.Text.Json.JsonSerializer.Serialize(startPayload);
+        Assert.Contains("\"images\"", wire);
+        Assert.DoesNotContain("ui-only", wire);
+    }
 }

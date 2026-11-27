@@ -34,32 +34,38 @@ public sealed class StoredDecisionEntry
 public sealed class TaskResultCache
 {
     private (string? Marker, string? Status, string? UpdatedAt)? _revision;
+    private bool _dirty;
     public long Generation { get; private set; }
     public TaskResultDto? Result { get; private set; }
     public bool NeedsRefresh => _revision.HasValue &&
-        (Result?.Available != true || Result.Files?.Any(file => file.Ready == false) == true);
+        (_dirty || Result?.Available != true || Result.Files?.Any(file => file.Ready == false) == true);
 
     public bool Observe(MonitorTask? task, bool enabled)
     {
         (string? Marker, string? Status, string? UpdatedAt)? next = null;
         if (enabled && task is not null)
         {
-            // Older collectors do not advertise a result ID. Recheck on task changes.
             next = string.IsNullOrEmpty(task.FinalResultId)
                 ? (null, task.Status, task.UpdatedAt) : (task.FinalResultId, null, null);
         }
         if (next == _revision) return false;
+        var runningHeartbeatOnly = _revision is (null, "running", _) && next is (null, "running", _);
         _revision = next;
-        Generation++;
-        Result = null;
+        _dirty = next.HasValue;
+        if (!runningHeartbeatOnly)
+        {
+            Generation++;
+            Result = null;
+        }
         return true;
     }
 
     public void Apply(long generation, TaskResultDto response)
     {
         if (generation != Generation || _revision is not { } current) return;
+        _dirty = false;
         Result = response.Available && current.Marker is { } marker && response.ResultId != marker
-            ? new TaskResultDto { Reason = "等待电脑同步最新结果" } : response;
+            ? new TaskResultDto { Reason = "等待电脑同步最新结果", Diff = response.Diff } : response;
     }
 }
 
@@ -102,6 +108,30 @@ public sealed class TaskDetailController : IDisposable
     public string SettingsReceiptText { get; private set; } = "";
     public string ReplyMessage { get; private set; } = "";
     public string DraftText { get; set; } = "";
+    public List<ImageAttachmentDto> DraftImages { get; } = [];
+
+    public bool AddDraftImage(ImageAttachmentDto item)
+    {
+        if (DraftImages.Count >= QuickReplySuggestionPolicy.MaxAttachments)
+            return false;
+        DraftImages.Add(item);
+        Notify();
+        return true;
+    }
+
+    public void RemoveDraftImageAt(int index)
+    {
+        if (index < 0 || index >= DraftImages.Count) return;
+        DraftImages.RemoveAt(index);
+        Notify();
+    }
+
+    public void ClearDraftImages()
+    {
+        if (DraftImages.Count == 0) return;
+        DraftImages.Clear();
+        Notify();
+    }
 
     public TaskDetailController(MonitorTask task, MonitorController hub)
     {
@@ -133,7 +163,7 @@ public sealed class TaskDetailController : IDisposable
         get
         {
             if (ModelOverrides.Selection is not { } sel || string.IsNullOrWhiteSpace(sel.Model))
-                return "继承电脑当前模型";
+                return "继承电脑模型";
             var label = Controls?.Catalog?.Models?.FirstOrDefault(m => m.Id == sel.Model)?.Label
                         ?? UsageFormatting.FormatModelName(sel.Model);
             var extras = new List<string> { label };
@@ -516,6 +546,7 @@ public sealed class TaskDetailController : IDisposable
     {
         if (!SupportsReply || !IsActive || ReplySending) return;
         PersistedPendingReply record;
+        List<ImageAttachmentDto>? sentImages = null;
         if (PendingReply is { MayRetry: true } retryRecord)
         {
             record = retryRecord;
@@ -523,7 +554,7 @@ public sealed class TaskDetailController : IDisposable
         else
         {
             var text = rawText.Trim();
-            if (!ReplyAvailable || string.IsNullOrEmpty(text) || text.Length > 8000) return;
+            if (!ReplyAvailable || (string.IsNullOrEmpty(text) && DraftImages.Count == 0) || text.Length > 8000) return;
 
             SessionModelSelectionDto? submittedSelection = null;
             if (ModelOverrides.Selection is { } sel && !string.IsNullOrWhiteSpace(sel.Model))
@@ -548,6 +579,7 @@ public sealed class TaskDetailController : IDisposable
                 };
             }
 
+            sentImages = DraftImages.Count > 0 ? DraftImages.ToList() : null;
             record = new PersistedPendingReply
             {
                 Id = Guid.NewGuid().ToString("D").ToLowerInvariant(),
@@ -580,10 +612,14 @@ public sealed class TaskDetailController : IDisposable
         };
         if (record.SubmittedSelection is not null)
             body["selection"] = record.SubmittedSelection;
+        if (sentImages is { Count: > 0 })
+            body["images"] = sentImages;
 
         try
         {
             var res = await _hub.Api.JsonAsync<ReplyStateDto>(_hub.Origin, "/api/native/tasks/reply", HttpMethod.Post, body, _token, ct: _cts.Token);
+            if (sentImages is { Count: > 0 })
+                DraftImages.Clear();
             if (IsActive && res.Id == record.Id && !string.IsNullOrEmpty(res.State))
                 UpdatePendingState(res.State, res.Reason);
         }

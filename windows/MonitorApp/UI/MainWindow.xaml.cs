@@ -78,8 +78,14 @@ public partial class MainWindow : Window
     private StackPanel? _taskDetailInspectorHost;
     private ColumnDefinition? _taskDetailInspectorDivCol;
     private ColumnDefinition? _taskDetailInspectorCol;
-    private WrapPanel? _replyQuickChipsHost;
+    private StackPanel? _replyQuickChipsHost;
+    private ScrollViewer? _replyQuickChipsScroll;
+    private WrapPanel? _replyAttachmentsHost;
+    private Button? _replyAttachImgBtn;
     private string _mountedQuickChipsSignature = "";
+    private string _mountedAttachmentsSignature = "";
+    private readonly HashSet<string> _expandedDiffFiles = new(StringComparer.Ordinal);
+    private bool _diffDefaultInitialized;
     private bool _taskInfoAccordionExpanded;
     private Button? _replyModelCapsuleBtn;
     private TextBlock? _replyStatusText;
@@ -210,13 +216,20 @@ public partial class MainWindow : Window
 
             if (_controller.Connected)
             {
-                var candidateTask = _controller.Tasks.FirstOrDefault(t => t.SupportsReply && !t.Archived)
+                var candidateTask = _controller.Tasks.FirstOrDefault(t => t.SupportsReply && !t.Archived && t.Project?.Contains("agent-monitor", StringComparison.OrdinalIgnoreCase) == true)
+                    ?? _controller.Tasks.FirstOrDefault(t => t.SupportsReply && !t.Archived)
                     ?? _controller.Tasks.FirstOrDefault(t => !t.Archived)
                     ?? _controller.Tasks.FirstOrDefault();
                 if (candidateTask is not null)
                 {
                     SelectTask(candidateTask);
-                    await Task.Delay(950);
+                    for (var w = 0; w < 25; w++)
+                    {
+                        await Task.Delay(220);
+                        if (_taskDetail is { ResultLoading: false, Result: not null })
+                            break;
+                    }
+                    await Task.Delay(180);
                     RenderAll(forceShell: false);
                     CaptureElementPng(OuterFrame, Path.Combine(outDir, "win_01b_task_detail.png"), 1220, 780, applyWindowSize: true);
                 }
@@ -1145,6 +1158,11 @@ public partial class MainWindow : Window
     private static FrameworkElement BuildResponsiveCardGrid(IReadOnlyList<FrameworkElement> items, int columns, double gap = 14.0)
     {
         if (items.Count == 0) return new Border();
+        foreach (var item in items)
+        {
+            if (item.Parent is Panel priorPanel)
+                priorPanel.Children.Remove(item);
+        }
         var cols = Math.Max(1, Math.Min(columns, items.Count));
         if (cols == 1)
         {
@@ -4545,6 +4563,9 @@ public partial class MainWindow : Window
 
     private UIElement BuildTaskDetailPane(MonitorTask task, TaskDetailController detail)
     {
+        _expandedDiffFiles.Clear();
+        _diffDefaultInitialized = false;
+        _mountedAttachmentsSignature = "";
         var plan = _lastMainPlan ?? CurrentMainShellPlan();
         var outerSplit = new Grid();
         outerSplit.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -4582,23 +4603,56 @@ public partial class MainWindow : Window
         {
             var dockStack = new StackPanel { MaxWidth = 720, HorizontalAlignment = HorizontalAlignment.Stretch };
 
-            // Reserved Row 1: Quick-Action / Next-Step Suggestion Chips (#5)
-            _replyQuickChipsHost = new WrapPanel
+            // Reserved Row 1: Single-Line Horizontal Quick-Action Suggestion Chips (#5)
+            _replyQuickChipsHost = new StackPanel { Orientation = Orientation.Horizontal };
+            _replyQuickChipsScroll = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Margin = new Thickness(0, 0, 0, 8),
+                Visibility = Visibility.Collapsed,
+                Content = _replyQuickChipsHost
+            };
+            _replyQuickChipsScroll.PreviewMouseWheel += (s, e) =>
+            {
+                if (s is ScrollViewer sv)
+                {
+                    sv.ScrollToHorizontalOffset(sv.HorizontalOffset - e.Delta * 0.45);
+                    e.Handled = true;
+                }
+            };
+            dockStack.Children.Add(_replyQuickChipsScroll);
+
+            // Row 1.5: Attached Screenshot / Image Pills (#4)
+            _replyAttachmentsHost = new WrapPanel
             {
                 Orientation = Orientation.Horizontal,
-                Margin = new Thickness(0, 0, 0, 8),
+                Margin = new Thickness(0, 0, 0, 6),
                 Visibility = Visibility.Collapsed
             };
-            dockStack.Children.Add(_replyQuickChipsHost);
+            dockStack.Children.Add(_replyAttachmentsHost);
 
             // Row 2: Input + Send Button
             var inputGrid = new Grid();
             inputGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             inputGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            _replyInputBox = UiKit.StyledTextBox(detail.DraftText, "继续此会话，告诉它下一步做什么（Ctrl + Enter 发送）…", multiline: true);
+            _replyInputBox = UiKit.StyledTextBox(detail.DraftText, "继续此会话，告诉它下一步做什么（Ctrl + Enter 发送，Ctrl + V 粘贴截图）…", multiline: true);
             _replyInputBox.MinHeight = 42;
             _replyInputBox.MaxHeight = 132;
+            CommandManager.AddPreviewExecutedHandler(_replyInputBox, (_, e) =>
+            {
+                if (e.Command == ApplicationCommands.Paste && !detail.ReplySending && !Clipboard.ContainsText())
+                {
+                    var rem = QuickReplySuggestionPolicy.MaxAttachments - detail.DraftImages.Count;
+                    var pasted = UiKit.TryReadClipboardImageAttachments(detail.DraftImages.Count + 1, rem);
+                    if (pasted.Count > 0)
+                    {
+                        foreach (var img in pasted) detail.AddDraftImage(img);
+                        e.Handled = true;
+                    }
+                }
+            });
             _replyInputBox.TextChanged += (_, _) =>
             {
                 detail.DraftText = _replyInputBox.Text;
@@ -4630,8 +4684,9 @@ public partial class MainWindow : Window
             inputGrid.Children.Add(sendBtn);
             dockStack.Children.Add(inputGrid);
 
-            // Row 3: Bottom-Left Model Selection Capsule + Right Receipt / Live Status
+            // Row 3: Bottom-Left Model Selection Capsule + Attach Image + Right Receipt / Live Status
             var footer = new DockPanel { Margin = new Thickness(0, 8, 0, 0), LastChildFill = true };
+            var leftControls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             _replyModelCapsuleBtn = UiKit.SecondaryButton(
                 detail.ModelSettingsSummary + " ▾",
                 () =>
@@ -4641,16 +4696,28 @@ public partial class MainWindow : Window
                 },
                 glyph: "settings");
             _replyModelCapsuleBtn.VerticalAlignment = VerticalAlignment.Center;
-            DockPanel.SetDock(_replyModelCapsuleBtn, Dock.Left);
-            footer.Children.Add(_replyModelCapsuleBtn);
+            leftControls.Children.Add(_replyModelCapsuleBtn);
 
-            var rightStatusStack = new StackPanel
+            _replyAttachImgBtn = UiKit.SecondaryButton(
+                "图片",
+                () => PickReplyImages(detail),
+                glyph: "image");
+            _replyAttachImgBtn.ToolTip = "选择截图或图片直传电脑会话（也支持在输入框按 Ctrl + V 直接粘贴截图）";
+            _replyAttachImgBtn.Margin = new Thickness(7, 0, 0, 0);
+            _replyAttachImgBtn.VerticalAlignment = VerticalAlignment.Center;
+            leftControls.Children.Add(_replyAttachImgBtn);
+
+            DockPanel.SetDock(leftControls, Dock.Left);
+            footer.Children.Add(leftControls);
+
+            var rightStatusGrid = new Grid
             {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Right,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(12, 0, 0, 0)
+                Margin = new Thickness(10, 0, 0, 0)
             };
+            rightStatusGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rightStatusGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rightStatusGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
             _replyReceiptText = new TextBlock
             {
@@ -4671,20 +4738,35 @@ public partial class MainWindow : Window
                 Visibility = Visibility.Collapsed,
                 Child = _replyReceiptText
             };
-            rightStatusStack.Children.Add(_replyReceiptBadge);
+            Grid.SetColumn(_replyReceiptBadge, 0);
+            rightStatusGrid.Children.Add(_replyReceiptBadge);
 
             _replyAppliedText = UiKit.Body("", 11.8, UiKit.AccentBrush);
             _replyAppliedText.FontWeight = FontWeights.SemiBold;
+            _replyAppliedText.TextWrapping = TextWrapping.NoWrap;
+            _replyAppliedText.TextTrimming = TextTrimming.CharacterEllipsis;
             _replyAppliedText.VerticalAlignment = VerticalAlignment.Center;
             _replyAppliedText.Margin = new Thickness(0, 0, 8, 0);
             _replyAppliedText.Visibility = Visibility.Collapsed;
-            rightStatusStack.Children.Add(_replyAppliedText);
+            Grid.SetColumn(_replyAppliedText, 1);
+            rightStatusGrid.Children.Add(_replyAppliedText);
 
-            _replyStatusText = UiKit.Body(detail.ReplyMessage, 12, UiKit.MutedBrush);
-            _replyStatusText.VerticalAlignment = VerticalAlignment.Center;
-            rightStatusStack.Children.Add(_replyStatusText);
+            _replyStatusText = new TextBlock
+            {
+                Text = detail.ReplyMessage,
+                FontFamily = UiKit.AppFont,
+                FontSize = 12,
+                Foreground = UiKit.MutedBrush,
+                TextWrapping = TextWrapping.NoWrap,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                TextAlignment = TextAlignment.Right,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(_replyStatusText, 2);
+            rightStatusGrid.Children.Add(_replyStatusText);
 
-            footer.Children.Add(rightStatusStack);
+            footer.Children.Add(rightStatusGrid);
             dockStack.Children.Add(footer);
 
             var composerDock = new Border
@@ -4725,11 +4807,65 @@ public partial class MainWindow : Window
         return outerSplit;
     }
 
+    private void PickReplyImages(TaskDetailController detail)
+    {
+        if (detail.ReplySending) return;
+        if (detail.DraftImages.Count >= QuickReplySuggestionPolicy.MaxAttachments)
+        {
+            Dialogs.ShowMessage(this, "图片数量已达上限", $"单次最多可附带 {QuickReplySuggestionPolicy.MaxAttachments} 张图片。");
+            return;
+        }
+        var dlg = new OpenFileDialog
+        {
+            Filter = "图片文件 (*.png;*.jpg;*.jpeg;*.webp)|*.png;*.jpg;*.jpeg;*.webp",
+            Multiselect = detail.DraftImages.Count < QuickReplySuggestionPolicy.MaxAttachments - 1
+        };
+        if (dlg.ShowDialog(this) == true)
+        {
+            foreach (var path in dlg.FileNames)
+            {
+                if (detail.DraftImages.Count >= QuickReplySuggestionPolicy.MaxAttachments) break;
+                try
+                {
+                    detail.AddDraftImage(UiKit.LoadImageAttachmentFromFile(path, detail.DraftImages.Count + 1));
+                }
+                catch (Exception ex)
+                {
+                    Dialogs.ShowMessage(this, "无法添加图片", ex.Message);
+                    break;
+                }
+            }
+        }
+    }
+
     private void UpdateReplyComposerControls(TaskDetailController detail)
     {
         if (_replyModelCapsuleBtn is not null)
         {
             UiKit.SetButtonState(_replyModelCapsuleBtn, detail.ModelSettingsSummary + " ▾", !detail.ReplySending, primary: false);
+        }
+        if (_replyAttachImgBtn is not null)
+        {
+            var imgCount = detail.DraftImages.Count;
+            var imgLabel = imgCount > 0 ? $"图片 ({imgCount})" : "图片";
+            UiKit.SetButtonState(_replyAttachImgBtn, imgLabel, !detail.ReplySending && imgCount < QuickReplySuggestionPolicy.MaxAttachments, primary: false);
+        }
+        if (_replyAttachmentsHost is not null)
+        {
+            var attachSig = (detail.ReplySending ? "1:" : "0:") + string.Join("|", detail.DraftImages.Select(x => x.Label));
+            if (attachSig != _mountedAttachmentsSignature)
+            {
+                _mountedAttachmentsSignature = attachSig;
+                _replyAttachmentsHost.Children.Clear();
+                for (var i = 0; i < detail.DraftImages.Count; i++)
+                {
+                    var capturedIdx = i;
+                    _replyAttachmentsHost.Children.Add(UiKit.BuildImageAttachmentPill(
+                        detail.DraftImages[i],
+                        detail.ReplySending ? null : () => detail.RemoveDraftImageAt(capturedIdx)));
+                }
+                _replyAttachmentsHost.Visibility = detail.DraftImages.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
         }
         if (_replyStatusText is not null)
         {
@@ -4757,7 +4893,7 @@ public partial class MainWindow : Window
         {
             var mayRetry = detail.PendingReply?.MayRetry == true;
             var label = detail.ReplySending ? "正在发送…" : mayRetry ? "重试原消息" : "发送回复";
-            var hasDraft = !string.IsNullOrWhiteSpace(_replyInputBox?.Text ?? detail.DraftText);
+            var hasDraft = !string.IsNullOrWhiteSpace(_replyInputBox?.Text ?? detail.DraftText) || detail.DraftImages.Count > 0;
             var enabled = !detail.ReplySending && (mayRetry || (detail.ReplyAvailable && hasDraft));
             UiKit.SetButtonState(_replySendBtn, label, enabled, primary: true);
         }
@@ -4766,13 +4902,19 @@ public partial class MainWindow : Window
     private void SyncComposerQuickChips(MonitorTask task, Computer? computer)
     {
         if (_replyQuickChipsHost is null || !task.SupportsReply) return;
-        var chips = new List<(string Label, string Prompt)>();
         var previewItems = DevPreviewPolicy.ItemsFor(task, computer, _controller.IsFresh);
-        foreach (var item in previewItems)
-        {
-            if (!string.IsNullOrEmpty(item.LoopbackFixPrompt))
-                chips.Add(($"开放 :{item.Port} 供手机预览", item.LoopbackFixPrompt!));
-        }
+        var firstLoopback = previewItems.FirstOrDefault(x => !string.IsNullOrEmpty(x.LoopbackFixPrompt));
+        var hasError = task.ErrorAnalysis is not null && !string.IsNullOrWhiteSpace(task.ErrorAnalysis.Summary);
+        var diffFiles = _taskDetail?.Result?.Diff?.Files?.Count ?? 0;
+        var wasPlanMode = _taskDetail?.SettingsReceiptText.Contains("计划模式") == true;
+
+        var chips = QuickReplySuggestionPolicy.SuggestionsFor(
+            task.EffectiveStatus,
+            hasError,
+            diffFiles,
+            wasPlanMode,
+            firstLoopback?.Port ?? 0,
+            firstLoopback?.LoopbackFixPrompt);
 
         var sig = string.Join("|", chips.Select(c => c.Label + "=" + c.Prompt));
         if (sig == _mountedQuickChipsSignature) return;
@@ -4781,36 +4923,40 @@ public partial class MainWindow : Window
         _replyQuickChipsHost.Children.Clear();
         if (chips.Count == 0)
         {
-            _replyQuickChipsHost.Visibility = Visibility.Collapsed;
+            if (_replyQuickChipsScroll is not null) _replyQuickChipsScroll.Visibility = Visibility.Collapsed;
             return;
         }
 
         foreach (var chip in chips)
         {
             var captured = chip;
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            row.Children.Add(new MonitorIcon("chevron-right", UiKit.AccentBrush, 11) { Margin = new Thickness(0, 0, 4, 0) });
+            row.Children.Add(new TextBlock
+            {
+                Text = captured.Label,
+                FontFamily = UiKit.AppFont,
+                FontSize = 11.8,
+                FontWeight = FontWeights.Medium,
+                Foreground = UiKit.AccentBrush
+            });
             var pillBorder = new Border
             {
                 Background = UiKit.GlassTrackBrush,
                 BorderBrush = UiKit.GlassSubtleRimBrush,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(UiKit.ControlRadius),
-                Padding = new Thickness(9, 4, 9, 4),
-                Margin = new Thickness(0, 0, 7, 4),
+                Padding = new Thickness(9, 4, 10, 4),
+                Margin = new Thickness(0, 0, 7, 0),
                 SnapsToDevicePixels = true,
-                Child = new TextBlock
-                {
-                    Text = "✨ " + captured.Label,
-                    FontFamily = UiKit.AppFont,
-                    FontSize = 11.8,
-                    Foreground = UiKit.AccentBrush
-                }
+                Child = row
             };
             var chipBtn = UiKit.BareButton(pillBorder, () => PrefillTaskReplyComposer(captured.Prompt));
             chipBtn.MouseEnter += (_, _) => { pillBorder.Background = UiKit.GlassCardHoverBrush; pillBorder.BorderBrush = UiKit.AccentBrush; };
             chipBtn.MouseLeave += (_, _) => { pillBorder.Background = UiKit.GlassTrackBrush; pillBorder.BorderBrush = UiKit.GlassSubtleRimBrush; };
             _replyQuickChipsHost.Children.Add(chipBtn);
         }
-        _replyQuickChipsHost.Visibility = Visibility.Visible;
+        if (_replyQuickChipsScroll is not null) _replyQuickChipsScroll.Visibility = Visibility.Visible;
     }
 
     private string ComputeTaskDetailSignature(MonitorTask task, TaskDetailController detail, bool showInspector)
@@ -4871,6 +5017,16 @@ public partial class MainWindow : Window
         {
             foreach (var f in files)
                 sb.Append(f.Id).Append(':').Append(f.Ready == false ? '0' : '1').Append(';');
+        }
+        if (detail.Result?.Diff is { Files.Count: > 0 } diff)
+        {
+            sb.Append("DIFF:").Append(diff.Source).Append(':').Append(diff.TotalFiles)
+              .Append(':').Append(diff.Additions).Append(':').Append(diff.Deletions).Append(':');
+            foreach (var df in diff.Files)
+            {
+                sb.Append(df.Path).Append(',').Append(df.Additions).Append(',').Append(df.Deletions)
+                  .Append(',').Append(_expandedDiffFiles.Contains(df.Path) ? '1' : '0').Append(';');
+            }
         }
         if (detail.Controls?.Pending is { Count: > 0 } pendings)
         {
@@ -5198,6 +5354,14 @@ public partial class MainWindow : Window
         }
         _taskDetailCardsHost.Children.Add(UiKit.Card(resStack, 20));
 
+        // Feature #2: Deliverable Code Git Diff Summary Card directly beneath Final Result
+        if (_controller.SyncOutput && _taskDetail.Result?.Diff is { Files.Count: > 0 } diffSummary)
+        {
+            var diffCard = BuildDiffSummaryCard(diffSummary);
+            diffCard.Margin = new Thickness(0, 14, 0, 0);
+            _taskDetailCardsHost.Children.Add(diffCard);
+        }
+
         // Narrow Mode: Default-Collapsed「会话详情」Accordion Card (A1)
         if (!showInspector)
         {
@@ -5445,6 +5609,284 @@ public partial class MainWindow : Window
             stack.Children.Add(actions);
 
         return stack;
+    }
+
+    private Border BuildDiffSummaryCard(DiffSummaryDto diff)
+    {
+        var files = diff.Files ?? [];
+        if (!_diffDefaultInitialized && files.Count > 0)
+        {
+            _diffDefaultInitialized = true;
+            if (files.Count == 1 && !files[0].Binary)
+                _expandedDiffFiles.Add(files[0].Path);
+        }
+
+        var greenInk = new SolidColorBrush(UiKit.IsDark ? Color.FromRgb(0x5A, 0xD4, 0x8A) : Color.FromRgb(0x1D, 0x7A, 0x46));
+        var redInk = new SolidColorBrush(UiKit.IsDark ? Color.FromRgb(0xF4, 0x7B, 0x7B) : Color.FromRgb(0xC2, 0x3B, 0x3B));
+        var addBg = new SolidColorBrush(UiKit.IsDark ? Color.FromArgb(0x28, 0x2E, 0x8B, 0x57) : Color.FromArgb(0x1C, 0x2E, 0x8B, 0x57));
+        var delBg = new SolidColorBrush(UiKit.IsDark ? Color.FromArgb(0x2A, 0xC9, 0x4A, 0x4A) : Color.FromArgb(0x1A, 0xC9, 0x4A, 0x4A));
+        var hunkBg = new SolidColorBrush(UiKit.IsDark ? Color.FromArgb(0x24, 0x50, 0x6B, 0x8D) : Color.FromArgb(0x14, 0x50, 0x6B, 0x8D));
+        greenInk.Freeze(); redInk.Freeze(); addBg.Freeze(); delBg.Freeze(); hunkBg.Freeze();
+
+        var root = new StackPanel();
+        var header = new DockPanel { Margin = new Thickness(0, 0, 0, string.IsNullOrWhiteSpace(diff.CommitTitle) ? 12 : 6) };
+
+        var rightStats = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        var totalFiles = Math.Max(files.Count, diff.TotalFiles);
+        rightStats.Children.Add(UiKit.Body($"{totalFiles} 文件", 12, UiKit.MutedBrush));
+        if (diff.Additions > 0 || diff.Deletions > 0)
+        {
+            rightStats.Children.Add(new TextBlock
+            {
+                Text = $"+{diff.Additions}",
+                FontFamily = UiKit.MonoFont,
+                FontSize = 12.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = greenInk,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 0, 0)
+            });
+            rightStats.Children.Add(new TextBlock
+            {
+                Text = $"-{diff.Deletions}",
+                FontFamily = UiKit.MonoFont,
+                FontSize = 12.5,
+                FontWeight = FontWeights.Bold,
+                Foreground = redInk,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 0, 0)
+            });
+        }
+        DockPanel.SetDock(rightStats, Dock.Right);
+        header.Children.Add(rightStats);
+
+        var leftTitle = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        leftTitle.Children.Add(new MonitorIcon("code", UiKit.AccentBrush, 17) { Margin = new Thickness(0, 0, 7, 0) });
+        leftTitle.Children.Add(UiKit.Heading("代码变更", 16.5));
+        var srcBadge = new Border
+        {
+            Background = UiKit.SoftBrush,
+            CornerRadius = new CornerRadius(5),
+            Padding = new Thickness(6, 2, 6, 2),
+            Margin = new Thickness(8, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock
+            {
+                Text = diff.Source == "last_commit" ? "本轮提交" : "未提交",
+                FontFamily = UiKit.AppFont,
+                FontSize = 11,
+                FontWeight = FontWeights.Medium,
+                Foreground = UiKit.MutedBrush
+            }
+        };
+        leftTitle.Children.Add(srcBadge);
+        header.Children.Add(leftTitle);
+        root.Children.Add(header);
+
+        if (!string.IsNullOrWhiteSpace(diff.CommitTitle))
+        {
+            var commitBlock = UiKit.Body("提交：" + diff.CommitTitle!.Trim(), 12, UiKit.MutedBrush);
+            commitBlock.Margin = new Thickness(0, 0, 0, 10);
+            root.Children.Add(commitBlock);
+        }
+
+        for (var i = 0; i < files.Count; i++)
+        {
+            var file = files[i];
+            if (string.IsNullOrWhiteSpace(file.Path)) continue;
+            var capturedPath = file.Path;
+            var hasHunks = !file.Binary && file.Hunks is { Count: > 0 };
+            var isOpen = hasHunks && _expandedDiffFiles.Contains(capturedPath);
+
+            var statusChar = string.IsNullOrEmpty(file.Status) ? 'M' : char.ToUpperInvariant(file.Status[0]);
+            var badgeText = statusChar switch { 'A' or 'U' or '?' => "A", 'D' => "D", 'R' => "R", _ => "M" };
+            var badgeInk = badgeText == "A" ? greenInk : badgeText == "D" ? redInk : UiKit.AccentBrush;
+
+            var rowGrid = new Grid();
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var statusPill = new Border
+            {
+                Background = UiKit.SoftBrush,
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(5, 1.5, 5, 1.5),
+                Margin = new Thickness(0, 0, 8, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = badgeText,
+                    FontFamily = UiKit.MonoFont,
+                    FontSize = 11,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = badgeInk
+                }
+            };
+            Grid.SetColumn(statusPill, 0);
+            rowGrid.Children.Add(statusPill);
+
+            var pathText = new TextBlock
+            {
+                Text = file.Path,
+                ToolTip = file.Path,
+                FontFamily = UiKit.MonoFont,
+                FontSize = 12.2,
+                Foreground = UiKit.TextBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            Grid.SetColumn(pathText, 1);
+            rowGrid.Children.Add(pathText);
+
+            var statRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            if (file.Binary)
+            {
+                statRow.Children.Add(UiKit.Body("二进制", 11.2, UiKit.MutedBrush));
+            }
+            else
+            {
+                if (file.Additions > 0)
+                {
+                    statRow.Children.Add(new TextBlock
+                    {
+                        Text = $"+{file.Additions}",
+                        FontFamily = UiKit.MonoFont,
+                        FontSize = 11.6,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = greenInk,
+                        Margin = new Thickness(0, 0, 5, 0)
+                    });
+                }
+                if (file.Deletions > 0)
+                {
+                    statRow.Children.Add(new TextBlock
+                    {
+                        Text = $"-{file.Deletions}",
+                        FontFamily = UiKit.MonoFont,
+                        FontSize = 11.6,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = redInk
+                    });
+                }
+            }
+            Grid.SetColumn(statRow, 2);
+            rowGrid.Children.Add(statRow);
+
+            if (hasHunks)
+            {
+                var chev = new MonitorIcon(isOpen ? "chevron-up" : "chevron-down", UiKit.MutedBrush, 15)
+                {
+                    Margin = new Thickness(6, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                Grid.SetColumn(chev, 3);
+                rowGrid.Children.Add(chev);
+            }
+
+            var fileStack = new StackPanel();
+            var headerPad = new Border { Padding = new Thickness(11, 8.5, 11, 8.5), Child = rowGrid };
+            if (hasHunks)
+            {
+                var toggleBtn = UiKit.BareButton(headerPad, () =>
+                {
+                    if (!_expandedDiffFiles.Add(capturedPath))
+                        _expandedDiffFiles.Remove(capturedPath);
+                    RefreshMountedTaskDetail();
+                });
+                toggleBtn.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+                fileStack.Children.Add(toggleBtn);
+            }
+            else
+            {
+                fileStack.Children.Add(headerPad);
+            }
+
+            if (isOpen && file.Hunks is { Count: > 0 } hunks)
+            {
+                fileStack.Children.Add(new Border { Height = 1, Background = UiKit.GlassSubtleRimBrush });
+                var linesPanel = new StackPanel { Margin = new Thickness(0, 3, 0, 4) };
+                foreach (var hunk in hunks)
+                {
+                    if (!string.IsNullOrWhiteSpace(hunk.Header))
+                    {
+                        linesPanel.Children.Add(new Border
+                        {
+                            Background = hunkBg,
+                            Padding = new Thickness(10, 2.5, 12, 2.5),
+                            Child = new TextBlock
+                            {
+                                Text = hunk.Header.Trim(),
+                                FontFamily = UiKit.MonoFont,
+                                FontSize = 11.2,
+                                Foreground = UiKit.AccentBrush
+                            }
+                        });
+                    }
+                    if (hunk.Lines is null) continue;
+                    foreach (var line in hunk.Lines)
+                    {
+                        var num = line.Kind == "del" ? line.OldLine : (line.NewLine ?? line.OldLine);
+                        var numStr = num is > 0 ? $"{num.Value,4} " : "     ";
+                        var pfx = line.Kind == "add" ? '+' : line.Kind == "del" ? '-' : ' ';
+                        var rowBg = line.Kind == "add" ? addBg : line.Kind == "del" ? delBg : Brushes.Transparent;
+                        var rowFg = line.Kind == "add" ? greenInk : line.Kind == "del" ? redInk : UiKit.MutedBrush;
+                        linesPanel.Children.Add(new Border
+                        {
+                            Background = rowBg,
+                            Padding = new Thickness(8, 1.5, 12, 1.5),
+                            Child = new TextBlock
+                            {
+                                Text = $"{numStr}{pfx} {line.Text}",
+                                FontFamily = UiKit.MonoFont,
+                                FontSize = 11.6,
+                                Foreground = rowFg
+                            }
+                        });
+                    }
+                }
+                if (file.Truncated)
+                {
+                    var more = UiKit.Body("   … 其余差异行已折叠", 11.2, UiKit.MutedBrush);
+                    more.Margin = new Thickness(8, 4, 8, 2);
+                    linesPanel.Children.Add(more);
+                }
+                var hScroll = new ScrollViewer
+                {
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Content = linesPanel
+                };
+                fileStack.Children.Add(hScroll);
+            }
+
+            root.Children.Add(new Border
+            {
+                Background = UiKit.GlassTrackBrush,
+                BorderBrush = UiKit.GlassSubtleRimBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(UiKit.PodRadius),
+                ClipToBounds = true,
+                Margin = new Thickness(0, i == 0 ? 0 : 7, 0, 0),
+                SnapsToDevicePixels = true,
+                Child = fileStack
+            });
+        }
+
+        if (diff.Truncated || totalFiles > files.Count)
+        {
+            var note = UiKit.Body(
+                totalFiles > files.Count
+                    ? $"已展示前 {files.Count} / {totalFiles} 个文件的精简变更，完整 Diff 请在仓库查看"
+                    : "单文件较长部分已折叠，完整变更可在本地仓库查看",
+                11.5, UiKit.MutedBrush);
+            note.Margin = new Thickness(0, 10, 0, 0);
+            root.Children.Add(note);
+        }
+
+        return UiKit.Card(root, 20, UiKit.CardRadius);
     }
 
     private Border BuildAttentionCard(SessionPendingRequestDto req, TaskDetailController detail)

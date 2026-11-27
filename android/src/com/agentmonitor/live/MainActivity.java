@@ -2598,6 +2598,22 @@ public final class MainActivity extends Activity {
             else if (taskResultsState != null && page.equals("task")) { pendingDocumentResult = data; pendingDocumentCode = resultCode; hasPendingDocumentResult = true; }
             return;
         }
+        if (requestCode == NativeTaskResults.PICK_IMAGE) {
+            if (!loadedToken.isEmpty() && page.equals("task") && taskResults != null) taskResults.pickImageResult(resultCode, data);
+            return;
+        }
+        if (requestCode == NativeTaskResults.VOICE_INPUT) {
+            if (!loadedToken.isEmpty() && page.equals("task") && taskResults != null) taskResults.voiceInputResult(resultCode, data);
+            return;
+        }
+        if (requestCode == NativeNewTaskSheet.PICK_IMAGE) {
+            if (!loadedToken.isEmpty() && newTaskSheet != null) newTaskSheet.pickImageResult(resultCode, data);
+            return;
+        }
+        if (requestCode == NativeNewTaskSheet.VOICE_INPUT) {
+            if (!loadedToken.isEmpty() && newTaskSheet != null) newTaskSheet.voiceInputResult(resultCode, data);
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || !pickerToken.equals(loadedToken) || !pageKey().equals(pickerPage) || pageEpoch != pickerEpoch) return;
         if (requestCode == 23) { if (!openComputerPairing(data.getStringExtra(NativeQrScanner.EXTRA_TEXT), true)) notice("这个二维码不是当前个人服务的电脑配对链接"); return; }
         if (requestCode != 22 || !page.equals("profile")) return;
@@ -2690,7 +2706,7 @@ public final class MainActivity extends Activity {
         if (hasFocus && systemBars != null) updateHeaderSurface();
         if (hasFocus) restoreTaskSearchFocus();
     }
-    @Override protected void onPause() { pendingSettingsSheet = showingSettingsSheet(); visible = false; dismissTaskFilterSheet(); dismissTaskPendingSheet(); dismissDevPreviewSheet(); dismissTaskMoreSheet(); dismissNewTaskSheet(); if (bingWallpaper != null) bingWallpaper.cancel(); if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace); super.onPause(); }
+    @Override protected void onPause() { pendingSettingsSheet = showingSettingsSheet(); visible = false; dismissTaskFilterSheet(); dismissTaskPendingSheet(); dismissDevPreviewSheet(); dismissTaskMoreSheet(); if (newTaskSheet != null && !newTaskSheet.isAwaitingExternalPicker()) dismissNewTaskSheet(); if (bingWallpaper != null) bingWallpaper.cancel(); if (taskResults != null) taskResults.pause(); captureDraft(); savePosition(); dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); handler.removeCallbacks(heartbeat); handler.removeCallbacks(refreshWorkspace); super.onPause(); }
     @Override protected void onDestroy() {
         if (bingWallpaper != null) bingWallpaper.close();
         visible = false; dismissTaskFilterSheet(); dismissTaskPendingSheet(); dismissDevPreviewSheet(); dismissTaskMoreSheet(); dismissNewTaskSheet(); cancelSearchAnimation(); if (taskResults != null) { taskResults.dispose(); taskResults = null; } sessionEpoch++; pageEpoch++; actionRevision++; dismissHelp(); dismissServerSettings(); UsageAlerts.dismissSettings(this); cancelDuration(); liveSettings.dismiss(); clearNotificationRequest(); handler.removeCallbacksAndMessages(null); workbenchReader.shutdown(); worker.shutdown();

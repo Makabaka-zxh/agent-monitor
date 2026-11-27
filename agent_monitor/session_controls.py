@@ -7,11 +7,16 @@ atomically before sending them to the original request channel.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_serializer, model_validator
+
+MAX_REPLY_IMAGES = 3
+MAX_IMAGE_BYTES = 1024 * 1024
+ImageMime = Literal["image/png", "image/jpeg", "image/webp"]
 
 Provider = Literal["codex", "claude", "antigravity"]
 QuickServiceTier = Literal["priority"]
@@ -186,8 +191,48 @@ def validate_answers(questions: tuple[Question, ...], answers: tuple[Answer, ...
             raise ValueError("no answer selected")
 
 
-def reply_fingerprint(text: str, selection: ModelSelection | None) -> str:
-    """A replay with changed settings must not be mistaken for the same reply."""
-    value = {"text": text, "selection": selection.model_dump() if selection is not None else None}
+class ImageAttachment(Contract):
+    """Verified PNG/JPEG/WEBP image bytes; client filenames/paths are never trusted."""
+    mime: ImageMime
+    data: str = Field(min_length=16, max_length=((MAX_IMAGE_BYTES + 2) // 3) * 4)
+
+    @model_validator(mode="after")
+    def verify_image_magic(self):
+        try:
+            raw = base64.b64decode(self.data, validate=True)
+        except (ValueError, TypeError):
+            raise ValueError("invalid base64 image data") from None
+        if not (12 <= len(raw) <= MAX_IMAGE_BYTES):
+            raise ValueError("image size out of bounds")
+        if self.mime == "image/png" and not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("invalid PNG header")
+        if self.mime == "image/jpeg" and not raw.startswith(b"\xff\xd8\xff"):
+            raise ValueError("invalid JPEG header")
+        if self.mime == "image/webp" and not (raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"):
+            raise ValueError("invalid WEBP header")
+        return self
+
+    def decoded_bytes(self) -> bytes:
+        return base64.b64decode(self.data, validate=True)
+
+    def sha256_hex(self) -> str:
+        return hashlib.sha256(self.decoded_bytes()).hexdigest()
+
+    def extension(self) -> str:
+        return {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[self.mime]
+
+
+def reply_fingerprint(
+    text: str,
+    selection: ModelSelection | None,
+    images: list[ImageAttachment] | tuple[ImageAttachment, ...] | None = None,
+) -> str:
+    """A replay with changed settings or images must not be mistaken for the same reply."""
+    value: dict = {"text": text, "selection": selection.model_dump() if selection is not None else None}
+    if images:
+        value["images"] = [
+            (item.sha256_hex() if isinstance(item, ImageAttachment) else ImageAttachment.model_validate(item).sha256_hex())
+            for item in images
+        ]
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                      ensure_ascii=False).encode("utf-8")).hexdigest()

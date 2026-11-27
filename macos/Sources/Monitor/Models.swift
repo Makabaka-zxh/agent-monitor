@@ -185,6 +185,42 @@ struct ComputerPairingCode: Decodable {
     let code: String
     let expiresAt: String
 }
+struct DiffLine: Decodable {
+    let kind: String
+    let oldLine: Int?
+    let newLine: Int?
+    let text: String
+}
+struct DiffHunk: Decodable {
+    let header: String
+    let lines: [DiffLine]?
+}
+struct DiffFile: Decodable, Identifiable {
+    var id: String { path }
+    let path: String
+    let status: String
+    let additions: Int
+    let deletions: Int
+    let binary: Bool?
+    let truncated: Bool?
+    let hunks: [DiffHunk]?
+}
+struct DiffSummary: Decodable {
+    let source: String
+    let commitTitle: String?
+    let totalFiles: Int
+    let additions: Int
+    let deletions: Int
+    let truncated: Bool?
+    let files: [DiffFile]?
+}
+struct DraftImageAttachment: Identifiable, Equatable {
+    let id = UUID()
+    let mime: String
+    let data: String
+    let label: String
+    var wireDictionary: [String: String] { ["mime": mime, "data": data] }
+}
 struct TaskResult: Decodable {
     let available: Bool
     let text: String?
@@ -195,6 +231,7 @@ struct TaskResult: Decodable {
     let txtSize: Int?
     let txtSha256: String?
     let reason: String?
+    let diff: DiffSummary?
 }
 struct ResultFile: Decodable, Identifiable {
     let id: String
@@ -454,5 +491,45 @@ enum DevPreviewPolicy {
                 )
             }
         }
+    }
+}
+
+struct QuickSuggestionItem: Identifiable, Equatable {
+    var id: String { label + "|" + prompt }
+    let label: String
+    let prompt: String
+}
+
+enum QuickReplySuggestionPolicy {
+    static let maxAttachments = 3
+
+    static func suggestions(
+        status: String,
+        hasError: Bool,
+        diffFiles: Int,
+        planMode: Bool,
+        loopbackPort: Int = 0,
+        loopbackPrompt: String? = nil
+    ) -> [QuickSuggestionItem] {
+        var out: [QuickSuggestionItem] = []
+        if loopbackPort > 0, let lp = loopbackPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !lp.isEmpty {
+            out.append(QuickSuggestionItem(label: "开放 :\(loopbackPort) 手机预览", prompt: lp))
+        }
+        if status == "failed" || status == "error" || hasError {
+            out.append(QuickSuggestionItem(label: "定位报错并修复", prompt: "请定位上述报错或失败的根本原因，直接修复并运行验证确认恢复正常。"))
+            out.append(QuickSuggestionItem(label: "最小复现并跑测试", prompt: "请先用最小范围复现该问题，修复后运行相关测试汇报结果。"))
+        } else if planMode {
+            out.append(QuickSuggestionItem(label: "按此方案执行", prompt: "方案确认无误，请按此方案逐步实施修改并运行测试验证。"))
+            out.append(QuickSuggestionItem(label: "只保留核心改动", prompt: "请精简上述方案，只做最核心、改动最小的部分并执行。"))
+        } else if diffFiles > 0 {
+            out.append(QuickSuggestionItem(label: "运行测试验证改动", prompt: "请针对刚才修改的代码运行相关测试与构建检查，确认没有引入回归。"))
+            out.append(QuickSuggestionItem(label: "自查边界与安全", prompt: "请审视本轮代码变更，检查是否有遗漏的边界情况、异常处理或权限安全问题。"))
+            out.append(QuickSuggestionItem(label: "总结变更与提交说明", prompt: "请简要总结本轮修改的文件与核心逻辑，并草拟一段清晰的 Git 提交说明。"))
+        } else {
+            out.append(QuickSuggestionItem(label: "继续推进下一步", prompt: "请继续推进下一步，完成后汇报验证结果。"))
+            out.append(QuickSuggestionItem(label: "运行测试检查状态", prompt: "请运行当前项目的测试套件，汇报通过情况与待处理项。"))
+            out.append(QuickSuggestionItem(label: "总结进展与待办", prompt: "请简要总结目前已完成的内容，以及接下来还需要处理的事项。"))
+        }
+        return Array(out.prefix(4))
     }
 }

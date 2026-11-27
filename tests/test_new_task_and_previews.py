@@ -386,6 +386,10 @@ def test_http_start_task_and_turn_one_live_approval(tmp_path):
         spawned_row = next(t for t in wb_live["tasks"] if t["id"] == created_task_id)
         assert spawned_row["status"] == "running"
         assert spawned_row["pending_interaction_kind"] == "approval"
+        snap_live = client.get("/api/native/snapshot", headers=headers).json()
+        snap_row = next(t for t in snap_live["tasks"] if t["id"] == created_task_id)
+        assert snap_row["pending_approval"]["id"]
+        assert snap_row["pending_approval"]["revision"]
 
         controls = client.get("/api/native/tasks/controls", headers=headers, params={"task_id": created_task_id}).json()
         pending_req = controls["pending"][0]

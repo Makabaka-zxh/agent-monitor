@@ -12,6 +12,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.DocumentsContract;
+import android.speech.RecognizerIntent;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
@@ -24,12 +25,15 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,6 +43,8 @@ import org.json.JSONObject;
 /** Final answers and explicit user actions, separate from the frequent status snapshot. */
 public final class NativeTaskResults {
     public static final int SAVE_DOCUMENT = 24;
+    public static final int PICK_IMAGE = 26;
+    public static final int VOICE_INPUT = 27;
     private static final int PREVIEW_CHARACTERS = 600;
     private static final long DRAFT_SAVE_DELAY_MS = 350;
     public interface Host {
@@ -71,17 +77,20 @@ public final class NativeTaskResults {
     /** Sticky bottom Liquid Glass composer dock with Quick-Action Chips (#5) & Model Capsule. */
     public final LinearLayout composerView;
     private final boolean interactive;
-    private final LinearLayout outputActions, fileRows, replyCard, suggestionRow, resultPod, modelCapsuleBox;
-    private final HorizontalScrollView suggestionScroll;
-    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle, replyReceiptBadge, replyAppliedLabel, modelCapsule;
-    private final NativeUi.Icon modelCapsuleIcon;
+    private final LinearLayout outputActions, fileRows, replyCard, suggestionRow, attachmentRow, resultPod, modelCapsuleBox, imageButton, micButton;
+    private final HorizontalScrollView suggestionScroll, attachmentScroll;
+    private final TextView resultText, resultNote, expand, collapseAtEnd, txtButton, copyButton, replyStatus, replyAvailability, sendButton, replyToggle, replyReceiptBadge, replyAppliedLabel, modelCapsule, imageCountBadge;
+    private final NativeUi.Icon modelCapsuleIcon, imageButtonIcon, micButtonIcon;
     private final EditText replyInput;
     private final View resultHeading, refreshButton;
     private final ResultRefresh resultRefresh = new ResultRefresh();
     private final NativeSessionControls controls;
+    private final NativeDiffCard diffCard;
+    private final List<NativeImageAttachment.Item> attachments = new ArrayList<>();
+    private List<QuickChip> devPreviewChips = new ArrayList<>();
     private JSONObject result;
-    private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", commandReason = "", capabilityReason = "", chipsSignature = "";
-    private boolean syncEnabled, replyBusy, sendBusy, downloadBusy, expanded, replyAvailable, knownReply, loadingDraft, filesPending, commandDelivered;
+    private String resultSignature = "", snapshotMarker = "", fullText = "", requestId = "", submittedText = "", commandState = "", commandReason = "", capabilityReason = "", chipsSignature = "", lastTaskStatus = "";
+    private boolean syncEnabled, replyBusy, sendBusy, downloadBusy, imageBusy, expanded, replyAvailable, knownReply, loadingDraft, filesPending, commandDelivered, lastHasError;
     private boolean replyExpanded;
     private ViewTreeObserver replyRevealTree, resultRevealTree;
     private ViewTreeObserver.OnPreDrawListener replyReveal, resultReveal;
@@ -173,6 +182,7 @@ public final class NativeTaskResults {
         diffSlot.setVisibility(View.GONE);
         LinearLayout.LayoutParams diffSpace = wrap(); diffSpace.topMargin = ui.dp(14);
         view.addView(diffSlot, diffSpace);
+        diffCard = new NativeDiffCard(ui, diffSlot);
 
         composerView = ui.column();
         composerView.setBackground(ui.compactHeaderMaterial(ui.reducedTransparencyEnabled()));
@@ -191,6 +201,15 @@ public final class NativeTaskResults {
         suggestionScroll.addView(suggestionRow, new FrameLayout.LayoutParams(-2, -2));
         LinearLayout.LayoutParams chipsSpace = wrap(); chipsSpace.bottomMargin = ui.dp(8);
         replyCard.addView(suggestionScroll, chipsSpace);
+
+        attachmentScroll = new HorizontalScrollView(activity);
+        attachmentScroll.setHorizontalScrollBarEnabled(false);
+        attachmentScroll.setVisibility(View.GONE);
+        attachmentRow = ui.row();
+        attachmentRow.setGravity(Gravity.CENTER_VERTICAL);
+        attachmentScroll.addView(attachmentRow, new FrameLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams attachSpace = wrap(); attachSpace.bottomMargin = ui.dp(8);
+        replyCard.addView(attachmentScroll, attachSpace);
 
         LinearLayout inputRow = ui.row();
         inputRow.setGravity(Gravity.BOTTOM);
@@ -232,11 +251,53 @@ public final class NativeTaskResults {
         ui.applyControlSpacing(modelCapsule);
         modelCapsule.setSingleLine(true);
         modelCapsule.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        modelCapsule.setMaxWidth(ui.dp(190));
+        modelCapsule.setMaxWidth(ui.dp(142));
         modelCapsule.setTextColor(ui.text);
         modelCapsule.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         modelCapsuleBox.addView(modelCapsule, new LinearLayout.LayoutParams(-2, -2));
         metaRow.addView(modelCapsuleBox, new LinearLayout.LayoutParams(-2, -2));
+
+        imageButton = ui.row();
+        imageButton.setGravity(Gravity.CENTER);
+        imageButton.setMinimumHeight(ui.dp(32));
+        imageButton.setMinimumWidth(ui.dp(34));
+        imageButton.setPaddingRelative(ui.dp(8), ui.dp(6), ui.dp(8), ui.dp(6));
+        imageButton.setBackground(ui.borderedRipple(ui.surface, 12));
+        imageButton.setFocusable(true);
+        imageButton.setClickable(true);
+        imageButton.setContentDescription("附带截图或图片");
+        imageButton.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        imageButton.setOnClickListener(v -> pickImages());
+        imageButtonIcon = (NativeUi.Icon) ui.icon("image", 15);
+        imageButtonIcon.setInk(ui.accent);
+        imageButton.addView(imageButtonIcon, new LinearLayout.LayoutParams(ui.dp(15), ui.dp(15)));
+        imageCountBadge = ui.text("", 11, true);
+        imageCountBadge.setTextColor(ui.accent);
+        imageCountBadge.setVisibility(View.GONE);
+        LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(-2, -2);
+        badgeLp.setMarginStart(ui.dp(4));
+        imageButton.addView(imageCountBadge, badgeLp);
+        LinearLayout.LayoutParams imgBtnLp = new LinearLayout.LayoutParams(-2, -2);
+        imgBtnLp.setMarginStart(ui.dp(6));
+        metaRow.addView(imageButton, imgBtnLp);
+
+        micButton = ui.row();
+        micButton.setGravity(Gravity.CENTER);
+        micButton.setMinimumHeight(ui.dp(32));
+        micButton.setMinimumWidth(ui.dp(34));
+        micButton.setPaddingRelative(ui.dp(8), ui.dp(6), ui.dp(8), ui.dp(6));
+        micButton.setBackground(ui.borderedRipple(ui.surface, 12));
+        micButton.setFocusable(true);
+        micButton.setClickable(true);
+        micButton.setContentDescription("语音口述输入");
+        micButton.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+        micButton.setOnClickListener(v -> startVoiceInput());
+        micButtonIcon = (NativeUi.Icon) ui.icon("mic", 15);
+        micButtonIcon.setInk(ui.accent);
+        micButton.addView(micButtonIcon, new LinearLayout.LayoutParams(ui.dp(15), ui.dp(15)));
+        LinearLayout.LayoutParams micBtnLp = new LinearLayout.LayoutParams(-2, -2);
+        micBtnLp.setMarginStart(ui.dp(6));
+        metaRow.addView(micButton, micBtnLp);
 
         LinearLayout statusCol = ui.column();
         statusCol.setGravity(Gravity.END);
@@ -381,26 +442,47 @@ public final class NativeTaskResults {
     }
     public void setQuickChips(java.util.List<QuickChip> chips) {
         if (!interactive) return;
-        StringBuilder sig = new StringBuilder();
-        if (chips != null) {
-            for (QuickChip c : chips) {
-                if (c != null && !c.label.isEmpty() && !c.prompt.isEmpty()) {
-                    sig.append(c.label).append('\n').append(c.prompt).append('\0');
+        devPreviewChips = chips == null ? new ArrayList<>() : new ArrayList<>(chips);
+        refreshSuggestions();
+    }
+
+    private void refreshSuggestions() {
+        if (!interactive) return;
+        int loopbackPort = 0;
+        String loopbackPrompt = "";
+        if (devPreviewChips != null && !devPreviewChips.isEmpty()) {
+            QuickChip first = devPreviewChips.get(0);
+            if (first != null && !first.prompt.isEmpty()) {
+                loopbackPrompt = first.prompt;
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile(":(\\d{2,5})").matcher(first.label);
+                if (m.find()) {
+                    try { loopbackPort = Integer.parseInt(m.group(1)); } catch (NumberFormatException ignored) { }
                 }
+            }
+        }
+        boolean wasPlanTurn = settingsReceiptText.contains("计划模式");
+        List<NativeReplyPresentationPolicy.Suggestion> contextual =
+                NativeReplyPresentationPolicy.quickSuggestions(
+                        lastTaskStatus, lastHasError, diffCard.fileCount(), wasPlanTurn, loopbackPort, loopbackPrompt);
+
+        StringBuilder sig = new StringBuilder();
+        for (NativeReplyPresentationPolicy.Suggestion c : contextual) {
+            if (c != null && !c.label.isEmpty() && !c.prompt.isEmpty()) {
+                sig.append(c.label).append('\n').append(c.prompt).append('\0');
             }
         }
         String nextSig = sig.toString();
         if (nextSig.equals(chipsSignature)) return;
         chipsSignature = nextSig;
         suggestionRow.removeAllViews();
-        if (chips == null || chips.isEmpty() || nextSig.isEmpty()) {
+        if (contextual.isEmpty() || nextSig.isEmpty()) {
             suggestionScroll.setVisibility(View.GONE);
             return;
         }
-        for (int i = 0; i < chips.size(); i++) {
-            final QuickChip item = chips.get(i);
+        for (int i = 0; i < contextual.size(); i++) {
+            final NativeReplyPresentationPolicy.Suggestion item = contextual.get(i);
             if (item == null || item.label.isEmpty() || item.prompt.isEmpty()) continue;
-            TextView pill = ui.text("✨ " + item.label, 12, false);
+            TextView pill = ui.text(item.label, 12, false);
             pill.setSingleLine(true);
             pill.setTextColor(ui.accent);
             pill.setPadding(ui.dp(10), ui.dp(5), ui.dp(10), ui.dp(5));
@@ -413,6 +495,154 @@ public final class NativeTaskResults {
             suggestionRow.addView(pill, lp);
         }
         suggestionScroll.setVisibility(suggestionRow.getChildCount() > 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private void pickImages() {
+        if (!interactive || !current() || !host.visible() || sendBusy || unresolved() || imageBusy) return;
+        if (attachments.size() >= NativeImageAttachment.MAX_ATTACHMENTS) {
+            host.notice("单次最多附带 " + NativeImageAttachment.MAX_ATTACHMENTS + " 张图片");
+            return;
+        }
+        try {
+            activity.startActivityForResult(
+                    NativeImageAttachment.pickerIntent(attachments.size() < NativeImageAttachment.MAX_ATTACHMENTS - 1),
+                    PICK_IMAGE);
+        } catch (RuntimeException unavailable) {
+            host.notice("暂时无法打开系统图片选择器");
+        }
+    }
+
+    public void pickImageResult(int resultCode, Intent data) {
+        if (!interactive || !current() || resultCode != Activity.RESULT_OK || data == null || sendBusy || unresolved() || imageBusy) return;
+        int remaining = NativeImageAttachment.MAX_ATTACHMENTS - attachments.size();
+        List<Uri> uris = NativeImageAttachment.extractUris(data, remaining);
+        if (uris.isEmpty()) {
+            host.notice("请选择有效的图片文件");
+            return;
+        }
+        imageBusy = true;
+        updateSend();
+        final int startIndex = attachments.size() + 1;
+        io.execute(() -> {
+            List<NativeImageAttachment.Item> loaded = new ArrayList<>();
+            String firstErr = "";
+            for (int i = 0; i < uris.size(); i++) {
+                try {
+                    loaded.add(NativeImageAttachment.fromUri(activity.getApplicationContext(), uris.get(i), startIndex + i));
+                } catch (Exception err) {
+                    if (firstErr.isEmpty()) firstErr = err.getMessage() == null ? "图片读取失败" : err.getMessage();
+                }
+            }
+            final String errText = firstErr;
+            main.post(() -> {
+                imageBusy = false;
+                if (!current()) {
+                    for (NativeImageAttachment.Item it : loaded) it.recycle();
+                    return;
+                }
+                for (NativeImageAttachment.Item it : loaded) {
+                    if (attachments.size() < NativeImageAttachment.MAX_ATTACHMENTS) {
+                        attachments.add(it);
+                    } else {
+                        it.recycle();
+                    }
+                }
+                renderAttachments();
+                updateSend();
+                if (!errText.isEmpty() && loaded.isEmpty()) host.notice(errText);
+                else if (!loaded.isEmpty()) openReplyFromUser();
+            });
+        });
+    }
+
+    private void startVoiceInput() {
+        if (!interactive || !current() || !host.visible() || sendBusy || unresolved()) return;
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "请口述下一步指令…");
+        try {
+            activity.startActivityForResult(intent, VOICE_INPUT);
+        } catch (RuntimeException unavailable) {
+            host.notice("当前系统未安装语音识别服务，请使用输入法麦克风");
+        }
+    }
+
+    public void voiceInputResult(int resultCode, Intent data) {
+        if (!interactive || !current() || resultCode != Activity.RESULT_OK || data == null || sendBusy || unresolved()) return;
+        ArrayList<String> matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+        if (matches == null || matches.isEmpty()) return;
+        String spoken = matches.get(0) == null ? "" : matches.get(0).trim();
+        if (spoken.isEmpty()) return;
+        String existing = replyInput.getText() == null ? "" : replyInput.getText().toString();
+        String combined = existing.trim().isEmpty() ? spoken : existing + (existing.endsWith(" ") || existing.endsWith("\n") ? "" : " ") + spoken;
+        prefillReply(combined);
+    }
+
+    private void renderAttachments() {
+        attachmentRow.removeAllViews();
+        if (attachments.isEmpty()) {
+            attachmentScroll.setVisibility(View.GONE);
+            imageCountBadge.setVisibility(View.GONE);
+            return;
+        }
+        imageCountBadge.setText(Integer.toString(attachments.size()));
+        imageCountBadge.setVisibility(View.VISIBLE);
+        boolean locked = sendBusy || unresolved();
+        for (int i = 0; i < attachments.size(); i++) {
+            final int idx = i;
+            final NativeImageAttachment.Item item = attachments.get(i);
+            LinearLayout chip = ui.row();
+            chip.setGravity(Gravity.CENTER_VERTICAL);
+            chip.setBackground(ui.bordered(ui.surface, 12));
+            chip.setPaddingRelative(ui.dp(6), ui.dp(5), ui.dp(8), ui.dp(5));
+
+            ImageView thumb = new ImageView(activity);
+            thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumb.setBackground(ui.rounded(ui.soft, 8));
+            thumb.setClipToOutline(true);
+            thumb.setImageBitmap(item.thumbnail);
+            chip.addView(thumb, new LinearLayout.LayoutParams(ui.dp(28), ui.dp(28)));
+
+            TextView label = ui.text(item.label, 12, false);
+            label.setTextColor(ui.text);
+            label.setSingleLine(true);
+            LinearLayout.LayoutParams lLp = new LinearLayout.LayoutParams(-2, -2);
+            lLp.setMarginStart(ui.dp(7));
+            chip.addView(label, lLp);
+
+            if (!locked) {
+                NativeUi.Icon close = (NativeUi.Icon) ui.icon("close", 14);
+                close.setInk(ui.muted);
+                FrameLayout removeTap = new FrameLayout(activity);
+                removeTap.setPadding(ui.dp(6), ui.dp(4), ui.dp(2), ui.dp(4));
+                removeTap.setContentDescription("移除图片 " + (idx + 1));
+                removeTap.setClickable(true);
+                removeTap.setFocusable(true);
+                removeTap.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+                removeTap.addView(close, new FrameLayout.LayoutParams(ui.dp(14), ui.dp(14), Gravity.CENTER));
+                removeTap.setOnClickListener(v -> {
+                    if (sendBusy || unresolved() || idx >= attachments.size()) return;
+                    NativeImageAttachment.Item removed = attachments.remove(idx);
+                    removed.recycle();
+                    renderAttachments();
+                    updateSend();
+                });
+                chip.addView(removeTap, new LinearLayout.LayoutParams(-2, -2));
+            }
+
+            LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(-2, -2);
+            if (i > 0) cLp.setMarginStart(ui.dp(8));
+            attachmentRow.addView(chip, cLp);
+        }
+        attachmentScroll.setVisibility(View.VISIBLE);
+    }
+
+    private void clearAttachments() {
+        for (NativeImageAttachment.Item item : attachments) {
+            item.recycle();
+        }
+        attachments.clear();
+        renderAttachments();
     }
     public boolean prefillReply(String text) {
         if (!interactive || text == null || text.trim().isEmpty()) return false;
@@ -461,12 +691,15 @@ public final class NativeTaskResults {
     private void setText(TextView target, String text) { if (!android.text.TextUtils.equals(target.getText(), text)) target.setText(text); }
     public void update(JSONObject task, boolean syncOutput) {
         if (disposed) return;
+        lastTaskStatus = task.optString("status", "");
+        lastHasError = task.optJSONObject("error_analysis") != null || !task.optString("failure_code", "").isEmpty();
         if (interactive) controls.update(task);
         boolean syncChanged = syncEnabled != syncOutput;
         if (syncChanged) {
             syncEnabled = syncOutput; resultRefresh.reset();
             if (!syncEnabled) {
                 result = null; fullText = ""; resultSignature = "";
+                diffCard.clear();
                 fileRows.removeAllViews(); outputActions.setVisibility(View.GONE);
                 expand.setVisibility(View.GONE); collapseAtEnd.setVisibility(View.GONE);
                 styleResultWell(false);
@@ -476,6 +709,7 @@ public final class NativeTaskResults {
                 setText(resultText, "正在读取最终结果…");
             }
         }
+        refreshSuggestions();
         String marker = task.optString("final_result_id") + "|" + task.optString("final_result_at") + "|" + task.optString("status");
         boolean changed = !marker.equals(snapshotMarker); snapshotMarker = marker;
         String cont = task.optString("continuation_state");
@@ -522,7 +756,7 @@ public final class NativeTaskResults {
         saved.putBoolean("reply_expanded", replyExpanded);
         if (pendingDownload != null) saved.putBundle("download", pendingDownload.save()); return saved;
     }
-    public void dispose() { pause(); if (interactive) controls.dispose(); disposed = true; resultRefresh.reset(); main.removeCallbacksAndMessages(null); io.shutdownNow(); }
+    public void dispose() { pause(); if (interactive) controls.dispose(); clearAttachments(); disposed = true; resultRefresh.reset(); main.removeCallbacksAndMessages(null); io.shutdownNow(); }
     private void request(String method, String path, JSONObject payload, Received done) {
         if (!current()) return;
         io.execute(() -> {
@@ -575,6 +809,8 @@ public final class NativeTaskResults {
         }
         outputActions.setVisibility(fullText.isEmpty() ? View.GONE : View.VISIBLE);
         setResultNote(result.optBoolean("truncated") ? "结果超出同步上限，完整内容请在电脑查看" : "");
+        diffCard.bind(result.optJSONObject("diff"));
+        refreshSuggestions();
         fileRows.removeAllViews(); filesPending = false; JSONArray files = result.optJSONArray("files");
         if (files != null && files.length() > 0) {
             fileRows.addView(ui.space(18)); fileRows.addView(ui.heading("配套文件", 16), wrap()); fileRows.addView(ui.space(6));
@@ -697,6 +933,7 @@ public final class NativeTaskResults {
         resultRefresh.reply(id.isEmpty() ? requestId : id, state,
                 result == null ? "" : result.optString("result_id"), changed, SystemClock.elapsedRealtime());
         if ("succeeded".equals(state) && changed) {
+            clearAttachments();
             if (replyInput.getText().toString().trim().equals(submittedText)) {
                 main.removeCallbacks(saveDraft);
                 loadingDraft = true;
@@ -704,6 +941,7 @@ public final class NativeTaskResults {
                 loadingDraft = false;
                 preferences.edit().remove(preferencesKey + ":draft").apply();
             }
+            refreshSuggestions();
         }
     }
     private String buildSettingsReceipt(JSONObject applied, JSONObject requested) {
@@ -734,7 +972,10 @@ public final class NativeTaskResults {
         boolean pending = unresolved();
         controls.setReplyLocked(sendBusy || pending);
         controls.setLastAppliedSummary(settingsReceiptText.startsWith("本轮实际使用：") ? settingsReceiptText : "");
-        replyInput.setEnabled(!sendBusy && !pending); replyInput.setAlpha(sendBusy || pending ? .7f : 1f);
+        boolean inputInteractive = !sendBusy && !pending && !imageBusy;
+        replyInput.setEnabled(inputInteractive); replyInput.setAlpha(inputInteractive ? 1f : .7f);
+        imageButton.setEnabled(inputInteractive); imageButton.setAlpha(inputInteractive ? 1f : .5f);
+        micButton.setEnabled(inputInteractive); micButton.setAlpha(inputInteractive ? 1f : .5f);
         boolean retry = pending && canRetryOriginal();
         boolean selectionReady = controls.canSendReply();
         setText(modelCapsule, controls.compactCapsuleLabel());
@@ -761,18 +1002,20 @@ public final class NativeTaskResults {
         replyAvailability.setVisibility(belowAvailability.isEmpty() ? View.GONE : View.VISIBLE);
         replyStatus.setTextColor(commandState.equals("failed") ? ui.danger
                 : commandState.equals("blocked") || commandState.equals("uncertain") || commandState.equals("not_found") ? ui.warning : ui.muted);
-        setText(sendButton, pending ? (retry ? "重试" : "查询") : "发送");
-        boolean enabled = !sendBusy && (pending ? !replyBusy : selectionReady && knownReply && replyAvailable && !replyInput.getText().toString().trim().isEmpty());
+        setText(sendButton, imageBusy ? "处理中" : pending ? (retry ? "重试" : "查询") : "发送");
+        boolean hasContent = !replyInput.getText().toString().trim().isEmpty() || !attachments.isEmpty();
+        boolean enabled = !sendBusy && !imageBusy && (pending ? !replyBusy : selectionReady && knownReply && replyAvailable && hasContent);
         sendButton.setEnabled(enabled); sendButton.setAlpha(enabled ? 1f : .5f);
         replyCard.setVisibility(View.VISIBLE);
     }
     private void send() {
         if (!interactive) return;
-        if (!current() || !host.visible() || sendBusy) return;
+        if (!current() || !host.visible() || sendBusy || imageBusy) return;
         boolean retry = unresolved() && canRetryOriginal();
         if (unresolved() && !retry) { fetchReply(true); updateSend(); return; }
         String draft = replyInput.getText().toString();
-        String text = retry ? submittedText : draft.trim(); if (text.isEmpty() || !retry && (!knownReply || !replyAvailable)) return;
+        String text = retry ? submittedText : draft.trim();
+        if ((text.isEmpty() && (retry || attachments.isEmpty())) || !retry && (!knownReply || !replyAvailable)) return;
         JSONObject selected = null;
         if (!retry) {
             try { selected = controls.selectionForSend(); submittedSelection = selected == null ? "" : selected.toString(); submittedSelectionInvalid = false; }
@@ -794,14 +1037,23 @@ public final class NativeTaskResults {
         main.removeCallbacks(saveDraft);
         commandReason = "";
         resultRefresh.rememberReply(requestId, result == null ? "" : result.optString("result_id"));
-        sendBusy = true; updateSend(); final String sendingId = requestId;
-        JSONObject payload = new JSONObject(); try { payload.put("task_id", taskId).put("text", text).put("request_id", sendingId); if (!submittedSelection.isEmpty()) payload.put("selection", new JSONObject(submittedSelection)); } catch (Exception invalid) { sendBusy = false; submittedSelectionInvalid = true; commandState = "uncertain"; updateSend(); return; }
+        sendBusy = true; renderAttachments(); updateSend(); final String sendingId = requestId;
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("task_id", taskId).put("text", text).put("request_id", sendingId);
+            if (!submittedSelection.isEmpty()) payload.put("selection", new JSONObject(submittedSelection));
+            if (!retry && !attachments.isEmpty()) payload.put("images", NativeImageAttachment.toJsonArray(attachments));
+        } catch (Exception invalid) { sendBusy = false; submittedSelectionInvalid = true; commandState = "uncertain"; renderAttachments(); updateSend(); return; }
         request("POST", "/api/native/tasks/reply", payload, (value, failure) -> {
             sendBusy = false; if (!sendingId.equals(requestId)) return;
             if (failure == null) {
+                clearAttachments();
                 JSONObject command = value.optJSONObject("command"); consumeCommand(command == null ? value : command);
                 if (commandState.isEmpty()) commandState = "uncertain";
-            } else commandState = "uncertain";
+            } else {
+                commandState = "uncertain";
+                renderAttachments();
+            }
             replyRefreshAt = 0; updateSend(); fetchReply(true);
         });
     }

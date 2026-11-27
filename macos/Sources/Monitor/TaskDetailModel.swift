@@ -23,6 +23,7 @@ final class TaskDetailModel: ObservableObject {
     @Published private(set) var replyMessage = ""
     @Published private(set) var pending: PendingReply?
     @Published var draft = ""
+    @Published var draftImages: [DraftImageAttachment] = []
     @Published private(set) var resultError = ""
     @Published private var cachedResultStale = false
 
@@ -190,9 +191,40 @@ final class TaskDetailModel: ObservableObject {
         return name
     }
     var canSend: Bool {
-        supportsReply && current && Date() >= rateLimitUntil && !sending && !refreshingReply
-            && (unresolved || (replyAvailable && canSendReplySelection
-                && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.count <= 8000))
+        let hasContent = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty
+        return supportsReply && current && Date() >= rateLimitUntil && !sending && !refreshingReply
+            && (unresolved || (replyAvailable && canSendReplySelection && hasContent && draft.count <= 8000))
+    }
+
+    static func encodeImageAttachment(from url: URL, index: Int) -> DraftImageAttachment? {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 0, size <= 15 * 1024 * 1024,
+              let original = NSImage(contentsOf: url),
+              original.size.width > 0, original.size.height > 0 else { return nil }
+        let maxEdge: CGFloat = 1440
+        let longest = max(original.size.width, original.size.height)
+        let ratio = longest > maxEdge ? maxEdge / longest : 1.0
+        let w = max(1, Int(round(original.size.width * ratio)))
+        let h = max(1, Int(round(original.size.height * ratio)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ), let ctx = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: w, height: h).fill()
+        original.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: .zero, operation: .sourceOver, fraction: 1.0)
+        NSGraphicsContext.restoreGraphicsState()
+        for factor in [0.84, 0.72, 0.58] {
+            if let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: factor]),
+               jpeg.count <= 850 * 1024 {
+                let kb = max(1, Int(round(Double(jpeg.count) / 1024.0)))
+                return DraftImageAttachment(mime: "image/jpeg", data: jpeg.base64EncodedString(), label: "图 \(index) · \(kb) KB")
+            }
+        }
+        return nil
     }
     var sendTitle: String { unresolved ? pending?.mayRetry == true ? "重试原回复" : "查询发送结果" : "发送回复" }
 
@@ -688,13 +720,15 @@ final class TaskDetailModel: ObservableObject {
         let record: PendingReply
         let consumeFast: Bool
         let consumePlan: Bool
+        let sentImages: [DraftImageAttachment]
         if let pending, pending.mayRetry {
             record = pending
             consumeFast = false
             consumePlan = false
+            sentImages = []
         } else {
             let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard replyAvailable, !text.isEmpty, text.count <= 8000 else { return }
+            guard replyAvailable, (!text.isEmpty || !draftImages.isEmpty), text.count <= 8000 else { return }
             let resolvedSelection: SessionModelSelection?
             switch SessionControlPolicy.selectionForSend(
                 catalog: controls?.catalog,
@@ -713,6 +747,7 @@ final class TaskDetailModel: ObservableObject {
                 store.notice = problem.localizedDescription
                 return
             }
+            sentImages = Array(draftImages.prefix(QuickReplySuggestionPolicy.maxAttachments))
             record = PendingReply(
                 id: UUID().uuidString.lowercased(),
                 taskId: taskId,
@@ -753,9 +788,13 @@ final class TaskDetailModel: ObservableObject {
         if let submitted = record.submittedSelection {
             body["selection"] = submitted.wireDictionary
         }
+        if !sentImages.isEmpty {
+            body["images"] = sentImages.map(\.wireDictionary)
+        }
         do {
             // This is the only POST site. Refresh/poll/relaunch never resend a reply.
             let response = try await store.api.json(ReplyState.self, .sendReply, method: "POST", body: body, token: token)
+            if !sentImages.isEmpty { draftImages.removeAll() }
             guard current, pending?.id == record.id else { sending = false; return }
             guard response.id == record.id, let state = response.state else { throw MonitorError.invalidResponse }
             try updatePending(state, reason: response.reason)

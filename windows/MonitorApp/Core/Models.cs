@@ -363,6 +363,50 @@ public sealed class ResultFileDto
     [JsonPropertyName("ready")] public bool? Ready { get; set; }
 }
 
+public sealed class DiffLineDto
+{
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "context";
+    [JsonPropertyName("old_line")] public int? OldLine { get; set; }
+    [JsonPropertyName("new_line")] public int? NewLine { get; set; }
+    [JsonPropertyName("text")] public string Text { get; set; } = "";
+}
+
+public sealed class DiffHunkDto
+{
+    [JsonPropertyName("header")] public string Header { get; set; } = "";
+    [JsonPropertyName("lines")] public List<DiffLineDto>? Lines { get; set; }
+}
+
+public sealed class DiffFileDto
+{
+    [JsonPropertyName("path")] public string Path { get; set; } = "";
+    [JsonPropertyName("status")] public string Status { get; set; } = "M";
+    [JsonPropertyName("additions")] public int Additions { get; set; }
+    [JsonPropertyName("deletions")] public int Deletions { get; set; }
+    [JsonPropertyName("binary")] public bool Binary { get; set; }
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+    [JsonPropertyName("hunks")] public List<DiffHunkDto>? Hunks { get; set; }
+}
+
+public sealed class DiffSummaryDto
+{
+    [JsonPropertyName("source")] public string Source { get; set; } = "working_tree";
+    [JsonPropertyName("commit_title")] public string? CommitTitle { get; set; }
+    [JsonPropertyName("total_files")] public int TotalFiles { get; set; }
+    [JsonPropertyName("additions")] public int Additions { get; set; }
+    [JsonPropertyName("deletions")] public int Deletions { get; set; }
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+    [JsonPropertyName("files")] public List<DiffFileDto>? Files { get; set; }
+}
+
+public sealed class ImageAttachmentDto
+{
+    [JsonPropertyName("mime")] public string Mime { get; set; } = "image/jpeg";
+    [JsonPropertyName("data")] public string Data { get; set; } = "";
+    [JsonIgnore] public string Label { get; set; } = "";
+    [JsonIgnore] public byte[]? PreviewBytes { get; set; }
+}
+
 public sealed class TaskResultDto
 {
     [JsonPropertyName("available")] public bool Available { get; set; }
@@ -374,6 +418,7 @@ public sealed class TaskResultDto
     [JsonPropertyName("txt_size")] public int? TxtSize { get; set; }
     [JsonPropertyName("txt_sha256")] public string? TxtSha256 { get; set; }
     [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("diff")] public DiffSummaryDto? Diff { get; set; }
 }
 
 public sealed class AppliedSettingsDto
@@ -420,6 +465,9 @@ public sealed class TaskStartPayloadDto
     [JsonPropertyName("selection")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SessionModelSelectionDto? Selection { get; set; }
+    [JsonPropertyName("images")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ImageAttachmentDto>? Images { get; set; }
 }
 
 public sealed class LoginSecret

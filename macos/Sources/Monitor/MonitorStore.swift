@@ -578,6 +578,7 @@ final class MonitorStore: ObservableObject {
         projectId: String,
         tool: String,
         prompt: String,
+        images: [DraftImageAttachment] = [],
         onProgress: ((String) -> Void)? = nil
     ) async -> (createdTaskId: String?, error: String?) {
         guard let login = credential, connected, !origin.isEmpty else {
@@ -593,19 +594,22 @@ final class MonitorStore: ObservableObject {
             return (nil, "请选择支持的工具")
         }
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 8000 else {
-            return (nil, "请输入 1–8000 字的首条任务指令")
+        guard (!trimmed.isEmpty || !images.isEmpty), trimmed.count <= 8000 else {
+            return (nil, "请输入 1–8000 字的首条任务指令（或附带图片）")
         }
         let requestId = UUID().uuidString.lowercased()
         let syntheticTaskId = "\(deviceId):\(tool):new_\(projectId)"
         let epoch = generation
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "device_id": deviceId,
             "project_id": projectId,
             "tool": tool,
             "request_id": requestId,
             "text": trimmed
         ]
+        if !images.isEmpty {
+            body["images"] = Array(images.prefix(QuickReplySuggestionPolicy.maxAttachments)).map(\.wireDictionary)
+        }
         do {
             onProgress?("正在向电脑发送新建任务请求…")
             let initial = try await api.json(ReplyState.self, .startTask, method: "POST", body: body, token: login.token)

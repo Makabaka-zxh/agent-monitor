@@ -33,7 +33,7 @@ from .failure_reasons import (
 )
 from .model_capabilities import antigravity_catalog_rows, normalize_catalog, selected_settings
 from .provider_controls import normalize_request, UnsupportedControl
-from .session_controls import ModelSelection, reply_fingerprint
+from .session_controls import ImageAttachment, MAX_REPLY_IMAGES, ModelSelection, reply_fingerprint
 
 NEW_SOURCE_RE = re.compile(r"^(codex|claude|antigravity):new_([0-9a-f]{24})\Z")
 
@@ -899,8 +899,43 @@ class _Run:
     error_code: str = ""
     fingerprint: str = ""
     selection: dict | None = None
+    images: list[ImageAttachment] = field(default_factory=list)
     applied: dict | None = None
     created_source_id: str = ""
+
+
+def _stage_reply_images(cwd: Path, command_id: str, images: list[ImageAttachment]) -> tuple[Path | None, list[Path]]:
+    """Materialize verified image bytes into a git-ignored private folder inside cwd (or temp fallback)."""
+    if not images:
+        return None, []
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "", command_id)[:48] or uuid.uuid4().hex
+    stage_dir: Path | None = None
+    git_dir = cwd / ".git"
+    try:
+        if git_dir.is_dir() and _unlinked(git_dir):
+            base = git_dir / "monitor-uploads"
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if _unlinked(base):
+                candidate = base / safe_id
+                candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if _unlinked(candidate):
+                    stage_dir = candidate
+    except OSError:
+        stage_dir = None
+    if stage_dir is None:
+        stage_dir = Path(tempfile.mkdtemp(prefix=f"monitor-img-{safe_id[:12]}-"))
+    written: list[Path] = []
+    for idx, img in enumerate(images, start=1):
+        target = stage_dir / f"attachment-{idx}{img.extension()}"
+        raw = img.decoded_bytes()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+        fd = os.open(str(target), flags, 0o600)
+        try:
+            os.write(fd, raw)
+        finally:
+            os.close(fd)
+        written.append(target)
+    return stage_dir, written
 
 
 def _catalog_session_id(run, target) -> str:
@@ -981,14 +1016,24 @@ class LocalReplyExecutor:
         try: self.emit(dict(value))
         except Exception: pass  # A UI/store callback cannot grant permissions or restart work.
 
-    def start(self, command_id: str, source_id: str, prompt: str, *, selection=None) -> dict:
+    def start(self, command_id: str, source_id: str, prompt: str, *, selection=None, images=None) -> dict:
         if not isinstance(command_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", command_id):
             return {"command_id": "", "state": "blocked", "reason": REASONS["invalid"]}
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS or "\x00" in prompt:
             return {"command_id": command_id, "state": "blocked", "reason": REASONS["invalid"]}
         try:
             chosen = ModelSelection.model_validate(selection) if selection is not None else None
-            fingerprint = hashlib.sha256((str(source_id) + "\0" + reply_fingerprint(prompt, chosen)).encode()).hexdigest()
+            validated_images: list[ImageAttachment] = []
+            if images is not None:
+                if not isinstance(images, (list, tuple)) or len(images) > MAX_REPLY_IMAGES:
+                    raise ValueError("invalid images")
+                validated_images = [
+                    item if isinstance(item, ImageAttachment) else ImageAttachment.model_validate(item)
+                    for item in images
+                ]
+            fingerprint = hashlib.sha256(
+                (str(source_id) + "\0" + reply_fingerprint(prompt, chosen, validated_images)).encode()
+            ).hexdigest()
         except (ValueError, TypeError):
             return {"command_id": command_id, "state": "blocked", "reason": REASONS["invalid"], "error_code": "invalid"}
         with self.lock:
@@ -1000,8 +1045,13 @@ class LocalReplyExecutor:
                 return {"command_id": command_id, "state": "blocked", "reason": REASONS["closed" if self.closed else "duplicate"]}
             if any(r.source_id == source_id and r.state == "running" for r in self.runs.values()):
                 return {"command_id": command_id, "state": "blocked", "reason": REASONS["busy"]}
-            run = _Run(command_id, source_id, fingerprint=fingerprint,
-                       selection=chosen.model_dump() if chosen else None)
+            run = _Run(
+                command_id,
+                source_id,
+                fingerprint=fingerprint,
+                selection=chosen.model_dump() if chosen else None,
+                images=validated_images,
+            )
             self.runs[command_id] = run
         try: target = _inspect(source_id, **self.inspect_options)
         except ExecutionIssue as exc:
@@ -1051,6 +1101,7 @@ class LocalReplyExecutor:
 
     def _execute(self, run, target, prompt):
         process = transport = None
+        staged_dir: Path | None = None
         state, reason, code = "uncertain", REASONS["protocol"], "protocol"
         try:
             self._fresh(target)
@@ -1069,14 +1120,21 @@ class LocalReplyExecutor:
             if target.tool == "claude" and getattr(target, "is_new", False):
                 new_sid = str(uuid.uuid4())
                 exec_target = replace(target, session_id=new_sid, source_id="claude:" + new_sid)
+            staged_paths: list[Path] = []
+            if run.images:
+                staged_dir, staged_paths = _stage_reply_images(exec_target.cwd, run.command_id, run.images)
             argv, profile_name = _command(exec_target, interactive=interactive, settings=settings)
             process = self.process_factory(argv, exec_target.cwd)
             transport = _Transport(process, run.cancelled, self.timeout)
             self._emit(self._result(run))
-            if exec_target.tool == "codex": self._codex(transport, exec_target, profile_name, prompt, run, settings)
-            elif exec_target.tool == "antigravity": self._antigravity(transport, exec_target, prompt, run, settings)
-            elif interactive: self._claude_controlled(transport, exec_target, prompt, run, settings)
-            else: self._claude(transport, exec_target, prompt, run)
+            if exec_target.tool == "codex":
+                self._codex(transport, exec_target, profile_name, prompt, run, settings, staged_paths=staged_paths)
+            elif exec_target.tool == "antigravity":
+                self._antigravity(transport, exec_target, prompt, run, settings, staged_paths=staged_paths)
+            elif interactive:
+                self._claude_controlled(transport, exec_target, prompt, run, settings, staged_paths=staged_paths)
+            else:
+                self._claude(transport, exec_target, prompt, run, staged_paths=staged_paths)
             state, reason, code = "succeeded", "", ""
         except ExecutionIssue as exc:
             state, reason, code = exc.state, REASONS[exc.code], exc.code
@@ -1088,10 +1146,12 @@ class LocalReplyExecutor:
             if process:
                 try: process.close(graceful=state == "succeeded" or target.tool == "antigravity")
                 except (OSError, ValueError, subprocess.TimeoutExpired): state, reason, code = "uncertain", REASONS["protocol"], "protocol"
+            if staged_dir is not None:
+                shutil.rmtree(staged_dir, ignore_errors=True)
             with self.lock: run.state, run.reason, run.error_code = state, reason, code
             self._emit(self._result(run))
 
-    def _codex(self, transport, target, profile, prompt, run, settings=None):
+    def _codex(self, transport, target, profile, prompt, run, settings=None, *, staged_paths=None):
         transport.send({"id": 1, "method": "initialize", "params": {
             "clientInfo": {"name": "agent_monitor_local_reply", "version": "1"}, "capabilities": {"experimentalApi": True}}})
         _rpc_response(transport, 1)
@@ -1150,7 +1210,11 @@ class LocalReplyExecutor:
             target = self._fresh_after_codex_resume(target, checkpoint, resumed)
         environments = thread.get("environments")
         local_approval_environment = _codex_local_approval_environment(environments, target.cwd)
-        params = {"threadId": target.session_id, "input": [{"type": "text", "text": prompt}],
+        input_items = [{"type": "text", "text": prompt}]
+        if staged_paths:
+            for img_path in staged_paths:
+                input_items.append({"type": "localImage", "path": str(img_path)})
+        params = {"threadId": target.session_id, "input": input_items,
                   "cwd": str(target.cwd), "permissions": profile, "approvalPolicy": "untrusted", "approvalsReviewer": "user",
                   "clientUserMessageId": run.command_id}
         # next_message is the application time, not a promised expiry. The
@@ -1254,13 +1318,16 @@ class LocalReplyExecutor:
             raise ExecutionIssue(final_code or failure_code or "failed",
                                  "failed" if turn.get("status") == "failed" else "uncertain")
 
-    def _claude(self, transport, target, prompt, run=None):
+    def _claude(self, transport, target, prompt, run=None, *, staged_paths=None):
         is_new = bool(getattr(target, "is_new", False))
         if is_new:
             self._directory_current(target)
         else:
             self._fresh(target)
-        transport.send_bytes(prompt.encode("utf-8"), close=True)
+        effective_prompt = prompt
+        if staged_paths:
+            effective_prompt = prompt + "\n\n[附带本地图片文件: " + ", ".join(str(p) for p in staged_paths) + "]"
+        transport.send_bytes(effective_prompt.encode("utf-8"), close=True)
         initialized = False
         while True:
             message = transport.next()
@@ -1382,7 +1449,7 @@ class LocalReplyExecutor:
             if not acknowledged:
                 self._resolve_control(request, "cancelled", outcome="handled_on_desktop" if desktop_handled else "")
 
-    def _antigravity(self, transport, target, prompt, run, settings=None):
+    def _antigravity(self, transport, target, prompt, run, settings=None, *, staged_paths=None):
         is_new = bool(getattr(target, "is_new", False))
         base_dir = _antigravity_base_dir(target.path)
         transcript = (base_dir / "brain" / target.session_id / ".system_generated" / "logs" / "transcript.jsonl")
@@ -1460,8 +1527,16 @@ class LocalReplyExecutor:
         self._record_applied(run, applied_ag)
         self._directory_current(target)
         prompt_id = rpc_id
+        prompt_blocks = []
+        if getattr(run, "images", None):
+            for img in run.images:
+                prompt_blocks.append({"type": "image", "mimeType": img.mime, "data": img.data})
+        ag_text = prompt
+        if staged_paths:
+            ag_text = prompt + "\n\n[附带图片本地路径: " + ", ".join(str(p) for p in staged_paths) + "]"
+        prompt_blocks.append({"type": "text", "text": ag_text})
         transport.send({"jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt", "params": {
-            "sessionId": target.session_id, "prompt": [{"type": "text", "text": prompt}]}})
+            "sessionId": target.session_id, "prompt": prompt_blocks}})
         pending, seen = [], {}
         stopped_by_phone = False
         session_closed = False
@@ -1506,7 +1581,7 @@ class LocalReplyExecutor:
             if not session_closed:
                 _antigravity_abort_session(transport, target.session_id, prompt_id + 2)
 
-    def _claude_controlled(self, transport, target, prompt, run, settings):
+    def _claude_controlled(self, transport, target, prompt, run, settings, *, staged_paths=None):
         is_new = bool(getattr(target, "is_new", False))
         initialized = _claude_initialize(transport)
         if settings:
@@ -1518,8 +1593,20 @@ class LocalReplyExecutor:
             self._directory_current(target)
         else:
             self._fresh(target)
+        if getattr(run, "images", None):
+            content_blocks = [
+                {"type": "image", "source": {"type": "base64", "media_type": img.mime, "data": img.data}}
+                for img in run.images
+            ]
+            cl_text = prompt
+            if staged_paths:
+                cl_text = prompt + "\n\n[附带图片本地路径: " + ", ".join(str(p) for p in staged_paths) + "]"
+            content_blocks.append({"type": "text", "text": cl_text})
+            user_content: str | list = content_blocks
+        else:
+            user_content = prompt
         transport.send({"type": "user", "session_id": target.session_id, "uuid": run.command_id,
-                        "message": {"role": "user", "content": prompt}})
+                        "message": {"role": "user", "content": user_content}})
         pending, seen = [], {}
         session_initialized = False
         failure_code = ""

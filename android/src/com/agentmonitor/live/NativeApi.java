@@ -250,7 +250,8 @@ public final class NativeApi {
                 while (true) {
                     deadline.check(); count = input.read(chunk); deadline.check();
                     if (count == -1) break;
-                    int limit = "/api/native/workbench".equals(path) ? 8 * 1024 * 1024 : 1024 * 1024;
+                    int limit = "/api/native/workbench".equals(path) ? 8 * 1024 * 1024
+                            : path.startsWith("/api/native/tasks/result?") ? 2 * 1024 * 1024 : 1024 * 1024;
                     if (result.size() + count > limit) throw new Failure(0, "服务返回的数据过大");
                     result.write(chunk, 0, count);
                     byteCount += count;

@@ -172,4 +172,25 @@ final class MonitorTests: XCTestCase {
         XCTAssertNil(allItems[1].openURL)
         XCTAssertTrue(allItems[1].loopbackFixPrompt?.contains("0.0.0.0:3000") == true)
     }
+
+    func testDiffSummaryAndQuickSuggestions() throws {
+        let errChips = QuickReplySuggestionPolicy.suggestions(status: "error", hasError: true, diffFiles: 0, planMode: false, loopbackPort: 5173, loopbackPrompt: "bind 0.0.0.0")
+        XCTAssertEqual(errChips.count, 3)
+        XCTAssertTrue(errChips[0].label.contains(":5173"))
+        XCTAssertTrue(errChips[1].label.contains("定位报错"))
+
+        let diffChips = QuickReplySuggestionPolicy.suggestions(status: "completed", hasError: false, diffFiles: 2, planMode: false)
+        XCTAssertEqual(diffChips.count, 3)
+        XCTAssertTrue(diffChips[0].label.contains("运行测试验证改动"))
+
+        let res = try decode(TaskResult.self, """
+        {"available":true,"text":"ok","diff":{"source":"working_tree","commit_title":null,"total_files":1,"additions":3,"deletions":1,"truncated":false,
+          "files":[{"path":"src/main.swift","status":"M","additions":3,"deletions":1,"binary":false,"truncated":false,
+            "hunks":[{"header":"@@ -1,2 +1,4 @@","lines":[{"kind":"add","new_line":2,"text":"let ok = true"}]}]}]}}
+        """)
+        XCTAssertEqual(res.diff?.source, "working_tree")
+        XCTAssertEqual(res.diff?.additions, 3)
+        XCTAssertEqual(res.diff?.files?.first?.path, "src/main.swift")
+        XCTAssertEqual(res.diff?.files?.first?.hunks?.first?.lines?.first?.newLine, 2)
+    }
 }

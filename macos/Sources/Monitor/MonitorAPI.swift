@@ -84,7 +84,9 @@ final class MonitorAPI {
     }
 
     func json<T: Decodable>(_ type: T.Type, _ endpoint: Endpoint, method: String = "GET", body: [String: Any]? = nil, token: String? = nil) async throws -> T {
-        let limit = endpoint.path == "/api/native/workbench" ? 8 * 1024 * 1024 : 1024 * 1024
+        let limit = endpoint.path == "/api/native/workbench"
+            ? 8 * 1024 * 1024
+            : endpoint.path == "/api/native/tasks/result" ? 2 * 1024 * 1024 : 1024 * 1024
         let data = try await bytes(endpoint, method: method, body: body, token: token, maximum: limit)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

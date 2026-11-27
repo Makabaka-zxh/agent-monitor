@@ -2017,4 +2017,178 @@ public static class UiKit
 
         return (host, SetSilently);
     }
+
+    public static ImageAttachmentDto EncodeImageAttachment(BitmapSource source, int displayIndex)
+    {
+        const int maxLongEdge = 1440;
+        const int maxEncodedBytes = 850 * 1024;
+        var w = Math.Max(1, source.PixelWidth);
+        var h = Math.Max(1, source.PixelHeight);
+        var longest = Math.Max(w, h);
+        if (longest > maxLongEdge)
+        {
+            var ratio = (double)maxLongEdge / longest;
+            w = Math.Max(1, (int)Math.Round(w * ratio));
+            h = Math.Max(1, (int)Math.Round(h * ratio));
+        }
+
+        var dv = new DrawingVisual();
+        using (var dc = dv.RenderOpen())
+        {
+            dc.DrawRectangle(Brushes.White, null, new Rect(0, 0, w, h));
+            dc.DrawImage(source, new Rect(0, 0, w, h));
+        }
+        var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(dv);
+        rtb.Freeze();
+
+        byte[]? encoded = null;
+        foreach (var quality in new[] { 84, 72, 58 })
+        {
+            var encoder = new JpegBitmapEncoder { QualityLevel = quality };
+            encoder.Frames.Add(BitmapFrame.Create(rtb));
+            using var ms = new MemoryStream();
+            encoder.Save(ms);
+            if (ms.Length <= maxEncodedBytes)
+            {
+                encoded = ms.ToArray();
+                break;
+            }
+        }
+        if (encoded is null)
+            throw new InvalidOperationException("图片压缩后仍超过大小上限，请裁剪后重试。");
+
+        // Build tiny 56x56 center-cropped preview bytes for UI chip
+        var thumbDv = new DrawingVisual();
+        using (var dc = thumbDv.RenderOpen())
+        {
+            var scale = Math.Max(56.0 / w, 56.0 / h);
+            var dw = w * scale;
+            var dh = h * scale;
+            dc.DrawImage(rtb, new Rect((56.0 - dw) / 2.0, (56.0 - dh) / 2.0, dw, dh));
+        }
+        var thumbRtb = new RenderTargetBitmap(56, 56, 96, 96, PixelFormats.Pbgra32);
+        thumbRtb.Render(thumbDv);
+        var thumbEncoder = new JpegBitmapEncoder { QualityLevel = 82 };
+        thumbEncoder.Frames.Add(BitmapFrame.Create(thumbRtb));
+        using var thumbMs = new MemoryStream();
+        thumbEncoder.Save(thumbMs);
+
+        var kb = Math.Max(1, (int)Math.Round(encoded.Length / 1024.0));
+        return new ImageAttachmentDto
+        {
+            Mime = "image/jpeg",
+            Data = Convert.ToBase64String(encoded),
+            Label = $"图 {displayIndex} · {kb} KB",
+            PreviewBytes = thumbMs.ToArray()
+        };
+    }
+
+    public static ImageAttachmentDto LoadImageAttachmentFromFile(string path, int displayIndex)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists || info.Length is <= 0 or > 12 * 1024 * 1024)
+            throw new InvalidOperationException("请选择 12 MB 以内的有效图片文件。");
+        var bmp = new BitmapImage();
+        bmp.BeginInit();
+        bmp.UriSource = new Uri(info.FullName, UriKind.Absolute);
+        bmp.CacheOption = BitmapCacheOption.OnLoad;
+        bmp.EndInit();
+        bmp.Freeze();
+        return EncodeImageAttachment(bmp, displayIndex);
+    }
+
+    public static List<ImageAttachmentDto> TryReadClipboardImageAttachments(int startIndex, int maxRemaining)
+    {
+        var results = new List<ImageAttachmentDto>();
+        if (maxRemaining <= 0) return results;
+        try
+        {
+            if (Clipboard.ContainsImage() && Clipboard.GetImage() is { } clipImg)
+            {
+                results.Add(EncodeImageAttachment(clipImg, startIndex));
+                return results;
+            }
+            if (Clipboard.ContainsFileDropList())
+            {
+                var files = Clipboard.GetFileDropList();
+                foreach (string? file in files)
+                {
+                    if (results.Count >= maxRemaining || string.IsNullOrWhiteSpace(file)) continue;
+                    var ext = Path.GetExtension(file).ToLowerInvariant();
+                    if (ext is ".png" or ".jpg" or ".jpeg" or ".webp")
+                    {
+                        try { results.Add(LoadImageAttachmentFromFile(file, startIndex + results.Count)); } catch { }
+                    }
+                }
+            }
+        }
+        catch { }
+        return results;
+    }
+
+    public static Border BuildImageAttachmentPill(ImageAttachmentDto item, Action? onRemove)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        if (item.PreviewBytes is { Length: > 0 } preview)
+        {
+            try
+            {
+                var bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.StreamSource = new MemoryStream(preview);
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.EndInit();
+                bmp.Freeze();
+
+                var thumbBox = new Border
+                {
+                    Width = 24,
+                    Height = 24,
+                    CornerRadius = new CornerRadius(5),
+                    ClipToBounds = true,
+                    Margin = new Thickness(0, 0, 7, 0),
+                    Background = new ImageBrush(bmp) { Stretch = Stretch.UniformToFill }
+                };
+                row.Children.Add(thumbBox);
+            }
+            catch { }
+        }
+
+        row.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(item.Label) ? "图片附件" : item.Label,
+            FontFamily = AppFont,
+            FontSize = 11.8,
+            Foreground = TextBrush,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        if (onRemove is not null)
+        {
+            var closeIcon = new MonitorIcon("close", MutedBrush, 12);
+            var closePad = new Border
+            {
+                Padding = new Thickness(6, 3, 2, 3),
+                Background = Brushes.Transparent,
+                Child = closeIcon
+            };
+            var closeBtn = BareButton(closePad, onRemove);
+            closeBtn.ToolTip = "移除图片";
+            closeBtn.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(closeBtn);
+        }
+
+        return new Border
+        {
+            Background = GlassTrackBrush,
+            BorderBrush = GlassSubtleRimBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(ControlRadius),
+            Padding = new Thickness(6, 4, 8, 4),
+            Margin = new Thickness(0, 0, 7, 5),
+            SnapsToDevicePixels = true,
+            Child = row
+        };
+    }
 }

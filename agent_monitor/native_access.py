@@ -313,8 +313,15 @@ class NativeAccess:
             profile = self.store.profile()
             devices = [{key: item[key] for key in ("id", "name", "online")} for item in snapshot["devices"]]
             names = {item["id"]: item["name"] for item in devices}
+            approvals = (
+                self.replies.controls.pending_approvals(reader["id"])
+                if reader["mode"] == "full_app" and getattr(self, "replies", None) is not None
+                else {}
+            )
             tasks = [{**{key: item[key] for key in ("id", "title", "tool", "status", "updated_at", "device_id", "archived")},
-                      "device_name": names.get(item["device_id"], "电脑")} for item in snapshot["tasks"]]
+                      "device_name": names.get(item["device_id"], "电脑"),
+                      **({"pending_approval": approvals[item["id"]]} if not item["archived"] and item["id"] in approvals else {})}
+                     for item in snapshot["tasks"]]
             result = {"user": {key: profile[key] for key in ("display_name", "avatar")},
                     "devices": devices, "tasks": tasks, "generated_at": snapshot["server_time"]}
             if reader["mode"] == "full_app" and getattr(self, "usage", None):
@@ -382,6 +389,7 @@ class NativeAccess:
 def install_native_routes(app, store, public_url, authenticated, same_origin, google_enabled=lambda: False):
     access = NativeAccess(store)
     access.usage = app.state.usage
+    access.replies = getattr(app.state, "task_replies", None)
     app.state.native_access = access
 
     def pairing_id(value):

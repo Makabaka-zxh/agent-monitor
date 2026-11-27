@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 REQUEST_TIMEOUT = 10
 HEARTBEAT_INTERVAL = 5
 MAX_RETRY_DELAY = 30
-MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_RESPONSE_BYTES = 6 * 1024 * 1024
 CONFIG_FILENAME = "config.json"
 QR_PAIRING_SECONDS = 600
 QR_ID_PATTERN = r"[A-Za-z0-9_-]{32}"
@@ -599,10 +599,19 @@ class ResultSync:
             if not final or final["result_id"] != task["final_result_id"]:
                 continue
             files = [{key: file[key] for key in ("id", "name", "size", "mime", "sha256")} for file in final["files"]]
-            response = client.post("/api/agent/results", {
+            upload_payload = {
                 "source_id": task["id"], "tool": task["tool"],
                 **{key: final[key] for key in ("result_id", "text", "completed_at", "truncated")}, "files": files,
-            }, token=config.token)
+            }
+            if isinstance(final.get("diff"), dict):
+                upload_payload["diff"] = final["diff"]
+            try:
+                response = client.post("/api/agent/results", upload_payload, token=config.token)
+            except RemoteAgentError as exc:
+                if "diff" not in upload_payload or not isinstance(exc.__cause__, urllib.error.HTTPError) or exc.__cause__.code != 422:
+                    raise
+                upload_payload.pop("diff", None)
+                response = client.post("/api/agent/results", upload_payload, token=config.token)
             requested = response.get("needed_files")
             if not isinstance(requested, list) or len(requested) > MAX_FILES:
                 raise RemoteAgentError("服务返回的文件同步状态无效")

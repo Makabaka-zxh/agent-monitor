@@ -1000,7 +1000,8 @@ public sealed class MonitorController : IDisposable
         string tool,
         string prompt,
         Action<string>? onProgress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        IReadOnlyList<ImageAttachmentDto>? images = null)
     {
         if (_credential is not { } login || !Connected || string.IsNullOrEmpty(Origin))
             return (null, "请先登录并连接同步服务");
@@ -1012,8 +1013,9 @@ public sealed class MonitorController : IDisposable
             return (null, "请选择支持的工具");
 
         var trimmed = prompt.Trim();
-        if (trimmed.Length is < 1 or > 8000)
-            return (null, "请输入 1–8000 字的首条任务指令");
+        var hasImages = images is { Count: > 0 };
+        if ((!hasImages && trimmed.Length < 1) || trimmed.Length > 8000)
+            return (null, "请输入 1–8000 字的首条任务指令（或附带截图）");
 
         var requestId = Guid.NewGuid().ToString("D").ToLowerInvariant();
         var syntheticTaskId = $"{deviceId}:{tool}:new_{projectId}";
@@ -1025,7 +1027,8 @@ public sealed class MonitorController : IDisposable
             ProjectId = projectId,
             Tool = tool,
             RequestId = requestId,
-            Text = trimmed
+            Text = trimmed,
+            Images = hasImages ? images!.Take(QuickReplySuggestionPolicy.MaxAttachments).ToList() : null
         };
 
         try

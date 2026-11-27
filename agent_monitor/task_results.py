@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from . import collector
+from .workspace_diff import DiffSummaryModel, collect_workspace_diff
 
 MAX_RESULT_CHARS = 200_000
 MAX_RESULT_SCAN_BYTES = 4 * 1024 * 1024
@@ -481,9 +482,16 @@ class LocalResults:
         final = read_antigravity_result(wanted, base=self.antigravity_home, include_turn_start=True)
         if not final:
             return None
-        final = dict(final, files=[], _paths={}, _antigravity_id=wanted)
+        final = dict(final, files=[], _paths={}, _antigravity_id=wanted, diff=None)
         roots = resolve_antigravity_deliverable_roots(wanted, base=self.antigravity_home)
         if roots is not None:
+            workspace_dir = roots[0]
+            if workspace_dir is not None:
+                final["diff"] = collect_workspace_diff(
+                    workspace_dir,
+                    started_at=final.get("started_at", ""),
+                    completed_at=final.get("completed_at", ""),
+                )
             for path, lo, hi in _antigravity_candidates(final, *roots):
                 try:
                     content = _read_verified_bytes(path, min_mtime=lo, max_mtime=hi)
@@ -508,7 +516,13 @@ class LocalResults:
             with self.lock:
                 cached = self.cache.get(source_id)
                 if cached and cached[0] == fingerprint:
-                    return cached[1]
+                    hit = dict(cached[1])
+                    hit["diff"] = collect_workspace_diff(
+                        session.cwd,
+                        started_at=hit.get("started_at", ""),
+                        completed_at=hit.get("completed_at", ""),
+                    )
+                    return hit
             _, tail, _ = collector._read_window(session.path, max_bytes=MAX_RESULT_SCAN_BYTES)
             final = extract_final(tail, session.tool)
             if not final:
@@ -523,9 +537,25 @@ class LocalResults:
                         and cached[1]["_session"] == session):
                     with self.lock:
                         self.cache[source_id] = (fingerprint, cached[1])
-                    return cached[1]
+                    hit = dict(cached[1])
+                    hit["diff"] = collect_workspace_diff(
+                        session.cwd,
+                        started_at=hit.get("started_at", ""),
+                        completed_at=hit.get("completed_at", ""),
+                    )
+                    return hit
                 return None
-            final = dict(final, files=[], _session=session, _paths={})
+            final = dict(
+                final,
+                files=[],
+                _session=session,
+                _paths={},
+                diff=collect_workspace_diff(
+                    session.cwd,
+                    started_at=final.get("started_at", ""),
+                    completed_at=final.get("completed_at", ""),
+                ),
+            )
             for path in referenced_paths(final["text"], session.cwd):
                 try:
                     content = read_deliverable(path, session, final)
@@ -594,6 +624,7 @@ class FinalUpload(BaseModel):
     completed_at: str = Field(max_length=40)
     truncated: StrictBool = False
     files: list[FinalFile] = Field(default_factory=list, max_length=MAX_FILES)
+    diff: DiffSummaryModel | None = None
 
     @field_validator("completed_at")
     @classmethod
@@ -693,8 +724,15 @@ class TaskResults:
     def result(self, task_id: str):
         final, local = self._final(task_id)
         if not final:
+            live_diff = None
+            if local:
+                _, source, _ = self._task(task_id)
+                session = self.local.resolve(source)
+                if session is not None and session.cwd is not None:
+                    live_diff = collect_workspace_diff(session.cwd)
             return {"task_id": task_id, "available": False, "text": "", "result_id": "", "completed_at": "",
-                    "truncated": False, "files": [], "txt_size": 0, "txt_sha256": "", "capability": "local" if local else "remote",
+                    "truncated": False, "files": [], "diff": live_diff, "txt_size": 0, "txt_sha256": "",
+                    "capability": "local" if local else "remote",
                     "reason": "还没有可读取的最终结果" if local else "等待电脑同步最终结果；旧版连接器需要更新"}
         encoded = final["text"].encode("utf-8")
         if not local and any(not file["ready"] for file in final["files"]):
@@ -702,7 +740,8 @@ class TaskResults:
             with self.store.lock, self.store.db:
                 self.store.db.execute("UPDATE final_files SET wanted=1 WHERE device_id=? AND source_id=? AND ready=0", (device, source))
         return {"task_id": task_id, "available": True, **{key: final[key] for key in ("text", "result_id", "completed_at", "truncated", "files")},
-                "txt_size": len(encoded), "txt_sha256": sha256(encoded), "capability": "local" if local else "remote", "reason": ""}
+                "diff": final.get("diff"), "txt_size": len(encoded), "txt_sha256": sha256(encoded),
+                "capability": "local" if local else "remote", "reason": ""}
 
     def text(self, task_id: str, result_id: str):
         final, _ = self._final(task_id)
@@ -741,9 +780,19 @@ class TaskResults:
             raise HTTPException(413, "配套文件总量过大")
         existing = self.store.db.execute("SELECT result_id,payload FROM final_results WHERE device_id=? AND source_id=?", (device, source)).fetchone()
         value = payload.model_dump(exclude={"source_id", "tool"})
+        if value.get("diff") is None:
+            value.pop("diff", None)
         if existing and existing["result_id"] == payload.result_id:
-            if json.loads(existing["payload"]) != value:
+            prev = json.loads(existing["payload"])
+            prev_core = {k: v for k, v in prev.items() if k != "diff"}
+            next_core = {k: v for k, v in value.items() if k != "diff"}
+            if prev_core != next_core:
                 raise HTTPException(409, "结果版本不一致")
+            if prev.get("diff") != value.get("diff") and "diff" in value:
+                self.store.db.execute(
+                    "UPDATE final_results SET payload=?,updated=? WHERE device_id=? AND source_id=?",
+                    (json.dumps(value, ensure_ascii=False), time.time(), device, source),
+                )
         else:
             if existing and json.loads(existing["payload"])["completed_at"] > payload.completed_at:
                 raise HTTPException(409, "已有更新的最终结果")

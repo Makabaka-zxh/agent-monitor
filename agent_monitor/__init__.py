@@ -1,3 +1,3 @@
 """Self-hosted multi-computer agent monitor."""
 
-__version__ = "1.1.9"
+__version__ = "1.2.0"

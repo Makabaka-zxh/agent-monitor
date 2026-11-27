@@ -10,11 +10,11 @@ import time
 from typing import Literal
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .store import ONLINE_SECONDS, iso
 from .failure_reasons import FAILURE_LABELS
-from .session_controls import ModelSelection, reply_fingerprint
+from .session_controls import ImageAttachment, MAX_REPLY_IMAGES, ModelSelection, reply_fingerprint
 
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 NEW_SOURCE_PATTERN = re.compile(r"^(codex|claude|antigravity):new_([0-9a-f]{24})\Z")
@@ -46,19 +46,26 @@ REASONS = {
 REASONS.update(FAILURE_LABELS)
 
 
+DEFAULT_IMAGE_PROMPT = "请结合附带的图片查看并处理。"
+
+
 class ReplyInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     task_id: str = Field(min_length=1, max_length=500)
     request_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
-    text: str = Field(min_length=1, max_length=8000)
+    text: str = Field(default="", max_length=8000)
     selection: ModelSelection | None = None
+    images: list[ImageAttachment] = Field(default_factory=list, max_length=MAX_REPLY_IMAGES)
 
-    @field_validator("text")
-    @classmethod
-    def valid_text(cls, value):
-        if not value.strip() or any(ord(c) < 32 and c not in "\r\n\t" for c in value):
+    @model_validator(mode="after")
+    def valid_text_and_images(self):
+        if any(ord(c) < 32 and c not in "\r\n\t" for c in self.text):
             raise ValueError("回复内容无效")
-        return value
+        if not self.text.strip():
+            if not self.images:
+                raise ValueError("回复内容无效")
+            object.__setattr__(self, "text", DEFAULT_IMAGE_PROMPT)
+        return self
 
 
 class TaskStartInput(BaseModel):
@@ -67,15 +74,19 @@ class TaskStartInput(BaseModel):
     project_id: str = Field(pattern=r"^[0-9a-f]{24}$")
     tool: Literal["codex", "claude", "antigravity"]
     request_id: str = Field(pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
-    text: str = Field(min_length=1, max_length=8000)
+    text: str = Field(default="", max_length=8000)
     selection: ModelSelection | None = None
+    images: list[ImageAttachment] = Field(default_factory=list, max_length=MAX_REPLY_IMAGES)
 
-    @field_validator("text")
-    @classmethod
-    def valid_text(cls, value):
-        if not value.strip() or any(ord(c) < 32 and c not in "\r\n\t" for c in value):
+    @model_validator(mode="after")
+    def valid_text_and_images(self):
+        if any(ord(c) < 32 and c not in "\r\n\t" for c in self.text):
             raise ValueError("任务内容无效")
-        return value
+        if not self.text.strip():
+            if not self.images:
+                raise ValueError("任务内容无效")
+            object.__setattr__(self, "text", DEFAULT_IMAGE_PROMPT)
+        return self
 
 
 class AgentPoll(BaseModel):
@@ -172,9 +183,11 @@ class TaskReplies:
                 store.db.execute("ALTER TABLE task_replies ADD COLUMN created_task_id TEXT NOT NULL DEFAULT ''")
             if 'spawn_title' not in columns:
                 store.db.execute("ALTER TABLE task_replies ADD COLUMN spawn_title TEXT NOT NULL DEFAULT ''")
+            if 'images' not in columns:
+                store.db.execute("ALTER TABLE task_replies ADD COLUMN images TEXT NOT NULL DEFAULT ''")
             # Never replay a command after a hub restart; the tool may have received it.
             store.db.execute("UPDATE task_replies SET state='uncertain',reason_code='restarted',"
-                             "prompt='',spawn_title='',finished_at=? WHERE state IN ('queued','dispatching','running')", (time.time(),))
+                             "prompt='',images='',spawn_title='',finished_at=? WHERE state IN ('queued','dispatching','running')", (time.time(),))
         from .task_interactions import TaskInteractions
         self.controls = TaskInteractions(store, self)
 
@@ -362,12 +375,12 @@ class TaskReplies:
                 "latest": self._public(latest) if latest else None}
 
     def enqueue(self, reader, data):
-        prompt_hash = reply_fingerprint(data.text, data.selection)
+        prompt_hash = reply_fingerprint(data.text, data.selection, data.images)
         row = self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (data.request_id,)).fetchone()
         if row:
             expected = prompt_hash if row['request_schema'] >= 2 else hashlib.sha256(data.text.encode('utf-8')).hexdigest()
             if (row["reader_id"] != reader["id"] or row["task_id"] != data.task_id or row["prompt_hash"] != expected
-                    or (row['request_schema'] < 2 and data.selection is not None)):
+                    or (row['request_schema'] < 2 and (data.selection is not None or bool(data.images)))):
                 raise HTTPException(409, "发送编号已使用，请先查询原回复")
             return self._public(row)
         device_id, source_id, device, task, reason = self._base_capability(data.task_id)
@@ -381,11 +394,12 @@ class TaskReplies:
             raise HTTPException(429, "发送记录较多，请稍后再试")
         now = time.time()
         spawn_title = " ".join(data.text.split())[:72] if NEW_SOURCE_PATTERN.fullmatch(source_id) else ""
+        images_json = json.dumps([img.model_dump() for img in data.images], separators=(",", ":")) if data.images else ""
         self.store.db.execute("""INSERT INTO task_replies
-            (id,reader_id,device_id,source_id,task_id,tool,prompt,prompt_hash,state,queued_at,expires_at,selection,request_schema,spawn_title)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,2,?)""", (data.request_id, reader["id"], device_id, source_id,
+            (id,reader_id,device_id,source_id,task_id,tool,prompt,prompt_hash,state,queued_at,expires_at,selection,request_schema,spawn_title,images)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,2,?,?)""", (data.request_id, reader["id"], device_id, source_id,
             data.task_id, task["tool"], data.text, prompt_hash, "queued", now, now + 120,
-            data.selection.model_dump_json() if data.selection is not None else '', spawn_title))
+            data.selection.model_dump_json() if data.selection is not None else '', spawn_title, images_json))
         return self._public(self.store.db.execute("SELECT * FROM task_replies WHERE id=?", (data.request_id,)).fetchone())
 
     def _record_created_session(self, row, created_source_id: str) -> None:
@@ -444,12 +458,12 @@ class TaskReplies:
                 self.store.db.execute("UPDATE task_replies SET applied=? WHERE id=?", (applied_json, command_id))
             if state in FINAL:
                 self.store.db.execute(
-                    "UPDATE task_replies SET state=?,reason_code=?,prompt='',spawn_title='',finished_at=? WHERE id=?",
+                    "UPDATE task_replies SET state=?,reason_code=?,prompt='',images='',spawn_title='',finished_at=? WHERE id=?",
                     (state, reason, time.time(), command_id),
                 )
             else:
                 self.store.db.execute(
-                    "UPDATE task_replies SET state=?,reason_code=?,prompt='',finished_at=NULL WHERE id=?",
+                    "UPDATE task_replies SET state=?,reason_code=?,prompt='',images='',finished_at=NULL WHERE id=?",
                     (state, reason, command_id),
                 )
             if state in FINAL:
@@ -494,13 +508,24 @@ class TaskReplies:
                 self.controls.validate_selection(row['device_id'], row['source_id'], selection)
             except (HTTPException, ValueError):
                 reason = 'settings_changed'
+        images = []
+        if not reason and "images" in row.keys() and row["images"]:
+            try:
+                raw_imgs = json.loads(row["images"])
+                images = [ImageAttachment.model_validate(item) for item in raw_imgs]
+                if not images or len(images) > MAX_REPLY_IMAGES:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                reason = "unavailable"
         if reason:
-            self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code=?,prompt='',finished_at=? WHERE id=?", (reason, time.time(), row["id"]))
+            self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code=?,prompt='',images='',finished_at=? WHERE id=?", (reason, time.time(), row["id"]))
             return None
-        self.store.db.execute("UPDATE task_replies SET state='dispatching',claimed_at=?,prompt='' WHERE id=?", (time.time(), row["id"]))
+        self.store.db.execute("UPDATE task_replies SET state='dispatching',claimed_at=?,prompt='',images='' WHERE id=?", (time.time(), row["id"]))
         command = {"id": row["id"], "source_id": row["source_id"], "text": row["prompt"], "tool": row["tool"]}
         if selection is not None:
             command['selection'] = selection.model_dump(mode='json')
+        if images:
+            command['images'] = [img.model_dump(mode='json') for img in images]
         return command
 
     def poll_agent(self, device_id, supported_tools):
@@ -524,13 +549,13 @@ class TaskReplies:
             if not self.store.db.execute("SELECT 1 FROM task_replies WHERE state IN ('queued','dispatching','running') LIMIT 1").fetchone():
                 return
             now = time.time()
-            self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code='expired',prompt='',finished_at=? WHERE state='queued' AND expires_at < ?", (now, now))
-            self.store.db.execute("UPDATE task_replies SET state='uncertain',prompt='',finished_at=? WHERE state='running' AND started_at < ?", (now, now - 3600))
-            self.store.db.execute("UPDATE task_replies SET state='uncertain',prompt='',finished_at=? WHERE state='dispatching' AND claimed_at < ?", (now, now - 30))
+            self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code='expired',prompt='',images='',finished_at=? WHERE state='queued' AND expires_at < ?", (now, now))
+            self.store.db.execute("UPDATE task_replies SET state='uncertain',prompt='',images='',finished_at=? WHERE state='running' AND started_at < ?", (now, now - 3600))
+            self.store.db.execute("UPDATE task_replies SET state='uncertain',prompt='',images='',finished_at=? WHERE state='dispatching' AND claimed_at < ?", (now, now - 30))
             running = self.store.db.execute("SELECT * FROM task_replies WHERE state IN ('dispatching','running')").fetchall()
             canceled = [r["id"] for r in running if not self._valid_reader(r["reader_id"])]
             for command_id in canceled:
-                self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code='revoked',prompt='',finished_at=? WHERE id=?", (now, command_id))
+                self.store.db.execute("UPDATE task_replies SET state='blocked',reason_code='revoked',prompt='',images='',finished_at=? WHERE id=?", (now, command_id))
             self.controls.expire_invalid()
             locals_ = [r["id"] for r in self.store.db.execute("SELECT id FROM devices WHERE local=1").fetchall()] if self.local_enabled else []
         if self.executor:
@@ -559,8 +584,12 @@ class TaskReplies:
                                 interaction_handler=self.controls.local_handler,
                                 report_applied=True,
                             )
-                    settings = {'selection': command['selection']} if 'selection' in command else {}
-                    result = self.executor.start(command["id"], command["source_id"], command["text"], **settings)
+                    extra_kwargs = {}
+                    if 'selection' in command:
+                        extra_kwargs['selection'] = command['selection']
+                    if command.get('images'):
+                        extra_kwargs['images'] = command['images']
+                    result = self.executor.start(command["id"], command["source_id"], command["text"], **extra_kwargs)
                     if isinstance(result, dict) and result.get("state") in FINAL:
                         self.update(
                             command["id"],
@@ -628,6 +657,7 @@ def install_reply_routes(app, store, perform):
             request_id=data.request_id,
             text=data.text,
             selection=data.selection,
+            images=data.images,
         )
         return perform(request, lambda reader: service.enqueue(reader, synthetic), write=True)
 

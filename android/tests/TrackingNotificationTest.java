@@ -1132,10 +1132,77 @@ public final class TrackingNotificationTest {
             richPresentationChanges();
             snapshotEvidencePrecedesMainCallback();
             xiaomiServiceIntegration();
+            notificationQuickApprovalActions();
             System.out.println("TrackingNotificationTest: " + checks + " checks passed");
         } finally {
             for (TrackingService service : services) service.onDestroy();
         }
+    }
+    private static void notificationQuickApprovalActions() throws Exception {
+        NativeApprovalSender.submissions.clear();
+        TrackingService service = runningSession("quick-approval-task", 30);
+        long epoch = TrackingService.generation;
+        org.json.JSONObject approval = new org.json.JSONObject()
+                .put("id", "req-approve-1")
+                .put("revision", "rev-1")
+                .put("title", "允许运行 pytest 测试套件");
+        org.json.JSONObject snap = new org.json.JSONObject()
+                .put("tasks", new org.json.JSONArray())
+                .put("devices", new org.json.JSONArray())
+                .put("online", true)
+                .put("selectedTask", new org.json.JSONObject()
+                        .put("status", "running")
+                        .put("archived", false)
+                        .put("title", "Approval test task")
+                        .put("pending_approval", approval));
+        NativeApi.nextResult = snap;
+        NativeApi.nextFailure = null;
+        invoke(service, "fetch", new Class<?>[0]);
+        ((java.util.concurrent.ExecutorService) field(service, "worker")).submit(() -> {}).get(5, java.util.concurrent.TimeUnit.SECONDS);
+        handler(service).runPosted();
+
+        Notification unlocked = service.notifications.lastNotification;
+        check("等待批准".equals(TrackingService.trackingMessage), "pending_approval transitions running session to waiting display");
+        check(!unlocked.requestPromotedOngoing && unlocked.shortCriticalText == null, "waiting on approval removes promoted running claim");
+        check(unlocked.actions != null && unlocked.actions.length == 3, "unlocked pending_approval adds approve, deny, and stop actions");
+        check("批准本次".contentEquals(unlocked.actions[0].title), "first action is allow_once");
+        check("拒绝".contentEquals(unlocked.actions[1].title), "second action is deny");
+        check("停止跟踪".contentEquals(unlocked.actions[2].title), "third action retains stop");
+        check(unlocked.bigText != null && unlocked.bigText.toString().contains("待批：允许运行 pytest 测试套件"),
+                "unlocked private expanded view includes approval summary");
+        publicSummary(unlocked.publicVersion, "Codex", "public version never leaks approval title or actions");
+
+        // Lockscreen redaction must strip all actions including quick-approve!
+        screenEvent(service, Intent.ACTION_SCREEN_OFF);
+        Notification locked = service.notifications.lastNotification;
+        check(locked.actions == null || locked.actions.length == 0, "locked screen exposes zero approval or stop actions");
+        // Broadcast while locked must be rejected fail-closed!
+        new ApprovalActionReceiver().onReceive(service, unlocked.actions[0].actionIntent.intent);
+        handler(service).runPosted();
+        ((java.util.concurrent.ExecutorService) field(service, "worker")).submit(() -> {}).get(5, java.util.concurrent.TimeUnit.SECONDS);
+        handler(service).runPosted();
+        check(NativeApprovalSender.submissions.isEmpty(), "locked device rejects quick-approval broadcast");
+
+        // Unlock and tap "批准本次"
+        screenEvent(service, Intent.ACTION_USER_PRESENT);
+        Notification reUnlocked = service.notifications.lastNotification;
+        check(reUnlocked.actions != null && reUnlocked.actions.length == 3, "unlocking restores quick-approval actions");
+        new ApprovalActionReceiver().onReceive(service, reUnlocked.actions[0].actionIntent.intent);
+        handler(service).runPosted();
+        // Immediately after tap, actions collapse back to [停止跟踪] and duplicate tap is ignored
+        Notification confirming = service.notifications.lastNotification;
+        check(confirming.actions != null && confirming.actions.length == 1
+                && "停止跟踪".contentEquals(confirming.actions[0].title),
+                "submitting approval immediately removes duplicate approve/deny buttons");
+        new ApprovalActionReceiver().onReceive(service, reUnlocked.actions[1].actionIntent.intent);
+        handler(service).runPosted();
+        ((java.util.concurrent.ExecutorService) field(service, "worker")).submit(() -> {}).get(5, java.util.concurrent.TimeUnit.SECONDS);
+        handler(service).runPosted();
+        check(NativeApprovalSender.submissions.size() == 1
+                && "quick-approval-task|req-approve-1|rev-1|allow_once|offline-test-token".equals(NativeApprovalSender.submissions.get(0)),
+                "exactly one verified allow_once decision is transmitted");
+        check(TrackingService.generation == epoch, "approval submission keeps tracking session alive");
+        service.onDestroy();
     }
     private static void unknownToolKeepsAppIdentity() throws Exception {
         for (String source : new String[]{null, "", "future-tool", "Codex", "claude "}) {

@@ -22,7 +22,25 @@ public final class NativeReplyPresentationPolicyTest {
         temporaryAttentionDoesNotOverwriteUserChoice();
         failureAndRetryRemainVisible();
         explicitReplyAndSettingsReceipts();
+        contextualQuickSuggestions();
         System.out.println("NativeReplyPresentationPolicyTest: " + checks + " checks passed");
+    }
+    private static void contextualQuickSuggestions() {
+        java.util.List<NativeReplyPresentationPolicy.Suggestion> errChips =
+                NativeReplyPresentationPolicy.quickSuggestions("failed", true, 0, false, 5173, "bind 0.0.0.0");
+        check(errChips.size() == 3, "error + loopback produces 3 chips");
+        check(errChips.get(0).label.contains(":5173"), "loopback dev port chip is prioritized first");
+        check(errChips.get(1).label.contains("定位报错"), "failed status surfaces root-cause fix chip");
+
+        java.util.List<NativeReplyPresentationPolicy.Suggestion> diffChips =
+                NativeReplyPresentationPolicy.quickSuggestions("completed", false, 4, false, 0, "");
+        check(diffChips.size() == 3 && diffChips.get(0).label.contains("运行测试验证改动"),
+                "diff presence surfaces test verification and review chips");
+
+        java.util.List<NativeReplyPresentationPolicy.Suggestion> planChips =
+                NativeReplyPresentationPolicy.quickSuggestions("completed", false, 0, true, 0, "");
+        check(planChips.size() == 2 && planChips.get(0).label.contains("按此方案执行"),
+                "plan mode surfaces plan execution chip");
     }
     private static void explicitReplyAndSettingsReceipts() {
         check("手机已发送 → 等待电脑接收".equals(NativeReplyPresentationPolicy.replyReceipt(true, "", false)),

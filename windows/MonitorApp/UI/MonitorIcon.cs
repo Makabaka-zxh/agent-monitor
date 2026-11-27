@@ -170,6 +170,16 @@ public sealed class MonitorIcon : FrameworkElement
                 DrawGeometry(dc, pen, "M 8,11.5 L 12,15.5 L 16,11.5 M 5,19.2 L 19,19.2");
                 break;
 
+            case "image":
+                dc.DrawRoundedRectangle(null, pen, new Rect(3.5, 4, 17, 16), 3, 3);
+                dc.DrawEllipse(null, pen, new Point(8.5, 9), 1.5, 1.5);
+                DrawGeometry(dc, pen, "M 4,17 L 10.5,11.5 L 14.5,15.5 L 17,13.5 L 20,16");
+                break;
+
+            case "code":
+                DrawGeometry(dc, pen, "M 8.5,8 L 4.5,12 L 8.5,16 M 15.5,8 L 19.5,12 L 15.5,16 M 13.5,6.5 L 10.5,17.5");
+                break;
+
             case "mini":
                 dc.DrawRoundedRectangle(null, pen, new Rect(4, 5, 16, 14), 2.5, 2.5);
                 dc.DrawRoundedRectangle(null, pen, new Rect(11.5, 10.5, 6.5, 6.5), 1.5, 1.5);

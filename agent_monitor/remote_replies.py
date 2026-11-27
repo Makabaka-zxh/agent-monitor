@@ -8,7 +8,7 @@ import re
 import threading
 import time
 
-from .session_controls import ModelSelection, reply_fingerprint
+from .session_controls import ImageAttachment, MAX_REPLY_IMAGES, ModelSelection, reply_fingerprint
 
 
 class _RemoteInteractions:
@@ -204,11 +204,17 @@ class RemoteReplyWorker:
         if not isinstance(command_id, str) or not ID.fullmatch(command_id):
             return
         selection = command.get('selection')
+        raw_images = command.get('images')
         try:
             chosen = ModelSelection.model_validate(selection) if selection is not None else None
-            fingerprint = reply_fingerprint(command.get('text'), chosen)
+            images = None
+            if raw_images is not None:
+                if not isinstance(raw_images, list) or len(raw_images) > MAX_REPLY_IMAGES:
+                    raise ValueError('invalid images list')
+                images = [ImageAttachment.model_validate(item) for item in raw_images]
+            fingerprint = reply_fingerprint(command.get('text'), chosen, images)
         except (ValueError, TypeError):
-            fingerprint, chosen = None, None
+            fingerprint, chosen, images = None, None, None
         with self.lock:
             # Durable receipt precedes launch. A duplicate never invokes the CLI again.
             if command_id in self.ledger:
@@ -254,8 +260,12 @@ class RemoteReplyWorker:
         if self.stop.is_set():
             return
         try:
-            outcome = (self.executor.start(command_id, source, prompt, selection=chosen.model_dump()) if chosen else
-                       self.executor.start(command_id, source, prompt))
+            extra = {}
+            if chosen is not None:
+                extra['selection'] = chosen.model_dump()
+            if images:
+                extra['images'] = [img.model_dump() for img in images]
+            outcome = self.executor.start(command_id, source, prompt, **extra)
         except Exception:
             self._emit({'command_id': command_id, 'state': 'uncertain'})
             return
