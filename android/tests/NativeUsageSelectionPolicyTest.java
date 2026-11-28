@@ -45,6 +45,13 @@ public final class NativeUsageSelectionPolicyTest {
         check(NativeUsageSelectionPolicy.sourceAfterSnapshot("missing", available, "also-missing", true).equals(available[0]), "unavailable preferred source falls back to an actual source");
         check(NativeUsageSelectionPolicy.sourceAfterSnapshot("missing", new String[]{null, "", "bad\rkey"}, "", true).isEmpty(), "malformed sources are not restored");
         check(NativeUsageSelectionPolicy.restore("", "", "").source.isEmpty(), "new account state starts empty");
+        check(NativeUsageSelectionPolicy.restore("", "", "").windowMode.equals("5h"), "default quota horizon is 5h");
+        check(NativeUsageSelectionPolicy.restore("", "", "", "weekly").windowMode.equals("weekly"), "restored weekly horizon preserved");
+        check(NativeUsageSelectionPolicy.restore("", "", "", "invalid").windowMode.equals("5h"), "invalid horizon normalizes to 5h");
+        check(NativeUsageSelectionPolicy.hasDualHorizons(new long[]{300, 10080}), "300m and 10080m trigger dual horizon toggle");
+        check(!NativeUsageSelectionPolicy.hasDualHorizons(new long[]{300, 300}), "only 5h windows do not show horizon toggle");
+        check(NativeUsageSelectionPolicy.matchesHorizon(300, "5h") && !NativeUsageSelectionPolicy.matchesHorizon(10080, "5h"), "5h filter selects short windows");
+        check(NativeUsageSelectionPolicy.matchesHorizon(10080, "weekly") && !NativeUsageSelectionPolicy.matchesHorizon(300, "weekly"), "weekly filter selects 7d windows");
         System.out.println("NativeUsageSelectionPolicyTest: " + checks + " checks passed");
     }
 }

@@ -1424,15 +1424,15 @@ class UsageLedger:
                 meta = _quota_metadata("antigravity", bucket, window.get("bucket_label"), window.get("model"))
                 minutes = window.get("window_minutes")
                 resets_at = window.get("resets_at")
-                if _int(minutes, 525600) is not None and resets_at is not None:
+                key = _hash("antigravity-scoped-limit", slot, bucket)
+                if _int(minutes, 525600) is not None and resets_at is not None and slot.startswith("pool_"):
                     prior = self.db.execute(
                         "SELECT window_minutes FROM usage_quotas WHERE tool='antigravity' AND device_id=? "
-                        "AND bucket_id=? AND resets_at=? AND present=1 ORDER BY window_minutes DESC LIMIT 1",
-                        (device_id, meta["bucket_id"], resets_at),
+                        "AND window_key=? AND resets_at=? AND present=1 ORDER BY window_minutes DESC LIMIT 1",
+                        (device_id, key, resets_at),
                     ).fetchone()
                     if prior and prior["window_minutes"] > minutes:
                         minutes = prior["window_minutes"]
-                key = _hash("antigravity-scoped-limit", slot, bucket)
                 quota = {"tool": "antigravity", "key": key, **meta,
                          "used_percent": window.get("used_percentage"), "window_minutes": minutes,
                          "resets_at": resets_at, "observed_at": stamp}

@@ -9,6 +9,7 @@ public final class NativeUsageSelectionPolicy {
     public static final class Selection {
         public LocalDate week, day;
         public String source = "";
+        public String windowMode = "5h";
     }
 
     public static final class Calendar {
@@ -17,11 +18,35 @@ public final class NativeUsageSelectionPolicy {
     }
 
     public static Selection restore(String week, String day, String source) {
+        return restore(week, day, source, "5h");
+    }
+
+    public static Selection restore(String week, String day, String source, String windowMode) {
         Selection selection = new Selection();
         selection.week = NativeUsagePresentation.date(week);
         selection.day = NativeUsagePresentation.date(day);
         selection.source = source(source);
+        selection.windowMode = windowMode(windowMode);
         return selection;
+    }
+
+    public static String windowMode(String value) {
+        return "weekly".equals(value) ? "weekly" : "5h";
+    }
+
+    public static boolean hasDualHorizons(long[] windowMinutes) {
+        if (windowMinutes == null || windowMinutes.length < 2) return false;
+        boolean hasShort = false, hasWeekly = false;
+        for (long m : windowMinutes) {
+            if (m >= 10080) hasWeekly = true;
+            else if (m > 0) hasShort = true;
+        }
+        return hasShort && hasWeekly;
+    }
+
+    public static boolean matchesHorizon(long windowMinutes, String mode) {
+        if ("weekly".equals(mode)) return windowMinutes >= 10080;
+        return windowMinutes > 0 && windowMinutes < 10080;
     }
 
     public static String source(String value) {

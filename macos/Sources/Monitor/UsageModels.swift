@@ -328,8 +328,11 @@ struct UsageQuota: Codable, Identifiable {
               let winMin = windowMinutes, winMin > 0, winMin <= 100800 else { return nil }
         let windowSec = Double(winMin) * 60.0
         let remSec = reset.timeIntervalSince(now)
-        guard remSec > 0, remSec <= windowSec else { return nil }
         let clampedRem = min(100.0, max(0.0, rem))
+        if clampedRem <= 0.05, remSec > windowSec, winMin <= 360 {
+            return QuotaPace(idealRemainingPercent: -1, deltaPercent: 0, state: "exhausted", label: "受周额度限制")
+        }
+        guard remSec > 0, remSec <= windowSec else { return nil }
         let usedPct = 100.0 - clampedRem
         let elapsedSec = windowSec - remSec
         let idealRem = min(100.0, max(0.0, (remSec / windowSec) * 100.0))
@@ -391,6 +394,30 @@ struct UsageSource: Identifiable {
             }
         }
         return orderedKeys.compactMap { bestByKey[$0] }
+    }
+
+    static func hasDualHorizons(_ items: [UsageQuota]) -> Bool {
+        guard items.count >= 2 else { return false }
+        let hasShort = items.contains { ($0.windowMinutes ?? 0) > 0 && ($0.windowMinutes ?? 0) < 10080 }
+        let hasWeekly = items.contains { ($0.windowMinutes ?? 0) >= 10080 }
+        return hasShort && hasWeekly
+    }
+
+    static func orderAntigravityQuotas(_ items: [UsageQuota]) -> [UsageQuota] {
+        items.sorted { a, b in
+            let rankA = a.bucketLabel?.hasPrefix("Gemini") == true ? 0 : (a.bucketLabel?.hasPrefix("Claude") == true ? 1 : 2)
+            let rankB = b.bucketLabel?.hasPrefix("Gemini") == true ? 0 : (b.bucketLabel?.hasPrefix("Claude") == true ? 1 : 2)
+            if rankA != rankB { return rankA < rankB }
+            return (a.windowMinutes ?? 0) < (b.windowMinutes ?? 0)
+        }
+    }
+
+    static func filterByHorizon(_ items: [UsageQuota], horizon: String) -> [UsageQuota] {
+        let filtered = items.filter { q in
+            let m = q.windowMinutes ?? 0
+            return horizon == "weekly" ? m >= 10080 : (m > 0 && m < 10080)
+        }
+        return filtered.isEmpty ? items : filtered
     }
     func bestQuota(now: Date = Date()) -> UsageQuota? { best(quotas, now: now) }
     private func best(_ items: [UsageQuota], now: Date) -> UsageQuota? {

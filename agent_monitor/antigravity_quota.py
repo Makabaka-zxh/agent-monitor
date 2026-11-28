@@ -24,6 +24,7 @@ from typing import Callable
 
 UTC = timezone.utc
 GET_USER_STATUS_PATH = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
+RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
 MAX_STATUS_BYTES = 512 * 1024
 _CSRF_RE = re.compile(r"--csrf_token(?:=|\s+)([A-Za-z0-9_-]{8,256})")
 _HTTPS_PORT_RE = re.compile(r"--https_server_port(?:=|\s+)(\d{1,5})")
@@ -295,12 +296,66 @@ def _scrub_cascade_config(raw: dict) -> dict | None:
     return {"clientModelConfigs": clean_configs, "defaultAliasModel": default_alias}
 
 
-def fetch_antigravity_user_status(
+def _scrub_quota_summary(raw: dict) -> dict | None:
+    resp = raw.get("response") if isinstance(raw.get("response"), dict) else raw
+    if not isinstance(resp, dict):
+        return None
+    groups = resp.get("groups")
+    if not isinstance(groups, list) or not 0 < len(groups) <= 32:
+        return None
+    clean_groups = []
+    for grp in groups:
+        if not isinstance(grp, dict):
+            continue
+        disp = grp.get("displayName")
+        disp_str = disp.strip()[:120] if isinstance(disp, str) else ""
+        buckets = grp.get("buckets")
+        if not isinstance(buckets, list) or not 0 < len(buckets) <= 16:
+            continue
+        clean_buckets = []
+        for b in buckets:
+            if not isinstance(b, dict):
+                continue
+            bid = b.get("bucketId")
+            bid_str = bid.strip()[:64] if isinstance(bid, str) else ""
+            win = b.get("window")
+            win_str = win.strip().lower()[:24] if isinstance(win, str) else ""
+            disabled = b.get("disabled") is True
+            reset_str = b["resetTime"] if isinstance(b.get("resetTime"), str) and len(b["resetTime"]) <= 64 else None
+            rem_val: float | None = None
+            if "remainingFraction" in b:
+                rf = b["remainingFraction"]
+                if type(rf) in (int, float) and math.isfinite(rf) and 0.0 <= rf <= 1.0:
+                    rem_val = float(rf)
+                else:
+                    continue
+            elif reset_str is not None and not disabled:
+                # Protobuf proto3 JSON omits remainingFraction when 0.0 (exhausted).
+                rem_val = 0.0
+            elif not disabled:
+                continue
+            entry: dict = {
+                "bucketId": bid_str,
+                "window": win_str,
+                "disabled": disabled,
+            }
+            if rem_val is not None:
+                entry["remainingFraction"] = rem_val
+            if reset_str is not None:
+                entry["resetTime"] = reset_str
+            clean_buckets.append(entry)
+        if clean_buckets:
+            clean_groups.append({"displayName": disp_str, "buckets": clean_buckets})
+    return {"groups": clean_groups} if clean_groups else None
+
+
+def _call_local_rpc(
+    rpc_path: str,
+    sanitizer: Callable[[dict], dict | None],
     *,
     discover: Callable[[], list[tuple[int, str, list[int]]]] = discover_local_language_servers,
     timeout: float = 1.0,
 ) -> dict | None:
-    """Query local LanguageServerService/GetUserStatus and scrub all account PII immediately."""
     servers = discover()
     if not servers:
         return None
@@ -320,7 +375,7 @@ def fetch_antigravity_user_status(
             if not (0 < port <= 65535):
                 continue
             for scheme, opener in (("https", https_opener), ("http", http_opener)):
-                url = f"{scheme}://127.0.0.1:{port}{GET_USER_STATUS_PATH}"
+                url = f"{scheme}://127.0.0.1:{port}{rpc_path}"
                 req = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
                 try:
                     with opener.open(req, timeout=timeout) as resp:
@@ -329,12 +384,30 @@ def fetch_antigravity_user_status(
                         continue
                     parsed = json.loads(raw_bytes)
                     if isinstance(parsed, dict):
-                        scrubbed = _scrub_cascade_config(parsed)
+                        scrubbed = sanitizer(parsed)
                         if scrubbed is not None:
                             return scrubbed
                 except (urllib.error.URLError, TimeoutError, OSError, ValueError, UnicodeError):
                     continue
     return None
+
+
+def fetch_antigravity_quota_summary(
+    *,
+    discover: Callable[[], list[tuple[int, str, list[int]]]] = discover_local_language_servers,
+    timeout: float = 1.0,
+) -> dict | None:
+    """Query local LanguageServerService/RetrieveUserQuotaSummary for both 5-hour and weekly quotas."""
+    return _call_local_rpc(RETRIEVE_USER_QUOTA_SUMMARY_PATH, _scrub_quota_summary, discover=discover, timeout=timeout)
+
+
+def fetch_antigravity_user_status(
+    *,
+    discover: Callable[[], list[tuple[int, str, list[int]]]] = discover_local_language_servers,
+    timeout: float = 1.0,
+) -> dict | None:
+    """Query local LanguageServerService/GetUserStatus and scrub all account PII immediately."""
+    return _call_local_rpc(GET_USER_STATUS_PATH, _scrub_cascade_config, discover=discover, timeout=timeout)
 
 
 def _parse_reset_epoch(value: str | None) -> int | None:
@@ -428,13 +501,105 @@ def _classify_pools(pools: list[tuple[float, int | None, list[str]]], now_epoch:
     return windows
 
 
+def _classify_summary_groups(groups: list[dict], now_epoch: int) -> list[dict]:
+    if not groups:
+        return []
+
+    def is_gemini_group(grp: dict) -> bool:
+        dn = grp.get("displayName", "").lower()
+        if "gemini" in dn:
+            return True
+        b_ids = [b.get("bucketId", "").lower() for b in grp.get("buckets", []) if isinstance(b, dict)]
+        return bool(b_ids) and all(bid.startswith("gemini") for bid in b_ids)
+
+    gemini_group_count = sum(1 for g in groups if is_gemini_group(g))
+    windows: list[dict] = []
+    seen_slots: set[tuple[str, str]] = set()
+
+    for idx, grp in enumerate(groups):
+        dn = grp.get("displayName", "").lower()
+        buckets = grp.get("buckets", [])
+        b_ids = [b.get("bucketId", "").lower() for b in buckets if isinstance(b, dict)]
+        if is_gemini_group(grp):
+            if gemini_group_count == 1:
+                group_slug, group_label = "gemini", "Gemini"
+            elif "flash" in dn or any("flash" in bid for bid in b_ids):
+                group_slug, group_label = "gemini_flash", "Gemini Flash"
+            elif "ultra" in dn or any("ultra" in bid for bid in b_ids):
+                group_slug, group_label = "gemini_ultra", "Gemini Ultra"
+            else:
+                group_slug, group_label = "gemini_pro", "Gemini Pro"
+        elif ("claude" in dn and "gpt" in dn) or any(bid.startswith("3p") for bid in b_ids):
+            group_slug, group_label = "claude_gpt_oss", "Claude / GPT-OSS"
+        elif "claude" in dn or any("claude" in bid for bid in b_ids):
+            group_slug, group_label = "claude", "Claude"
+        elif "gpt" in dn or any("gpt" in bid for bid in b_ids):
+            group_slug, group_label = "gpt_oss", "GPT-OSS"
+        else:
+            group_slug, group_label = f"shared_{idx + 1}", "全部模型"
+
+        # Inspect sibling weekly bucket first so disabled 5h buckets reflect weekly exhaustion accurately.
+        weekly_used: float | None = None
+        weekly_reset: int | None = None
+        for b in buckets:
+            win = b.get("window", "")
+            if win in ("weekly", "7d", "seven_day", "1w") and not b.get("disabled"):
+                rf = b.get("remainingFraction")
+                if type(rf) in (int, float):
+                    weekly_used = round(max(0.0, min(100.0, (1.0 - float(rf)) * 100.0)), 1)
+                weekly_reset = _parse_reset_epoch(b.get("resetTime"))
+                break
+
+        for b in buckets:
+            win = b.get("window", "")
+            resets_at = _parse_reset_epoch(b.get("resetTime"))
+            if win in ("5h", "5_hour", "five_hour"):
+                slot_prefix, minutes = "five_hour", 300
+            elif win in ("weekly", "7d", "seven_day", "1w"):
+                slot_prefix, minutes = "seven_day", 10080
+            elif win in ("1d", "24h", "daily"):
+                slot_prefix, minutes = "one_day", 1440
+            else:
+                minutes = _pool_window_minutes(resets_at, now_epoch)
+                slot_prefix = "seven_day" if minutes >= 10080 else "one_day" if minutes >= 1440 else "five_hour"
+
+            if b.get("disabled") is True:
+                if slot_prefix == "five_hour" and weekly_used is not None and weekly_used >= 99.9 and weekly_reset is not None:
+                    used_pct = 100.0
+                    resets_at = weekly_reset
+                else:
+                    continue
+            else:
+                rf = b.get("remainingFraction")
+                if type(rf) not in (int, float):
+                    continue
+                used_pct = round(max(0.0, min(100.0, (1.0 - float(rf)) * 100.0)), 1)
+
+            slot = f"{slot_prefix}_{group_slug}"
+            if (slot, group_slug) in seen_slots:
+                continue
+            seen_slots.add((slot, group_slug))
+            windows.append({
+                "kind": slot,
+                "bucket_id": group_slug,
+                "bucket_label": group_label,
+                "model": None,
+                "used_percentage": used_pct,
+                "window_minutes": minutes,
+                "resets_at": resets_at,
+            })
+
+    return windows
+
+
 def read_antigravity_quota(
     *,
     now: datetime | float | int | None = None,
     antigravity_home: Path | str | None = None,
+    summary_fetcher: Callable[[], dict | None] | None = None,
     status_fetcher: Callable[[], dict | None] = fetch_antigravity_user_status,
 ) -> dict | None:
-    """Return validated official Antigravity quota pools, or None if Desktop is not running."""
+    """Return validated official Antigravity quota pools (both 5h and weekly when available)."""
     if now is None:
         current = datetime.now(UTC)
     elif isinstance(now, (int, float)) and not isinstance(now, bool):
@@ -444,19 +609,54 @@ def read_antigravity_quota(
     else:
         raise ValueError("now must be timezone-aware")
 
-    if status_fetcher is fetch_antigravity_user_status:
+    use_live_default = summary_fetcher is None and status_fetcher is fetch_antigravity_user_status
+    if use_live_default:
         ag_dir = Path(antigravity_home) if antigravity_home is not None else (Path.home() / ".gemini" / "antigravity")
         if not ag_dir.is_dir():
             return None
 
+    now_epoch = int(current.timestamp())
+    observed_iso = current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    active_summary_fetcher = fetch_antigravity_quota_summary if use_live_default else summary_fetcher
+    summary_windows: list[dict] = []
+    if active_summary_fetcher is not None:
+        summary_data = active_summary_fetcher()
+        if isinstance(summary_data, dict) and isinstance(summary_data.get("groups"), list):
+            summary_windows = _classify_summary_groups(summary_data["groups"], now_epoch)
+
+    if summary_windows:
+        has_gemini = any(str(w.get("bucket_id", "")).startswith("gemini") for w in summary_windows)
+        if not has_gemini:
+            # Merge fallback Gemini pool if RetrieveUserQuotaSummary only returned 3p buckets.
+            fallback = _read_status_pools(status_fetcher, now_epoch)
+            for fw in fallback:
+                if str(fw.get("bucket_id", "")).startswith("gemini"):
+                    summary_windows.append(fw)
+        return {
+            "observed_at": observed_iso,
+            "snapshot_complete": True,
+            "quota_windows": summary_windows,
+        }
+
+    fallback_windows = _read_status_pools(status_fetcher, now_epoch)
+    if not fallback_windows:
+        return None
+    return {
+        "observed_at": observed_iso,
+        "snapshot_complete": True,
+        "quota_windows": fallback_windows,
+    }
+
+
+def _read_status_pools(status_fetcher: Callable[[], dict | None], now_epoch: int) -> list[dict]:
     status = status_fetcher()
     if not isinstance(status, dict):
-        return None
+        return []
     configs = status.get("clientModelConfigs")
     if not isinstance(configs, list) or not configs:
-        return None
+        return []
 
-    now_epoch = int(current.timestamp())
     grouped: dict[tuple[float, int | None], list[str]] = {}
     for item in configs:
         if not isinstance(item, dict):
@@ -476,24 +676,17 @@ def read_antigravity_quota(
             remaining = 0.0
         else:
             continue
-        used_pct = round(max(0.0, min(100.0, (1.0 - remaining) * 100.0)), 1)
         key = (round(remaining, 6), resets_at)
         models = grouped.setdefault(key, [])
         if model_id.lower() not in models:
             models.append(model_id.lower())
 
     if not grouped:
-        return None
+        return []
 
     pools = [(round(max(0.0, min(100.0, (1.0 - rem) * 100.0)), 1), resets_at, models)
              for (rem, resets_at), models in grouped.items()]
-    windows = _classify_pools(pools, now_epoch)
-    observed_iso = current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    return {
-        "observed_at": observed_iso,
-        "snapshot_complete": True,
-        "quota_windows": windows,
-    }
+    return _classify_pools(pools, now_epoch)
 
 
 def _split_effort_variant(model_id: str, label: str) -> tuple[str, str, str] | None:

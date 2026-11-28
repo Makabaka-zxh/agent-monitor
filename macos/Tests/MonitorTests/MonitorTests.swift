@@ -196,4 +196,32 @@ final class MonitorTests: XCTestCase {
         let errTask = try decode(MonitorTask.self, #"{"id":"device:codex:e1","title":"Build","tool":"codex","status":"error","error_analysis":{"summary":"Exit code 1"},"device_id":"device","archived":false,"stale":false}"#)
         XCTAssertEqual(errTask.errorAnalysis?.summary, "Exit code 1")
     }
+
+    func testAntigravityDualQuotaHorizonsAndWeeklyCapPace() throws {
+        let now = Date(timeIntervalSince1970: 1_795_800_000)
+        let nowIso = ISO8601DateFormatter().string(from: now.addingTimeInterval(-10))
+        let r5h = Int64(now.addingTimeInterval(4 * 3600).timeIntervalSince1970)
+        let r7d = Int64(now.addingTimeInterval(5 * 86400).timeIntervalSince1970)
+        let raw = """
+        [
+          {"key":"k1","bucket_label":"Claude / GPT-OSS","used_percent":100,"remaining_percent":0,"window_minutes":10080,"resets_at":\(r7d),"observed_at":"\(nowIso)","stale":false},
+          {"key":"k2","bucket_label":"Gemini","used_percent":3,"remaining_percent":97,"window_minutes":300,"resets_at":\(r5h),"observed_at":"\(nowIso)","stale":false},
+          {"key":"k3","bucket_label":"Gemini","used_percent":8,"remaining_percent":92,"window_minutes":10080,"resets_at":\(r7d),"observed_at":"\(nowIso)","stale":false},
+          {"key":"k4","bucket_label":"Claude / GPT-OSS","used_percent":100,"remaining_percent":0,"window_minutes":300,"resets_at":\(r7d),"observed_at":"\(nowIso)","stale":false}
+        ]
+        """
+        let quotas = try decode([UsageQuota].self, raw)
+        let ordered = UsageSource.orderAntigravityQuotas(quotas)
+        XCTAssertTrue(UsageSource.hasDualHorizons(ordered))
+        let fiveHour = UsageSource.filterByHorizon(ordered, horizon: "5h")
+        XCTAssertEqual(fiveHour.count, 2)
+        XCTAssertEqual(fiveHour[0].bucketLabel, "Gemini")
+        XCTAssertEqual(fiveHour[1].bucketLabel, "Claude / GPT-OSS")
+        let cappedPace = fiveHour[1].pace(now: now, failed: false)
+        XCTAssertEqual(cappedPace?.label, "受周额度限制")
+        XCTAssertTrue((cappedPace?.idealRemainingPercent ?? 0) < 0)
+        let weekly = UsageSource.filterByHorizon(ordered, horizon: "weekly")
+        XCTAssertEqual(weekly.count, 2)
+        XCTAssertTrue(weekly.allSatisfy { $0.windowMinutes == 10080 })
+    }
 }

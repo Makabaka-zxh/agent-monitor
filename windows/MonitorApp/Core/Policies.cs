@@ -184,10 +184,12 @@ public static class UsageFormatting
 
         var windowSec = quota.WindowMinutes.Value * 60.0;
         var remSec = (reset - now).TotalSeconds;
+        var rem = Math.Clamp(rawRem, 0.0, 100.0);
+        if (rem <= 0.05 && remSec > windowSec && quota.WindowMinutes.Value <= 360)
+            return new QuotaPaceInfo(-1, 0, "exhausted", "受周额度限制", "受周额度限制");
         if (remSec <= 0 || remSec > windowSec)
             return null;
 
-        var rem = Math.Clamp(rawRem, 0.0, 100.0);
         var used = Math.Clamp(100.0 - rem, 0.0, 100.0);
         var elapsedSec = windowSec - remSec;
         var idealRem = Math.Clamp((remSec / windowSec) * 100.0, 0.0, 100.0);
@@ -255,6 +257,38 @@ public static class UsageFormatting
             group.Quotas.Add(q);
         }
         return order.Select(k => map[k]).Where(g => g.Quotas.Count > 0).ToList();
+    }
+
+    public static string NormalizeQuotaHorizon(string? value) =>
+        string.Equals(value, "weekly", StringComparison.OrdinalIgnoreCase) ? "weekly" : "5h";
+
+    public static bool HasDualQuotaHorizons(IReadOnlyList<UsageQuotaDto>? quotas)
+    {
+        if (quotas is null || quotas.Count < 2) return false;
+        var hasShort = false;
+        var hasWeekly = false;
+        foreach (var q in quotas)
+        {
+            if (q.WindowMinutes is >= 10080) hasWeekly = true;
+            else if (q.WindowMinutes is > 0) hasShort = true;
+        }
+        return hasShort && hasWeekly;
+    }
+
+    public static List<UsageQuotaDto> OrderAntigravityQuotas(IReadOnlyList<UsageQuotaDto> quotas) =>
+        quotas
+            .OrderBy(q => q.BucketLabel?.StartsWith("Gemini", StringComparison.OrdinalIgnoreCase) == true ? 0
+                : q.BucketLabel?.StartsWith("Claude", StringComparison.OrdinalIgnoreCase) == true ? 1 : 2)
+            .ThenBy(q => q.WindowMinutes ?? 0)
+            .ToList();
+
+    public static List<UsageQuotaDto> FilterQuotasByHorizon(IReadOnlyList<UsageQuotaDto> quotas, string? horizon)
+    {
+        var mode = NormalizeQuotaHorizon(horizon);
+        var filtered = quotas.Where(q => mode == "weekly"
+            ? q.WindowMinutes is >= 10080
+            : q.WindowMinutes is > 0 and < 10080).ToList();
+        return filtered.Count > 0 ? filtered : quotas.ToList();
     }
 
     private static readonly Regex ClaudeModelRegex = new(
@@ -666,6 +700,7 @@ public sealed class LocalUiSettings
     public bool CompactShowToolStrip { get; set; } = true;
     public bool CompactShowTodayTokens { get; set; } = true;
     public bool CompactShowTaskMeta { get; set; } = true;
+    public string AntigravityQuotaHorizon { get; set; } = "5h"; // "5h" | "weekly"
 
     public static (double Opacity, double Blur) PresetValues(string? style) => style switch
     {

@@ -122,6 +122,7 @@ private struct UsageOfficialQuotaCard: View {
     let failed: Bool
     @State private var selectedSource: String?
     @State private var showingDetails = false
+    @AppStorage("antigravityQuotaHorizon") private var antigravityHorizon = "5h"
 
     private var brand: String { tool == "claude" ? "Claude Code" : tool == "antigravity" ? "Antigravity" : "Codex" }
     private var sources: [UsageSource] { provider?.visibleSources(now: Date()) ?? [] }
@@ -142,29 +143,46 @@ private struct UsageOfficialQuotaCard: View {
             }
 
             if let source {
-                HStack(spacing: 10) {
-                    if sources.count > 1 {
-                        Picker("额度来源", selection: Binding(
-                            get: { source.id },
-                            set: { selectedSource = $0 }
-                        )) {
-                            ForEach(sources, id: \.id) { item in Text(item.name).tag(item.id) }
-                        }
-                        .pickerStyle(.menu)
-                        .help("仅切换官方额度来源；本地 Token 图表仍汇总全部已授权电脑")
-                    } else {
-                        Text("来源 · " + source.name)
-                            .font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    Spacer(minLength: 0)
-                }
-
                 TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let windows = source.visibleQuotas(now: context.date)
-                    VStack(alignment: .leading, spacing: 17) {
-                        ForEach(windows) { quota in
-                            UsageQuotaRow(quota: quota, failed: failed, now: context.date)
+                    let rawWindows = source.visibleQuotas(now: context.date)
+                    let allWindows = tool == "antigravity" ? UsageSource.orderAntigravityQuotas(rawWindows) : rawWindows
+                    let dualHorizons = tool == "antigravity" && UsageSource.hasDualHorizons(allWindows)
+                    let activeHorizon = antigravityHorizon == "weekly" ? "weekly" : "5h"
+                    let displayedWindows = dualHorizons ? UsageSource.filterByHorizon(allWindows, horizon: activeHorizon) : allWindows
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 10) {
+                            if sources.count > 1 {
+                                Picker("额度来源", selection: Binding(
+                                    get: { source.id },
+                                    set: { selectedSource = $0 }
+                                )) {
+                                    ForEach(sources, id: \.id) { item in Text(item.name).tag(item.id) }
+                                }
+                                .pickerStyle(.menu)
+                                .help("仅切换官方额度来源；本地 Token 图表仍汇总全部已授权电脑")
+                            } else {
+                                Text("来源 · " + source.name)
+                                    .font(.custom("MiSans-Regular", size: 12)).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                            Spacer(minLength: 0)
+                            if dualHorizons {
+                                Picker("额度周期", selection: $antigravityHorizon) {
+                                    Text("5 小时").tag("5h")
+                                    Text("周额度").tag("weekly")
+                                }
+                                .labelsHidden()
+                                .pickerStyle(.segmented)
+                                .controlSize(.small)
+                                .frame(width: 132)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 17) {
+                            ForEach(displayedWindows) { quota in
+                                UsageQuotaRow(quota: quota, failed: failed, now: context.date)
+                            }
                         }
                     }
                 }
@@ -213,7 +231,11 @@ private struct UsageOfficialQuotaCard: View {
             for quota in source.visibleQuotas(now: now) {
                 var text = quota.displayTitle + "\n" + quota.usedText(now: now, failed: failed) + "（" + quota.remainingText(now: now, failed: failed) + "）\n" + quota.resetText(now: now, failed: failed)
                 if let pace = quota.pace(now: now, failed: failed) {
-                    text += "\n线性基准剩余 " + UsageFormat.percentage(pace.idealRemainingPercent) + " · " + pace.label
+                    if pace.idealRemainingPercent >= 0 {
+                        text += "\n线性基准剩余 " + UsageFormat.percentage(pace.idealRemainingPercent) + " · " + pace.label
+                    } else {
+                        text += "\n" + pace.label
+                    }
                 }
                 if let observed = quota.observedDate { text += "\n记录于 " + UsageViewText.observed(observed) }
                 parts.append(text)
@@ -412,7 +434,7 @@ private struct UsageQuotaRow: View {
                     .fixedSize(horizontal: true, vertical: false)
             }
             .font(.custom("MiSans-Regular", size: 12.5))
-            UsageRemainingBar(value: remaining, stale: old, idealRemaining: pace?.idealRemainingPercent, warningTick: pace?.isWarning == true)
+            UsageRemainingBar(value: remaining, stale: old, idealRemaining: (pace?.idealRemainingPercent ?? -1) >= 0 ? pace?.idealRemainingPercent : nil, warningTick: pace?.isWarning == true)
             HStack(spacing: 6) {
                 Text(quota.usedText(now: now, failed: failed))
                 Text("·")

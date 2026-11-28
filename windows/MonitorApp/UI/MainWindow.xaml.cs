@@ -6635,11 +6635,16 @@ public partial class MainWindow : Window
             };
             if (activeSource is not null)
             {
-                foreach (var q in activeSource.Quotas)
+                var orderedAll = tool == "antigravity"
+                    ? UsageFormatting.OrderAntigravityQuotas(activeSource.Quotas)
+                    : activeSource.Quotas;
+                foreach (var q in orderedAll)
                 {
                     var paceInfo = UsageFormatting.ComputeQuotaPace(q, now);
                     var paceLine = paceInfo is not null
-                        ? $"\n线性基准剩余 {UsageFormatting.Percentage(paceInfo.IdealRemainingPercent)} · {paceInfo.Label}"
+                        ? (paceInfo.IdealRemainingPercent >= 0
+                            ? $"\n线性基准剩余 {UsageFormatting.Percentage(paceInfo.IdealRemainingPercent)} · {paceInfo.Label}"
+                            : $"\n{paceInfo.Label}")
                         : "";
                     lines.Add($"{UsageFormatting.QuotaDisplayTitle(q)}\n已用 {UsageFormatting.Percentage(q.Used)}（剩余 {UsageFormatting.Percentage(q.Remaining)}）\n{UsageFormatting.ResetText(q, now)}{paceLine}");
                 }
@@ -6660,10 +6665,41 @@ public partial class MainWindow : Window
 
         if (activeSource is not null)
         {
+            var allQuotas = tool == "antigravity"
+                ? UsageFormatting.OrderAntigravityQuotas(activeSource.Quotas)
+                : activeSource.Quotas;
+            var dualHorizons = tool == "antigravity" && UsageFormatting.HasDualQuotaHorizons(allQuotas);
+            var horizon = UsageFormatting.NormalizeQuotaHorizon(_controller.ReadUiSettings().AntigravityQuotaHorizon);
+            var displayedQuotas = dualHorizons
+                ? UsageFormatting.FilterQuotasByHorizon(allQuotas, horizon)
+                : allQuotas;
+
+            Border? BuildHorizonToggle()
+            {
+                if (!dualHorizons) return null;
+                var ctrl = UiKit.SegmentedControl(
+                    new[] { ("5h", "5 小时"), ("weekly", "周额度") }
+                        .Select(opt =>
+                        {
+                            var key = opt.Item1;
+                            return (opt.Item2, horizon == key, (Action)(() =>
+                            {
+                                if (horizon == key) return;
+                                var next = _controller.ReadUiSettings();
+                                next.AntigravityQuotaHorizon = key;
+                                _controller.SaveUiSettings(next);
+                                RenderAll(false);
+                            }));
+                        }).ToList(),
+                    equalColumns: false,
+                    compact: true);
+                ctrl.HorizontalAlignment = HorizontalAlignment.Right;
+                return ctrl;
+            }
+
             if (sources.Count > 1)
             {
                 var picker = UiKit.StyledComboBox();
-                picker.Margin = new Thickness(0, 0, 0, 12);
                 foreach (var s in sources)
                 {
                     var item = UiKit.AddComboItem(picker, $"来源 · {s.Name}", s.Id);
@@ -6678,7 +6714,49 @@ public partial class MainWindow : Window
                         RenderAll(false);
                     }
                 };
-                col.Children.Add(picker);
+                if (BuildHorizonToggle() is { } seg)
+                {
+                    var topBar = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+                    topBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    topBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    picker.Margin = new Thickness(0, 0, 10, 0);
+                    Grid.SetColumn(picker, 0);
+                    topBar.Children.Add(picker);
+                    seg.VerticalAlignment = VerticalAlignment.Center;
+                    Grid.SetColumn(seg, 1);
+                    topBar.Children.Add(seg);
+                    col.Children.Add(topBar);
+                }
+                else
+                {
+                    picker.Margin = new Thickness(0, 0, 0, 12);
+                    col.Children.Add(picker);
+                }
+            }
+            else if (BuildHorizonToggle() is { } seg)
+            {
+                var topBar = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+                topBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                topBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var srcLabel = new TextBlock
+                {
+                    Text = $"来源 · {activeSource.Name}",
+                    FontFamily = UiKit.AppFont,
+                    FontSize = 12,
+                    Foreground = UiKit.MutedBrush,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextWrapping = TextWrapping.NoWrap,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    Margin = new Thickness(0, 0, 10, 0)
+                };
+                Grid.SetColumn(srcLabel, 0);
+                topBar.Children.Add(srcLabel);
+
+                seg.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(seg, 1);
+                topBar.Children.Add(seg);
+                col.Children.Add(topBar);
             }
             else
             {
@@ -6687,7 +6765,7 @@ public partial class MainWindow : Window
                 col.Children.Add(srcLabel);
             }
 
-            foreach (var q in activeSource.Quotas)
+            foreach (var q in displayedQuotas)
             {
                 var qRow = new StackPanel { Margin = new Thickness(0, 0, 0, 14) };
                 var l1 = new DockPanel();
@@ -6730,7 +6808,7 @@ public partial class MainWindow : Window
                 barGrid.Children.Add(fill);
                 track.Children.Add(barGrid);
 
-                if (pace is not null)
+                if (pace is not null && pace.IdealRemainingPercent >= 0)
                 {
                     var tickRatio = Math.Clamp(pace.IdealRemainingPercent / 100.0, 0.015, 0.985);
                     var tickGrid = new Grid { IsHitTestVisible = false };
@@ -6755,7 +6833,9 @@ public partial class MainWindow : Window
                 }
 
                 track.ToolTip = pace is not null
-                    ? $"剩余 {UsageFormatting.Percentage(q.Remaining)} · 线性时间基准剩余 {UsageFormatting.Percentage(pace.IdealRemainingPercent)} ({pace.Label})"
+                    ? (pace.IdealRemainingPercent >= 0
+                        ? $"剩余 {UsageFormatting.Percentage(q.Remaining)} · 线性时间基准剩余 {UsageFormatting.Percentage(pace.IdealRemainingPercent)} ({pace.Label})"
+                        : $"剩余 {UsageFormatting.Percentage(q.Remaining)} · {pace.Label}")
                     : null;
                 qRow.Children.Add(track);
 

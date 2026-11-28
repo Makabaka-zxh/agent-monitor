@@ -819,4 +819,34 @@ public class CoreTests
         Assert.Contains("\"images\"", wire);
         Assert.DoesNotContain("ui-only", wire);
     }
+
+    [Fact]
+    public void AntigravityQuotaHorizon_Filters5hVsWeeklyAndDetectsWeeklyCapped5h()
+    {
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_795_800_000);
+        var quotas = new List<UsageQuotaDto>
+        {
+            new() { BucketLabel = "Claude / GPT-OSS", WindowMinutes = 10080, UsedPercent = 100, RemainingPercent = 0, ResetsAt = now.AddDays(4).ToUnixTimeSeconds() },
+            new() { BucketLabel = "Gemini", WindowMinutes = 300, UsedPercent = 4, RemainingPercent = 96, ResetsAt = now.AddHours(4).ToUnixTimeSeconds() },
+            new() { BucketLabel = "Gemini", WindowMinutes = 10080, UsedPercent = 12, RemainingPercent = 88, ResetsAt = now.AddDays(5).ToUnixTimeSeconds() },
+            new() { BucketLabel = "Claude / GPT-OSS", WindowMinutes = 300, UsedPercent = 100, RemainingPercent = 0, ResetsAt = now.AddDays(4).ToUnixTimeSeconds() }
+        };
+
+        var ordered = UsageFormatting.OrderAntigravityQuotas(quotas);
+        Assert.True(UsageFormatting.HasDualQuotaHorizons(ordered));
+
+        var fiveHour = UsageFormatting.FilterQuotasByHorizon(ordered, "5h");
+        Assert.Equal(2, fiveHour.Count);
+        Assert.Equal("Gemini", fiveHour[0].BucketLabel);
+        Assert.Equal("Claude / GPT-OSS", fiveHour[1].BucketLabel);
+
+        var weekly = UsageFormatting.FilterQuotasByHorizon(ordered, "weekly");
+        Assert.Equal(2, weekly.Count);
+        Assert.All(weekly, q => Assert.Equal(10080, q.WindowMinutes));
+
+        var cappedPace = UsageFormatting.ComputeQuotaPace(fiveHour[1], now);
+        Assert.NotNull(cappedPace);
+        Assert.Equal("受周额度限制", cappedPace!.Label);
+        Assert.True(cappedPace.IdealRemainingPercent < 0);
+    }
 }

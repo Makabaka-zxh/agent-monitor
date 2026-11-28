@@ -51,7 +51,9 @@ public final class NativeUsagePage {
             Bundle item = new Bundle();
             if (state.saved.week != null) item.putString("week", state.saved.week.toString());
             if (state.saved.day != null) item.putString("day", state.saved.day.toString());
-            item.putString("source", NativeUsageSelectionPolicy.source(state.saved.source)); saved.putBundle(tool, item);
+            item.putString("source", NativeUsageSelectionPolicy.source(state.saved.source));
+            item.putString("window_mode", NativeUsageSelectionPolicy.windowMode(state.saved.windowMode));
+            saved.putBundle(tool, item);
         }
         return saved;
     }
@@ -60,10 +62,24 @@ public final class NativeUsagePage {
         for (String tool : new String[]{"codex", "claude", "antigravity"}) {
             Bundle item = saved == null ? null : saved.getBundle(tool); if (item == null) continue;
             Selection state = new Selection();
-            state.saved = NativeUsageSelectionPolicy.restore(item.getString("week", ""), item.getString("day", ""), item.getString("source", ""));
+            state.saved = NativeUsageSelectionPolicy.restore(
+                    item.getString("week", ""),
+                    item.getString("day", ""),
+                    item.getString("source", ""),
+                    item.getString("window_mode", preferredWindowMode(tool)));
             selections.put(tool, state);
         }
         render();
+    }
+    private String preferredWindowMode(String tool) {
+        return NativeUsageSelectionPolicy.windowMode(
+                ui.activity.getSharedPreferences("agent_monitor_usage_prefs", 0).getString("horizon:" + tool, "5h"));
+    }
+    private void persistWindowMode(String tool, String mode) {
+        ui.activity.getSharedPreferences("agent_monitor_usage_prefs", 0)
+                .edit()
+                .putString("horizon:" + tool, NativeUsageSelectionPolicy.windowMode(mode))
+                .apply();
     }
     public void update(JSONObject value, boolean busy, boolean failed) {
         this.busy = busy; this.failed = failed;
@@ -137,7 +153,11 @@ public final class NativeUsagePage {
         LocalDate start, today, displayedWeek, displayedDay; boolean hasHistory, hasRecordedHistory; TextView weekName;
         ProviderCard(String tool, JSONObject data) {
             this.tool = tool; this.data = data; Selection found = selections.get(tool);
-            if (found == null) { found = new Selection(); selections.put(tool, found); }
+            if (found == null) {
+                found = new Selection();
+                found.saved.windowMode = preferredWindowMode(tool);
+                selections.put(tool, found);
+            }
             state = found; today = NativeUsagePresentation.today(System.currentTimeMillis()); start = today;
             JSONObject series = data == null ? null : data.optJSONObject("history");
             if (series != null) {
@@ -284,11 +304,31 @@ public final class NativeUsagePage {
                 return;
             }
             quotaView.setVisibility(View.VISIBLE);
+            List<JSONObject> allWindows = visibleWindows(source, now);
+            if ("antigravity".equals(tool)) {
+                allWindows.sort((a, b) -> Integer.compare(antigravityBucketOrder(a), antigravityBucketOrder(b)));
+            }
+            long[] windowMins = new long[allWindows.size()];
+            for (int i = 0; i < allWindows.size(); i++) windowMins[i] = allWindows.get(i).optLong("window_minutes");
+            boolean dualHorizons = "antigravity".equals(tool) && NativeUsageSelectionPolicy.hasDualHorizons(windowMins);
+
             if (source != null) {
                 LinearLayout choices = ui.column(); choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE);
                 TextView choose = ui.quietButton("来源 · " + source.name + (sources.size() > 1 ? "  ▾" : ""),
                         () -> { if (sources.size() > 1) { state.pickerOpen = !state.pickerOpen; choices.setVisibility(state.pickerOpen ? View.VISIBLE : View.GONE); } else help.show("额度来源", source.name + "\n\n额度来自这台电脑登录的账号\n不同电脑的百分比不合并\n\n" + windowsHelp(source)); });
-                choose.setTextSize(13); choose.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); choose.setPadding(0, ui.dp(10), 0, ui.dp(10)); quotaArea.addView(choose, wrap());
+                choose.setTextSize(13); choose.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); choose.setPadding(0, ui.dp(8), 0, ui.dp(8));
+                if (dualHorizons && sources.size() <= 1) {
+                    LinearLayout topRow = ui.row();
+                    topRow.setGravity(Gravity.CENTER_VERTICAL);
+                    topRow.addView(choose, new LinearLayout.LayoutParams(0, -2, 1));
+                    LinearLayout switcher = buildHorizonSwitcher();
+                    LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(-2, -2);
+                    swLp.setMarginStart(ui.dp(8));
+                    topRow.addView(switcher, swLp);
+                    quotaArea.addView(topRow, wrap());
+                } else {
+                    quotaArea.addView(choose, wrap());
+                }
                 if (sources.size() > 1) for (Source item : sources) {
                     TextView choice = ui.quietButton((item.key.equals(state.saved.source) ? "✓  " : "") + item.name,
                             () -> { state.saved.source = item.key; state.pickerOpen = false; renderQuotas(); });
@@ -296,15 +336,68 @@ public final class NativeUsagePage {
                     if (item.key.equals(state.saved.source)) { choice.setTextColor(ui.accent); choice.setBackground(ui.ripple(ui.soft, 10)); }
                     choices.addView(choice, wrap());
                 }
-                quotaArea.addView(choices, wrap()); quotaArea.addView(ui.space(12));
+                quotaArea.addView(choices, wrap());
+                if (dualHorizons && sources.size() > 1) {
+                    quotaArea.addView(ui.space(8));
+                    quotaArea.addView(buildHorizonSwitcher(), new LinearLayout.LayoutParams(-2, -2));
+                }
+                quotaArea.addView(ui.space(12));
             }
-            List<JSONObject> windows = visibleWindows(source, now);
+            List<JSONObject> windows = new ArrayList<>();
+            if (dualHorizons) {
+                for (JSONObject w : allWindows) {
+                    if (NativeUsageSelectionPolicy.matchesHorizon(w.optLong("window_minutes"), state.saved.windowMode)) {
+                        windows.add(w);
+                    }
+                }
+            }
+            if (windows.isEmpty()) windows = allWindows;
             for (int i = 0; i < windows.size(); i++) {
                 if (i > 0) quotaArea.addView(ui.space(24));
                 QuotaRow row = new QuotaRow(this, quotaLabel(windows.get(i)), windows.get(i));
                 quotaArea.addView(row.view, wrap()); quotas.add(row); row.update(now);
             }
         }
+        private LinearLayout buildHorizonSwitcher() {
+            LinearLayout pill = ui.row();
+            pill.setGravity(Gravity.CENTER_VERTICAL);
+            pill.setBackground(ui.bordered(ui.bg, 12));
+            pill.setPadding(ui.dp(3), ui.dp(3), ui.dp(3), ui.dp(3));
+            String current = NativeUsageSelectionPolicy.windowMode(state.saved.windowMode);
+            String[][] tabs = {{"5h", "5 小时"}, {"weekly", "周额度"}};
+            for (int i = 0; i < tabs.length; i++) {
+                final String key = tabs[i][0];
+                final String text = tabs[i][1];
+                boolean active = key.equals(current);
+                TextView tab = ui.text(text, 12, active);
+                tab.setSingleLine(true);
+                tab.setGravity(Gravity.CENTER);
+                tab.setTextColor(active ? ui.text : ui.muted);
+                tab.setPadding(ui.dp(11), ui.dp(5), ui.dp(11), ui.dp(5));
+                tab.setBackground(active ? ui.rounded(ui.soft, 9) : ui.ripple(android.graphics.Color.TRANSPARENT, 9));
+                tab.setClickable(true);
+                tab.setFocusable(true);
+                tab.setContentDescription("切换查看 " + text);
+                tab.setAccessibilityDelegate(NativeUi.buttonAccessibility());
+                tab.setOnClickListener(v -> {
+                    if (!key.equals(state.saved.windowMode)) {
+                        state.saved.windowMode = key;
+                        persistWindowMode(tool, key);
+                        renderQuotas();
+                    }
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                if (i > 0) lp.setMarginStart(ui.dp(2));
+                pill.addView(tab, lp);
+            }
+            return pill;
+        }
+    }
+    private static int antigravityBucketOrder(JSONObject quota) {
+        String label = quota == null ? "" : quota.optString("bucket_label", "");
+        if (label.startsWith("Gemini")) return 0;
+        if (label.startsWith("Claude")) return 1;
+        return 2;
     }
     private List<JSONObject> visibleWindows(Source source, long now) {
         Map<String, JSONObject> best = new LinkedHashMap<>(); int ordinal = 0;

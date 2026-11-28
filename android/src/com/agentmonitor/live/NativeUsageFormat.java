@@ -202,6 +202,9 @@ public final class NativeUsageFormat {
         if (usedVal == null) usedVal = 100.0 - remVal;
         long windowMs = windowMinutes * 60_000L;
         long remMs = resetsMillis - nowMillis;
+        if (remVal <= 0.5 && remMs > windowMs && windowMinutes <= 360) {
+            return new QuotaPace("exhausted", -1, -1, 0, 0, "周额度已用尽，5 小时窗口暂停生效", "受周额度限制");
+        }
         if (remMs <= 0 || remMs >= windowMs) return QuotaPace.UNAVAILABLE;
         long elapsedMs = windowMs - remMs;
         double idealRem = Math.max(0.0, Math.min(100.0, (remMs * 100.0) / windowMs));

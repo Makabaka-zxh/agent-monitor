@@ -490,3 +490,84 @@ def test_antigravity_official_quota_scrubs_pii_handles_proto3_zero_and_matches_a
     finally:
         ledger.close()
 
+
+def test_antigravity_retrieve_user_quota_summary_emits_both_5h_and_weekly_windows_and_handles_disabled_5h(tmp_path):
+    from agent_monitor.antigravity_quota import _scrub_quota_summary, read_antigravity_quota
+
+    five_h_reset = _iso(NOW + timedelta(hours=4, minutes=20))
+    gemini_weekly_reset = _iso(NOW + timedelta(days=5, hours=7))
+    claude_weekly_reset = _iso(NOW + timedelta(days=4, hours=13))
+
+    raw_summary = {
+        "userEmail": "never.leak@example.com",
+        "response": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "description": "Models within this group: Gemini 4 Neon, Gemini 4 Carbon",
+                    "buckets": [
+                        {
+                            "bucketId": "gemini-weekly",
+                            "window": "weekly",
+                            "remainingFraction": 0.933,
+                            "resetTime": gemini_weekly_reset,
+                        },
+                        {
+                            "bucketId": "gemini-5h",
+                            "window": "5h",
+                            "remainingFraction": 0.977,
+                            "resetTime": five_h_reset,
+                        },
+                    ],
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {
+                            "bucketId": "3p-weekly",
+                            "window": "weekly",
+                            "remainingFraction": 0,
+                            "resetTime": claude_weekly_reset,
+                        },
+                        {
+                            "bucketId": "3p-5h",
+                            "window": "5h",
+                            "remainingFraction": 1,
+                            "disabled": True,
+                        },
+                    ],
+                },
+            ]
+        },
+    }
+
+    scrubbed = _scrub_quota_summary(raw_summary)
+    assert scrubbed is not None
+    assert "never.leak@example.com" not in json.dumps(scrubbed)
+
+    quota_payload = read_antigravity_quota(
+        now=NOW,
+        summary_fetcher=lambda: scrubbed,
+        status_fetcher=lambda: None,
+    )
+    assert quota_payload is not None
+    assert len(quota_payload["quota_windows"]) == 4
+
+    ledger = UsageLedger(tmp_path / "dual_quota.sqlite3")
+    try:
+        res = ledger.ingest_antigravity_quota(quota_payload, now=NOW)
+        assert res == {"accepted": 4, "rejected": 0}
+        summary = ledger.summary(now=NOW)
+        ag = next(p for p in summary["providers"] if p["tool"] == "antigravity")
+        assert len(ag["quotas"]) == 4
+
+        by_pair = {(q["bucket_label"], q["window_minutes"]): q for q in ag["quotas"]}
+        assert by_pair[("Gemini", 300)]["used_percent"] == 2.3
+        assert by_pair[("Gemini", 10080)]["used_percent"] == 6.7
+        assert by_pair[("Claude / GPT-OSS", 10080)]["used_percent"] == 100.0
+        # Disabled 5h bucket reflects weekly cap (100% used, resets with weekly window) while keeping 300m slot!
+        assert by_pair[("Claude / GPT-OSS", 300)]["used_percent"] == 100.0
+        assert by_pair[("Claude / GPT-OSS", 300)]["resets_at"] == by_pair[("Claude / GPT-OSS", 10080)]["resets_at"]
+    finally:
+        ledger.close()
+
