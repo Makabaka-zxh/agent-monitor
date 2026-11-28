@@ -3,7 +3,7 @@
 ## 1.2.1 — 2026-11-28
 
 - 用量页 Antigravity 官方额度新增 **`5 小时 / 周额度`** 双周期切换与完整读取（Android、Windows、macOS + 服务端／远端连接器）：
-  - 电脑端优先通过本机 Antigravity Language Server 的 `RetrieveUserQuotaSummary` 接口同时读取各模型组（`Gemini` 与 `Claude / GPT-OSS`）的 **5 小时滚动额度**与 **每周总额度**（旧版环境自动回退 `GetUserStatus`），并准确识别因周额度耗尽而暂停生效的 5 小时窗口（提示 `受周额度限制` 与周重置时间，不再误显示为剩余 `100%`）。
+  - 电脑端支持 Antigravity `2.36+` 独立守护进程发现文件（`~/.gemini/antigravity/daemon/*.json`）及旧版进程命令行发现，优先通过 `RetrieveUserQuotaSummary` 接口同时读取各模型组（`Gemini` 与 `Claude / GPT-OSS`）的 **5 小时滚动额度**与 **每周总额度**（旧版自动回退 `GetUserStatus`），并准确识别因周额度耗尽而暂停生效的 5 小时窗口（提示 `受周额度限制` 与周重置时间，不再误显示为剩余 `100%`）。
   - Android、Windows 与 macOS 用量页的 Antigravity 官方额度卡片新增 `5 小时 / 周额度` 分段胶囊切换器（自动记忆上次所选视图，并在「官方额度说明」弹窗中汇总全部周期明细）。
 
 ## 1.2.0 — 2026-11-27

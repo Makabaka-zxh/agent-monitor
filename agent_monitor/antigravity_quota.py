@@ -130,8 +130,9 @@ def _discover_windows() -> list[tuple[int, str, list[int]]]:
     table_size = w.DWORD(0)
     iphlp.GetExtendedTcpTable(None, ctypes.byref(table_size), False, 2, 3, 0)
     if 0 < table_size.value <= 4 * 1024 * 1024:
-        buf = ctypes.create_string_buffer(table_size.value)
-        if iphlp.GetExtendedTcpTable(buf, ctypes.byref(table_size), False, 2, 3, 0) == 0:
+        alloc = w.DWORD(min(4 * 1024 * 1024, table_size.value + 4096))
+        buf = ctypes.create_string_buffer(alloc.value)
+        if iphlp.GetExtendedTcpTable(buf, ctypes.byref(alloc), False, 2, 3, 0) == 0:
             raw = buf.raw
             count = struct.unpack_from("<I", raw, 0)[0]
             max_rows = min(count, (len(raw) - 4) // 24)
@@ -148,6 +149,91 @@ def _discover_windows() -> list[tuple[int, str, list[int]]]:
         ordered = _ordered_ports(ports_by_pid.get(pid, []), cmd)
         if ordered:
             results.append((pid, csrf_match.group(1), ordered))
+    return results
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        from ctypes import wintypes as w
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+        k32.OpenProcess.restype = w.HANDLE
+        k32.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+        k32.GetExitCodeProcess.restype = w.BOOL
+        k32.CloseHandle.argtypes = [w.HANDLE]
+        k32.CloseHandle.restype = w.BOOL
+        proc = k32.OpenProcess(0x1000, False, pid)
+        if not proc:
+            return False
+        try:
+            code = w.DWORD(0)
+            return bool(k32.GetExitCodeProcess(proc, ctypes.byref(code))) and code.value == 259
+        finally:
+            k32.CloseHandle(proc)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _discover_daemon_files(
+    antigravity_home: Path | str | None = None,
+    *,
+    pid_alive: Callable[[int], bool] = _pid_alive,
+) -> list[tuple[int, str, list[int]]]:
+    """Read Antigravity 2.36+ standalone daemon discovery files (~/.gemini/antigravity/daemon/*.json)."""
+    results: list[tuple[int, str, list[int]]] = []
+    if antigravity_home is None:
+        env_addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "").strip()
+        env_csrf = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "").strip()
+        if env_addr and re.fullmatch(r"[A-Za-z0-9_-]{8,256}", env_csrf):
+            host, sep, port_str = env_addr.rpartition(":")
+            if sep and host in ("127.0.0.1", "localhost") and port_str.isdigit():
+                port = int(port_str)
+                if 0 < port <= 65535:
+                    results.append((0, env_csrf, [port]))
+
+    base = Path(antigravity_home) if antigravity_home is not None else (Path.home() / ".gemini" / "antigravity")
+    daemon_dir = base / "daemon"
+    try:
+        if base.is_symlink() or not daemon_dir.is_dir() or daemon_dir.is_symlink():
+            return results
+        candidates: list[tuple[float, Path]] = []
+        for entry in daemon_dir.iterdir():
+            try:
+                if entry.suffix.lower() != ".json" or entry.is_symlink() or not entry.is_file():
+                    continue
+                st = entry.stat()
+                if 1 <= st.st_size <= 16384:
+                    candidates.append((st.st_mtime, entry))
+            except OSError:
+                continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _mtime, path in candidates[:12]:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, UnicodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            pid = raw.get("pid")
+            csrf = raw.get("csrfToken")
+            if type(pid) is not int or pid <= 0 or not pid_alive(pid):
+                continue
+            if not isinstance(csrf, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,256}", csrf):
+                continue
+            ports: list[int] = []
+            for key in ("httpsPort", "httpPort", "port"):
+                val = raw.get(key)
+                if type(val) is int and 0 < val <= 65535 and val not in ports:
+                    ports.append(val)
+            if ports:
+                results.append((pid, csrf, ports))
+    except OSError:
+        return results
     return results
 
 
@@ -246,11 +332,25 @@ def _discover_posix() -> list[tuple[int, str, list[int]]]:
     return results
 
 
-def discover_local_language_servers() -> list[tuple[int, str, list[int]]]:
+def discover_local_language_servers(antigravity_home: Path | str | None = None) -> list[tuple[int, str, list[int]]]:
+    found: list[tuple[int, str, list[int]]] = []
+    seen_pids: set[int] = set()
     try:
-        return _discover_windows() if os.name == "nt" else _discover_posix()
+        for pid, csrf, ports in _discover_daemon_files(antigravity_home):
+            found.append((pid, csrf, ports))
+            if pid > 0:
+                seen_pids.add(pid)
     except Exception:
-        return []
+        pass
+    try:
+        proc_list = _discover_windows() if os.name == "nt" else _discover_posix()
+        for pid, csrf, ports in proc_list:
+            if pid not in seen_pids:
+                found.append((pid, csrf, ports))
+                seen_pids.add(pid)
+    except Exception:
+        pass
+    return found
 
 
 def _scrub_cascade_config(raw: dict) -> dict | None:
@@ -364,12 +464,13 @@ def _call_local_rpc(
     tls.verify_mode = ssl.CERT_NONE
     https_opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=tls))
     http_opener = urllib.request.build_opener(_NoRedirect())
-    for _pid, csrf, ports in servers[:4]:
+    for _pid, csrf, ports in servers[:6]:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Connect-Protocol-Version": "1",
             "X-Codeium-Csrf-Token": csrf,
+            "x-antigravity-csrf-token": csrf,
         }
         for port in ports[:8]:
             if not (0 < port <= 65535):
@@ -610,15 +711,21 @@ def read_antigravity_quota(
         raise ValueError("now must be timezone-aware")
 
     use_live_default = summary_fetcher is None and status_fetcher is fetch_antigravity_user_status
+    ag_dir: Path | None = None
     if use_live_default:
         ag_dir = Path(antigravity_home) if antigravity_home is not None else (Path.home() / ".gemini" / "antigravity")
         if not ag_dir.is_dir():
             return None
+        status_fetcher = lambda: fetch_antigravity_user_status(discover=lambda: discover_local_language_servers(ag_dir))
 
     now_epoch = int(current.timestamp())
     observed_iso = current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-    active_summary_fetcher = fetch_antigravity_quota_summary if use_live_default else summary_fetcher
+    active_summary_fetcher = (
+        (lambda: fetch_antigravity_quota_summary(discover=lambda: discover_local_language_servers(ag_dir)))
+        if use_live_default
+        else summary_fetcher
+    )
     summary_windows: list[dict] = []
     if active_summary_fetcher is not None:
         summary_data = active_summary_fetcher()

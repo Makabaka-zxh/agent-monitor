@@ -571,3 +571,26 @@ def test_antigravity_retrieve_user_quota_summary_emits_both_5h_and_weekly_window
     finally:
         ledger.close()
 
+
+def test_antigravity_236_standalone_daemon_json_discovery_filters_dead_pids(tmp_path):
+    from agent_monitor.antigravity_quota import _discover_daemon_files
+
+    ag_home = tmp_path / "antigravity"
+    daemon_dir = ag_home / "daemon"
+    daemon_dir.mkdir(parents=True)
+
+    dead_file = daemon_dir / "hub_50001.json"
+    dead_file.write_text(
+        json.dumps({"pid": 999991, "httpsPort": 50000, "httpPort": 50001, "lsVersion": "2.36.0", "csrfToken": "dead_token_12345"}),
+        encoding="utf-8",
+    )
+    live_file = daemon_dir / "hub_54960.json"
+    live_file.write_text(
+        json.dumps({"pid": 42424, "httpsPort": 54959, "httpPort": 54960, "lsVersion": "2.36.0", "csrfToken": "live_token_67890"}),
+        encoding="utf-8",
+    )
+
+    found = _discover_daemon_files(ag_home, pid_alive=lambda pid: pid == 42424)
+    assert found == [(42424, "live_token_67890", [54959, 54960])]
+
+
